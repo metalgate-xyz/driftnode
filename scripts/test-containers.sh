@@ -1,0 +1,203 @@
+#!/usr/bin/env bash
+# test-containers.sh - Realistic end-to-end test of driftnode Phase 0 in
+# isolated Docker containers, managed via docker compose.
+#
+# Five nodes (two seeds in different regions, three fresh users) discover
+# each other through bootstrap, crawling, and peer exchange, then sync feeds
+# over real tailcat tunnels.
+#
+# Discovery chain:
+#   seed-eu, seed-us: genesis peers, follow each other, post.
+#   carol: bootstraps seed-eu only. Discovers seed-us through peer exchange
+#         (seed-eu relays seed-us's token) and the crawler (walks seed-eu's
+#         follow graph). NOT through a direct bootstrap dial.
+#   dave: bootstraps seed-us only. Discovers seed-eu the same way.
+#   eve: bootstraps seed-eu. Discovers others through peer exchange + crawl.
+#   dave discovers carol via peer exchange (seed-eu relays carol's token).
+#   dave follows carol. carol follows dave. Both see each other's posts.
+#
+# Requires Docker (or OrbStack) and AF_ROUTE support in the containers.
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+cd "$REPO_ROOT"
+
+PASS=0; FAIL=0
+ok()  { printf "  %-55s PASS\n" "$1"; PASS=$((PASS+1)); }
+bad() { printf "  %-55s FAIL: %s\n" "$1" "$2"; FAIL=$((FAIL+1)); }
+contains() { echo "$1" | grep -qF "$2"; }
+
+cleanup() {
+  printf "\n===== DAEMON LOGS =====\n"
+  for c in seed-eu seed-us carol dave eve; do dumplog "$c"; done
+  docker compose down --remove-orphans --volumes 2>/dev/null || true
+  rm -f "$REPO_ROOT/bootstrap-eu.yaml" "$REPO_ROOT/bootstrap-us.yaml"
+}
+trap cleanup EXIT
+
+# Run a driftnode command inside a container, capture stdout+stderr.
+dn()  { docker exec "$1" driftnode --db /data/node.db "${@:2}" 2>&1; }
+# Run a driftnode command inside a container, suppress output, return exit code.
+dnq() { docker exec "$1" driftnode --db /data/node.db "${@:2}" >/dev/null 2>&1; }
+
+# Dump a container's daemon log.
+dumplog() { echo "--- $1 daemon.log ---"; docker exec "$1" cat /data/daemon.log 2>/dev/null || echo "(no log)"; }
+
+# Start the daemon inside a container, logging to /data/daemon.log.
+start_daemon() {
+  local container="$1"; shift
+  docker exec -d "$container" sh -c "driftnode --db /data/node.db daemon --foreground $* > /data/daemon.log 2>&1"
+}
+
+# Create placeholder bootstrap files so the bind mounts exist at container
+# start. Real content is written after seed tokens are known.
+touch "$REPO_ROOT/bootstrap-eu.yaml" "$REPO_ROOT/bootstrap-us.yaml"
+
+printf "Building Docker image...\n"
+docker compose build --quiet || { printf "BUILD FAILED\n"; exit 1; }
+
+printf "Starting containers...\n"
+docker compose up -d --quiet-pull
+sleep 2
+
+printf "\n===== Phase 0: Seed initialization =====\n"
+SEED_EU_ID=$(dn seed-eu init -p seedpass)
+SEED_US_ID=$(dn seed-us init -p seedpass)
+[[ "$SEED_EU_ID" == driftnode:* ]] && ok "S1 seed-eu init" || bad "S1 seed-eu init" "$SEED_EU_ID"
+[[ "$SEED_US_ID" == driftnode:* ]] && ok "S1 seed-us init" || bad "S1 seed-us init" "$SEED_US_ID"
+
+dnq seed-eu follow -p seedpass "$SEED_US_ID" && ok "S2 seed-eu follows seed-us" || bad "S2 seed-eu follows seed-us" "failed"
+dnq seed-us follow -p seedpass "$SEED_EU_ID" && ok "S2 seed-us follows seed-eu" || bad "S2 seed-us follows seed-eu" "failed"
+
+dnq seed-eu post -p seedpass "hello from eu" && ok "S3 seed-eu posts" || bad "S3 seed-eu posts" "failed"
+dnq seed-us post -p seedpass "hello from us" && ok "S3 seed-us posts" || bad "S3 seed-us posts" "failed"
+
+# Start seed daemons with persistent keys.
+start_daemon seed-eu --key /data/tc.key
+start_daemon seed-us --key /data/tc.key
+sleep 5
+
+SEED_EU_TOKEN=$(dn seed-eu peers token)
+SEED_US_TOKEN=$(dn seed-us peers token)
+[[ "$SEED_EU_TOKEN" == tc* ]] && ok "S4 seed-eu token" || bad "S4 seed-eu token" "$SEED_EU_TOKEN"
+[[ "$SEED_US_TOKEN" == tc* ]] && ok "S4 seed-us token" || bad "S4 seed-us token" "$SEED_US_TOKEN"
+
+dnq seed-eu peers add "$SEED_US_TOKEN" && ok "S5 seed-eu dials seed-us" || bad "S5 seed-eu dials seed-us" "failed"
+dnq seed-us peers add "$SEED_EU_TOKEN" && ok "S5 seed-us dials seed-eu" || bad "S5 seed-us dials seed-eu" "failed"
+sleep 5
+
+printf "\n===== Phase 0.5: Bootstrap files =====\n"
+cat > "$REPO_ROOT/bootstrap-eu.yaml" <<EOF
+version: 1
+signature: ""
+seed_peers:
+  - token: "$SEED_EU_TOKEN"
+    kind: native_peer
+crawl_seeds:
+  - "$SEED_EU_ID"
+  - "$SEED_US_ID"
+EOF
+cat > "$REPO_ROOT/bootstrap-us.yaml" <<EOF
+version: 1
+signature: ""
+seed_peers:
+  - token: "$SEED_US_TOKEN"
+    kind: native_peer
+crawl_seeds:
+  - "$SEED_EU_ID"
+  - "$SEED_US_ID"
+EOF
+ok "B1 bootstrap files created"
+printf "\n===== Phase 1: Fresh nodes bootstrap =====\n"
+CAROL_ID=$(dn carol init -p carolpass)
+DAVE_ID=$(dn dave init -p davepass)
+EVE_ID=$(dn eve init -p evepass)
+[[ "$CAROL_ID" == driftnode:* ]] && ok "F1 carol init" || bad "F1 carol init" "$CAROL_ID"
+[[ "$DAVE_ID" == driftnode:* ]] && ok "F1 dave init" || bad "F1 dave init" "$DAVE_ID"
+[[ "$EVE_ID" == driftnode:* ]] && ok "F1 eve init" || bad "F1 eve init" "$EVE_ID"
+
+start_daemon carol --bootstrap /bootstrap/bootstrap.yaml
+start_daemon dave --bootstrap /bootstrap/bootstrap.yaml
+start_daemon eve --bootstrap /bootstrap/bootstrap.yaml
+sleep 10
+
+CAROL_FEED=$(dn carol feed)
+contains "$CAROL_FEED" "hello from eu" && ok "P1.1 carol sees seed-eu post (bootstrap auto-dial)" || bad "P1.1 carol sees seed-eu" "$CAROL_FEED"
+
+DAVE_FEED=$(dn dave feed)
+contains "$DAVE_FEED" "hello from us" && ok "P1.2 dave sees seed-us post (bootstrap auto-dial)" || bad "P1.2 dave sees seed-us" "$DAVE_FEED"
+
+EVE_FEED=$(dn eve feed)
+contains "$EVE_FEED" "hello from eu" && ok "P1.3 eve sees seed-eu post (bootstrap auto-dial)" || bad "P1.3 eve sees seed-eu" "$EVE_FEED"
+
+printf "\n===== Phase 2: Cross-seed discovery (peer exchange + crawl) =====\n"
+# Carol bootstrapped only seed-eu. She discovers seed-us through peer exchange
+# (seed-eu relays seed-us's token during sync) and dials it. The crawler walks
+# seed-eu's follow graph and fetches seed-us's ProfileLog. Trigger sync --now
+# to force a sync round (which also triggers a crawl pass).
+dnq carol sync --now
+dnq dave sync --now
+sleep 15
+
+CAROL_FEED2=$(dn carol feed)
+contains "$CAROL_FEED2" "hello from us" && ok "P2.1 carol discovers seed-us (not in her bootstrap)" || bad "P2.1 carol discovers seed-us" "$CAROL_FEED2"
+
+DAVE_FEED2=$(dn dave feed)
+contains "$DAVE_FEED2" "hello from eu" && ok "P2.2 dave discovers seed-eu (not in his bootstrap)" || bad "P2.2 dave discovers seed-eu" "$DAVE_FEED2"
+
+printf "\n===== Phase 3: Peer exchange between fresh nodes =====\n"
+# Dave discovers carol through peer exchange (seed-eu relays carol's token).
+dnq dave follow -p davepass "$CAROL_ID"
+dnq carol post -p carolpass "carol's first post"
+dnq dave sync --now
+sleep 10
+DAVE_FEED3=$(dn dave feed)
+contains "$DAVE_FEED3" "carol's first post" && ok "P3.1 dave sees carol's post (followed)" || bad "P3.1 dave sees carol" "$DAVE_FEED3"
+
+printf "\n===== Phase 4: Bidirectional follow =====\n"
+dnq carol follow -p carolpass "$DAVE_ID"
+dnq dave post -p davepass "dave posts here"
+dnq carol sync --now
+sleep 10
+CAROL_FEED3=$(dn carol feed)
+contains "$CAROL_FEED3" "dave posts here" && ok "P4.1 carol sees dave's post (followed)" || bad "P4.1 carol sees dave" "$CAROL_FEED3"
+
+printf "\n===== Phase 5: Eve discovers the network =====\n"
+dnq eve post -p evepass "eve checking in"
+dnq eve follow -p evepass "$CAROL_ID"
+dnq eve sync --now
+sleep 10
+dnq carol follow -p carolpass "$EVE_ID"
+dnq carol sync --now
+sleep 10
+CAROL_FEED4=$(dn carol feed)
+contains "$CAROL_FEED4" "eve checking in" && ok "P5.1 carol sees eve's post" || bad "P5.1 carol sees eve" "$CAROL_FEED4"
+
+printf "\n===== Phase 6: Persistent key stability =====\n"
+SEED_EU_TOKEN_BEFORE=$(dn seed-eu peers token)
+docker compose stop seed-eu 2>/dev/null
+sleep 2
+docker compose start seed-eu 2>/dev/null
+sleep 2
+start_daemon seed-eu --key /data/tc.key
+sleep 5
+SEED_EU_TOKEN_AFTER=$(dn seed-eu peers token)
+[[ "$SEED_EU_TOKEN_BEFORE" == "$SEED_EU_TOKEN_AFTER" ]] && ok "P6.1 seed-eu token stable across restart" || bad "P6.1 token stable" "before: $SEED_EU_TOKEN_BEFORE after: $SEED_EU_TOKEN_AFTER"
+
+printf "\n===== Phase 7: Idempotency =====\n"
+CAROL_COUNT_BEFORE=$(dn carol feed | wc -l | tr -d ' ')
+dnq carol sync --now
+sleep 5
+CAROL_COUNT_AFTER=$(dn carol feed | wc -l | tr -d ' ')
+[[ "$CAROL_COUNT_BEFORE" == "$CAROL_COUNT_AFTER" ]] && ok "P7.1 idempotent re-sync" || bad "P7.1 idempotent" "before: $CAROL_COUNT_BEFORE after: $CAROL_COUNT_AFTER"
+
+printf "\n===== Phase 8: Late post propagation =====\n"
+dnq carol post -p carolpass "carol late post"
+dnq dave sync --now
+sleep 10
+DAVE_FEED4=$(dn dave feed)
+contains "$DAVE_FEED4" "carol late post" && ok "P8.1 dave sees carol's late post" || bad "P8.1 dave sees late post" "$DAVE_FEED4"
+
+printf "\n===== TOTAL: %d passed, %d failed =====\n" "$PASS" "$FAIL"
+[[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

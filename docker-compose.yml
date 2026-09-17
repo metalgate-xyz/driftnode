@@ -1,0 +1,52 @@
+services:
+  seed-eu:
+    build: .
+    cap_add: [NET_ADMIN]
+    entrypoint: ["sleep", "infinity"]
+    container_name: seed-eu
+    volumes:
+      - seed-eu-data:/data
+      - ./bootstrap-eu.yaml:/bootstrap/bootstrap.yaml:ro
+
+  seed-us:
+    build: .
+    cap_add: [NET_ADMIN]
+    entrypoint: ["sleep", "infinity"]
+    container_name: seed-us
+    volumes:
+      - seed-us-data:/data
+      - ./bootstrap-us.yaml:/bootstrap/bootstrap.yaml:ro
+
+  carol:
+    build: .
+    cap_add: [NET_ADMIN]
+    entrypoint: ["sleep", "infinity"]
+    container_name: carol
+    volumes:
+      - carol-data:/data
+      - ./bootstrap-eu.yaml:/bootstrap/bootstrap.yaml:ro
+
+  dave:
+    build: .
+    cap_add: [NET_ADMIN]
+    entrypoint: ["sleep", "infinity"]
+    container_name: dave
+    volumes:
+      - dave-data:/data
+      - ./bootstrap-us.yaml:/bootstrap/bootstrap.yaml:ro
+
+  eve:
+    build: .
+    cap_add: [NET_ADMIN]
+    entrypoint: ["sleep", "infinity"]
+    container_name: eve
+    volumes:
+      - eve-data:/data
+      - ./bootstrap-eu.yaml:/bootstrap/bootstrap.yaml:ro
+
+volumes:
+  seed-eu-data:
+  seed-us-data:
+  carol-data:
+  dave-data:
+  eve-data:

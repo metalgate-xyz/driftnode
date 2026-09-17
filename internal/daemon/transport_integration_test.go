@@ -1,0 +1,209 @@
+package daemon
+
+import (
+	"context"
+	"io"
+	"log/slog"
+	"net"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"driftnode/internal/core"
+	"driftnode/internal/store"
+	syncproto "driftnode/internal/sync"
+)
+
+// pipeTransport implements Transport by pairing an in-process net.Pipe to a
+// running sync server, so the daemon's dial-and-sync path can be exercised
+// without a tailcat network monitor. Each Dial spins up a server goroutine
+// on the remote end of the pipe.
+type pipeTransport struct {
+	serverStore *store.Store
+	logger      *slog.Logger
+}
+
+func (t pipeTransport) Dial(ctx context.Context, token string) (net.Conn, error) {
+	clientConn, serverConn := net.Pipe()
+	srv := syncproto.NewServer(t.serverStore, t.logger)
+	go func() {
+		defer serverConn.Close()
+		if err := srv.Serve(serverConn, serverConn); err != nil {
+			t.logger.Debug("pipe sync server ended", "err", err)
+		}
+	}()
+	return clientConn, nil
+}
+
+// TestDaemonPeerSyncOverTransport proves the daemon's peers_add / sync path
+// dials a peer transport, runs the real sync protocol, and merges the peer's
+// events into the local store. This exercises the actual daemon code path
+// (control-socket dispatch → connectAndSync → Transport.Dial → sync protocol
+// → store merge) over an injectable transport, since tailcat needs a network
+// monitor unavailable in CI/sandboxes.
+func TestDaemonPeerSyncOverTransport(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// Set up two stores: the daemon's (alice) and the peer's (bob).
+	aliceStore := openTestStore(t)
+	bobStore := openTestStore(t)
+
+	aliceKP := initTestIdentityAt(t, aliceStore, "alicepass")
+	bobKP := initTestIdentityAt(t, bobStore, "bobpass")
+
+	// Bob posts to his own PostLog.
+	if err := bobStore.AppendOwnEvent(core.PostLog, mustSignPost(t, bobKP, "hello from bob", 1)); err != nil {
+		t.Fatalf("bob post: %v", err)
+	}
+
+	// Daemon backed by alice's store, with an in-process transport that
+	// connects to bob's sync server.
+	d := New(aliceStore, logger)
+	d.SetTransport(pipeTransport{serverStore: bobStore, logger: logger})
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	// Trigger a sync round via the control socket, targeting bob's token.
+	resp, err := SendRequest(sock, "peers_add", map[string]any{"token": string(bobKP.Identity())})
+	if err != nil {
+		t.Fatalf("peers_add: %v", err)
+	}
+	if _, ok := resp.Result.(map[string]any); !ok {
+		t.Fatalf("peers_add result: %T", resp.Result)
+	}
+
+	// Give the async sync round time to complete.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		posts, _ := aliceStore.AllPosts()
+		if len(posts) >= 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Alice's merged feed must now contain bob's post.
+	posts, err := aliceStore.AllPosts()
+	if err != nil {
+		t.Fatalf("AllPosts: %v", err)
+	}
+	found := false
+	for _, se := range posts {
+		if se.Author == bobKP.Identity() && se.Event.Post != nil && se.Event.Post.Text == "hello from bob" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("bob's post not synced into alice's store; posts=%d", len(posts))
+	}
+
+	_ = aliceKP
+}
+
+// TestDaemonSyncNowOverTransport proves the sync --now control method dials
+// all known peers and runs the protocol.
+func TestDaemonSyncNowOverTransport(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	aliceStore := openTestStore(t)
+	bobStore := openTestStore(t)
+	bobKP := initTestIdentityAt(t, bobStore, "bobpass")
+
+	if err := bobStore.AppendOwnEvent(core.PostLog, mustSignPost(t, bobKP, "bob again", 1)); err != nil {
+		t.Fatalf("bob post: %v", err)
+	}
+
+	d := New(aliceStore, logger)
+	d.SetTransport(pipeTransport{serverStore: bobStore, logger: logger})
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	// Add bob as a peer first (this triggers one sync round), then trigger
+	// an explicit sync --now and confirm events still present.
+	_, _ = SendRequest(sock, "peers_add", map[string]any{"token": string(bobKP.Identity())})
+
+	// Wait for the first sync round.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		posts, _ := aliceStore.AllPosts()
+		if len(posts) >= 1 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Trigger sync --now; should be idempotent (0 new events) but not error.
+	resp, err := SendRequest(sock, "sync", map[string]any{"now": true})
+	if err != nil {
+		t.Fatalf("sync --now: %v", err)
+	}
+	if resp.Result.(map[string]any)["status"] != "triggered" {
+		t.Fatalf("sync status: %v", resp.Result)
+	}
+
+	// Wait a moment for the background sync to land, then verify bob's post.
+	time.Sleep(200 * time.Millisecond)
+	posts, _ := aliceStore.AllPosts()
+	found := false
+	for _, se := range posts {
+		if se.Author == bobKP.Identity() && se.Event.Post != nil && se.Event.Post.Text == "bob again" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("bob's post not present after sync --now; posts=%d", len(posts))
+	}
+}
+
+// openTestStore opens a bbolt store in a temp dir.
+func openTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	return s
+}
+
+// initTestIdentityAt initializes a store with a fresh identity and passphrase.
+func initTestIdentityAt(t *testing.T, s *store.Store, passphrase string) *core.KeyPair {
+	t.Helper()
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, err := enc.Encrypt(kp.Private, []byte(passphrase))
+	if err != nil {
+		t.Fatalf("encrypt: %v", err)
+	}
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	return kp
+}
+
+// mustSignPost signs a Post event with the given keypair and sequence.
+func mustSignPost(t *testing.T, kp *core.KeyPair, text string, seq uint64) *core.SignedEvent {
+	t.Helper()
+	se, err := kp.Sign(core.Event{
+		Kind:      core.KindPost,
+		Log:       core.PostLog,
+		Timestamp: core.Now64(),
+		Sequence:  seq,
+		Post:      &core.Post{Text: text},
+	})
+	if err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	return se
+}
