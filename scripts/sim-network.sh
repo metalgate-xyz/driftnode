@@ -40,6 +40,10 @@ start_daemon() {
   docker exec -d "$container" sh -c "driftnode --db /data/node.db daemon --foreground $* > /data/daemon.log 2>&1"
 }
 
+# Unlock a node's signing key so post/follow omit the passphrase. Run after
+# start_daemon; the daemon must be up for the unlock RPC to connect.
+unlock_node() { docker exec "$1" driftnode --db /data/node.db daemon unlock -p "$2" >/dev/null 2>&1; }
+
 # Copy each node's daemon log to sim-logs/<node>.log on the host.
 collect_logs() {
   mkdir -p "$LOG_DIR"
@@ -83,8 +87,9 @@ print_status() {
   printf "----- end -----\n"
 
   printf "\nInteract with a node (example):\n"
+  printf "  docker exec -it carol driftnode --db /data/node.db daemon unlock -p carolpass\n"
   printf "  docker exec -it carol driftnode --db /data/node.db feed\n"
-  printf "  docker exec -it carol driftnode --db /data/node.db post -p carolpass \"hi\"\n"
+  printf "  docker exec -it carol driftnode --db /data/node.db post \"hi\"\n"
   printf "\nFollow a node's live daemon log:\n"
   printf "  docker exec carol tail -f /data/daemon.log\n"
   printf "  docker compose logs -f\n"
@@ -262,6 +267,9 @@ start_daemon carol --bootstrap /bootstrap/bootstrap.yaml --bootstrap-key /data/b
 start_daemon dave --bootstrap /bootstrap/bootstrap.yaml --bootstrap-key /data/bs-pubkey.b64
 start_daemon eve --bootstrap /bootstrap/bootstrap.yaml --bootstrap-key /data/bs-pubkey.b64
 sleep 10
+unlock_node carol carolpass
+unlock_node dave davepass
+unlock_node eve evepass
 ok "fresh nodes bootstrapped"
 
 printf "\n===== Cross-seed discovery =====\n"
@@ -270,25 +278,25 @@ dnq dave sync --now
 sleep 15
 
 printf "\n===== Building social graph =====\n"
-dnq dave follow -p davepass "$CAROL_ID"
-dnq carol post -p carolpass "carol's first post"
+dnq dave follow "$CAROL_ID"
+dnq carol post "carol's first post"
 dnq dave sync --now
 sleep 5
 
-dnq carol follow -p carolpass "$DAVE_ID"
-dnq dave post -p davepass "dave posts here"
+dnq carol follow "$DAVE_ID"
+dnq dave post "dave posts here"
 dnq carol sync --now
 sleep 5
 
-dnq eve post -p evepass "eve checking in"
-dnq eve follow -p evepass "$CAROL_ID"
+dnq eve post "eve checking in"
+dnq eve follow "$CAROL_ID"
 dnq eve sync --now
 sleep 5
-dnq carol follow -p carolpass "$EVE_ID"
+dnq carol follow "$EVE_ID"
 dnq carol sync --now
 sleep 5
 
-dnq carol post -p carolpass "carol late post"
+dnq carol post "carol late post"
 dnq dave sync --now
 sleep 5
 ok "social graph established"

@@ -60,6 +60,14 @@ type Daemon struct {
 	// done is closed when Stop is called, allowing Start's Wait to return.
 	done chan struct{}
 
+	// unlocked holds the signing key after a successful unlock RPC, so
+	// signing commands (post, follow, unfollow) don't re-supply the
+	// passphrase on every call. Cleared by lock, by Stop, or by idle-lock
+	// expiry (see SetIdleLock). Guarded by mu.
+	unlocked   *core.KeyPair
+	lastSignAt time.Time
+	idleLock   time.Duration
+
 	// knownTokens is the set of peer tokens learned through bootstrap or
 	// peer exchange. connectAndSync dials these; newly learned tokens are
 	// added here and to the peers map.
@@ -124,6 +132,20 @@ func (d *Daemon) SetBootstrap(path string, verifyKey ed25519.PublicKey) {
 	d.bootstrapVerifyKey = verifyKey
 	d.mu.Unlock()
 }
+
+// SetIdleLock configures how long the unlocked signing key stays resident in
+// memory after the last signing command. A zero duration (the default) keeps
+// the key unlocked until an explicit lock or Stop.
+func (d *Daemon) SetIdleLock(dur time.Duration) {
+	d.mu.Lock()
+	d.idleLock = dur
+	d.mu.Unlock()
+}
+
+// ErrNotRunning is returned when a client dials a socket with no daemon
+// listening, so callers can distinguish a down daemon from an in-daemon
+// error.
+var ErrNotRunning = errors.New("daemon not running (is 'driftnode daemon' started?)")
 
 // SocketPathFor derives a control socket path from the store path, so each
 // daemon (one per --db) gets its own socket. Sockets live in a temp dir to
@@ -241,6 +263,7 @@ func (d *Daemon) Stop() {
 		os.Remove(d.socket)
 		d.socket = ""
 	}
+	d.unlocked = nil // drop the signing key on shutdown
 	// Signal Start's Wait (or the foreground blocker) to return. Use a
 	// guard so a double Stop is a no-op for the channel close.
 	select {
@@ -340,10 +363,14 @@ func (d *Daemon) dispatch(req Request) Response {
 				return Response{Error: fmt.Sprintf("parse params: %s", err)}
 			}
 		}
-		if p.Text == "" || p.Passphrase == "" {
-			return Response{Error: "text and passphrase required"}
+		if p.Text == "" {
+			return Response{Error: "text required"}
 		}
-		return d.handlePost(p.Text, p.Passphrase)
+		kp, err := d.signingKey(p.Passphrase)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return d.handlePost(p.Text, kp)
 	case "token":
 		d.mu.Lock()
 		var addr tailcat.Addr
@@ -388,10 +415,14 @@ func (d *Daemon) dispatch(req Request) Response {
 				return Response{Error: fmt.Sprintf("parse params: %s", err)}
 			}
 		}
-		if p.Target == "" || p.Passphrase == "" {
-			return Response{Error: "target and passphrase required"}
+		if p.Target == "" {
+			return Response{Error: "target required"}
 		}
-		return d.handleFollow(p.Target, p.Passphrase)
+		kp, err := d.signingKey(p.Passphrase)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return d.handleFollow(p.Target, kp)
 	case "unfollow":
 		var p struct {
 			Target     string `json:"target"`
@@ -402,10 +433,33 @@ func (d *Daemon) dispatch(req Request) Response {
 				return Response{Error: fmt.Sprintf("parse params: %s", err)}
 			}
 		}
-		if p.Target == "" || p.Passphrase == "" {
-			return Response{Error: "target and passphrase required"}
+		if p.Target == "" {
+			return Response{Error: "target required"}
 		}
-		return d.handleUnfollow(p.Target, p.Passphrase)
+		kp, err := d.signingKey(p.Passphrase)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return d.handleUnfollow(p.Target, kp)
+	case "unlock":
+		var p struct {
+			Passphrase string `json:"passphrase"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return Response{Error: fmt.Sprintf("parse params: %s", err)}
+			}
+		}
+		if p.Passphrase == "" {
+			return Response{Error: "passphrase required"}
+		}
+		return d.handleUnlock(p.Passphrase).resp
+	case "lock":
+		d.mu.Lock()
+		d.unlocked = nil
+		d.mu.Unlock()
+		d.logger.Info("key locked")
+		return Response{Result: map[string]string{"status": "locked"}}
 	case "sync":
 		var p struct {
 			Now bool `json:"now"`
@@ -438,6 +492,7 @@ func (d *Daemon) dispatch(req Request) Response {
 		if tcUp {
 			addr = d.tcListener.Addr()
 		}
+		unlocked := d.unlocked != nil
 		d.mu.Unlock()
 		return Response{Result: map[string]any{
 			"running":     true,
@@ -445,6 +500,7 @@ func (d *Daemon) dispatch(req Request) Response {
 			"socket":      d.socket,
 			"transport":   tcUp,
 			"listen_addr": string(addr),
+			"unlocked":    unlocked,
 		}}
 	default:
 		return Response{Error: fmt.Sprintf("unknown method: %s", req.Method)}
@@ -485,22 +541,70 @@ func (d *Daemon) handleFeed(limit int) Response {
 	return Response{Result: items}
 }
 
-// handlePost decrypts the private key with the passphrase, signs a Post
-// event, and appends it to the local PostLog.
-func (d *Daemon) handlePost(text, passphrase string) Response {
+// signingKey returns the key to sign with. If the caller supplies a
+// passphrase, it decrypts the at-rest key (and caches the result so later
+// calls can omit the passphrase). Otherwise it returns the cached key, or an
+// error if the key is locked. An idle-lock that has elapsed since the last
+// signing call clears the key first.
+func (d *Daemon) signingKey(passphrase string) (*core.KeyPair, error) {
+	if passphrase != "" {
+		return d.handleUnlock(passphrase).key()
+	}
+	d.mu.Lock()
+	kp := d.unlocked
+	if kp != nil && d.idleLock > 0 && time.Since(d.lastSignAt) > d.idleLock {
+		d.unlocked = nil
+		kp = nil
+	}
+	d.mu.Unlock()
+	if kp == nil {
+		return nil, errors.New("key is locked; run 'driftnode daemon unlock'")
+	}
+	return kp, nil
+}
+
+// handleUnlock decrypts the private key with the passphrase and caches it for
+// subsequent keyless signing calls. A wrong passphrase leaves any previously
+// unlocked key intact.
+func (d *Daemon) handleUnlock(passphrase string) unlockResult {
 	ek, err := d.store.EncryptedKey()
 	if err != nil {
-		return Response{Error: fmt.Sprintf("read key: %s", err)}
+		return unlockResult{resp: Response{Error: fmt.Sprintf("read key: %s", err)}}
 	}
 	enc := core.DefaultKeyEncryption()
 	priv, err := enc.Decrypt(ek, []byte(passphrase))
 	if err != nil {
-		return Response{Error: fmt.Sprintf("decrypt key: %s", err)}
+		return unlockResult{resp: Response{Error: "decrypt key: invalid passphrase"}}
 	}
 	kp, err := core.KeyPairFromBytes(priv)
 	if err != nil {
-		return Response{Error: fmt.Sprintf("keypair: %s", err)}
+		return unlockResult{resp: Response{Error: fmt.Sprintf("keypair: %s", err)}}
 	}
+	d.mu.Lock()
+	d.unlocked = kp
+	d.lastSignAt = time.Now()
+	d.mu.Unlock()
+	d.logger.Info("key unlocked")
+	return unlockResult{kp: kp, resp: Response{Result: map[string]string{"status": "unlocked", "identity": kp.Identity().String()}}}
+}
+
+// unlockResult carries the parsed keypair out of handleUnlock to signingKey
+// without re-reading the cache.
+type unlockResult struct {
+	kp   *core.KeyPair
+	resp Response
+}
+
+func (u unlockResult) key() (*core.KeyPair, error) {
+	if u.kp != nil {
+		return u.kp, nil
+	}
+	return nil, errors.New(u.resp.Error)
+}
+
+// handlePost signs a Post event with the given key and appends it to the
+// local PostLog.
+func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 	seq, err := d.store.OwnEventCount(core.PostLog)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("sequence: %s", err)}
@@ -518,29 +622,16 @@ func (d *Daemon) handlePost(text, passphrase string) Response {
 	if err := d.store.AppendOwnEvent(core.PostLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	d.touchSignAt()
 	id, _ := se.ID()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
-// handleFollow decrypts the private key, signs a Follow event, and appends
-// it to the local ProfileLog.
-func (d *Daemon) handleFollow(targetStr, passphrase string) Response {
+// handleFollow signs a Follow event and appends it to the local ProfileLog.
+func (d *Daemon) handleFollow(targetStr string, kp *core.KeyPair) Response {
 	target, err := resolvePubkey(targetStr)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("resolve target: %s", err)}
-	}
-	ek, err := d.store.EncryptedKey()
-	if err != nil {
-		return Response{Error: fmt.Sprintf("read key: %s", err)}
-	}
-	enc := core.DefaultKeyEncryption()
-	priv, err := enc.Decrypt(ek, []byte(passphrase))
-	if err != nil {
-		return Response{Error: fmt.Sprintf("decrypt key: %s", err)}
-	}
-	kp, err := core.KeyPairFromBytes(priv)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("keypair: %s", err)}
 	}
 	seq, err := d.store.OwnEventCount(core.ProfileLog)
 	if err != nil {
@@ -559,28 +650,16 @@ func (d *Daemon) handleFollow(targetStr, passphrase string) Response {
 	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	d.touchSignAt()
 	return Response{Result: map[string]string{"followed": core.IdentityFromPubkey(ed25519.PublicKey(target[:])).String()}}
 }
 
-// handleUnfollow decrypts the private key, signs an Unfollow event, and
-// appends it to the local ProfileLog.
-func (d *Daemon) handleUnfollow(targetStr, passphrase string) Response {
+// handleUnfollow signs an Unfollow event and appends it to the local
+// ProfileLog.
+func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	target, err := resolvePubkey(targetStr)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("resolve target: %s", err)}
-	}
-	ek, err := d.store.EncryptedKey()
-	if err != nil {
-		return Response{Error: fmt.Sprintf("read key: %s", err)}
-	}
-	enc := core.DefaultKeyEncryption()
-	priv, err := enc.Decrypt(ek, []byte(passphrase))
-	if err != nil {
-		return Response{Error: fmt.Sprintf("decrypt key: %s", err)}
-	}
-	kp, err := core.KeyPairFromBytes(priv)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("keypair: %s", err)}
 	}
 	seq, err := d.store.OwnEventCount(core.ProfileLog)
 	if err != nil {
@@ -599,7 +678,16 @@ func (d *Daemon) handleUnfollow(targetStr, passphrase string) Response {
 	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	d.touchSignAt()
 	return Response{Result: map[string]string{"unfollowed": core.IdentityFromPubkey(ed25519.PublicKey(target[:])).String()}}
+}
+
+// touchSignAt records that a signing call just happened, for idle-lock
+// expiry, and reaps an expired key when idle-lock is configured.
+func (d *Daemon) touchSignAt() {
+	d.mu.Lock()
+	d.lastSignAt = time.Now()
+	d.mu.Unlock()
 }
 
 // connectAndSync dials a peer by its address token and runs a bidirectional
@@ -864,11 +952,11 @@ func resolvePubkey(arg string) ([32]byte, error) {
 }
 
 // Dial connects to a running daemon's control socket and returns the
-// connection. It returns an error if the daemon is not running.
+// connection. It returns ErrNotRunning if the daemon is not running.
 func Dial(socketPath string) (net.Conn, error) {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
-		return nil, errors.New("daemon not running (is 'driftnode daemon' started?)")
+		return nil, ErrNotRunning
 	}
 	return conn, nil
 }

@@ -8,12 +8,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	bootstrappkg "driftnode/internal/bootstrap"
 	"driftnode/internal/core"
@@ -22,6 +24,7 @@ import (
 	"driftnode/internal/tui"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 )
 
@@ -168,13 +171,17 @@ func postCmd() *cobra.Command {
 		Short: "Append a signed Post event to the local PostLog",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("--passphrase is required")
-			}
-			// When the daemon is running, post via the control socket.
+			// When the daemon is running, post via the control socket. The
+			// passphrase is optional then: the daemon holds the unlocked key
+			// after `driftnode daemon unlock`.
 			sock, err := daemonSocketPath()
 			if err == nil {
-				if resp, err := daemon.SendRequest(sock, "post", map[string]any{"text": args[0], "passphrase": passphrase}); err == nil {
+				params := map[string]any{"text": args[0]}
+				if passphrase != "" {
+					params["passphrase"] = passphrase
+				}
+				resp, err := daemon.SendRequest(sock, "post", params)
+				if err == nil {
 					if m, ok := resp.Result.(map[string]any); ok {
 						if id, ok := m["event_id"].(string); ok {
 							cmd.Println(id)
@@ -183,6 +190,12 @@ func postCmd() *cobra.Command {
 					}
 					return fmt.Errorf("unexpected post response: %v", resp.Result)
 				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err // daemon up but refused the post (e.g. key locked)
+				}
+			}
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required when the daemon is not running")
 			}
 			s, err := openStoreAt(dbPath)
 			if err != nil {
@@ -216,7 +229,7 @@ func postCmd() *cobra.Command {
 		},
 	}
 	addDBFlag(c)
-	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key")
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
 	return c
 }
 
@@ -301,12 +314,14 @@ func followCmd() *cobra.Command {
 		Short: "Follow an identity (append a signed Follow event)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("--passphrase is required")
-			}
 			sock, err := daemonSocketPath()
 			if err == nil {
-				if resp, err := daemon.SendRequest(sock, "follow", map[string]any{"target": args[0], "passphrase": passphrase}); err == nil {
+				params := map[string]any{"target": args[0]}
+				if passphrase != "" {
+					params["passphrase"] = passphrase
+				}
+				resp, err := daemon.SendRequest(sock, "follow", params)
+				if err == nil {
 					if m, ok := resp.Result.(map[string]any); ok {
 						if id, ok := m["followed"].(string); ok {
 							cmd.Printf("followed %s\n", id)
@@ -315,6 +330,12 @@ func followCmd() *cobra.Command {
 					}
 					return fmt.Errorf("unexpected follow response: %v", resp.Result)
 				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required when the daemon is not running")
 			}
 			s, err := openStoreAt(dbPath)
 			if err != nil {
@@ -351,7 +372,7 @@ func followCmd() *cobra.Command {
 		},
 	}
 	addDBFlag(c)
-	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key")
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
 	return c
 }
 
@@ -362,12 +383,14 @@ func unfollowCmd() *cobra.Command {
 		Short: "Unfollow an identity (append a signed Unfollow event)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if passphrase == "" {
-				return fmt.Errorf("--passphrase is required")
-			}
 			sock, err := daemonSocketPath()
 			if err == nil {
-				if resp, err := daemon.SendRequest(sock, "unfollow", map[string]any{"target": args[0], "passphrase": passphrase}); err == nil {
+				params := map[string]any{"target": args[0]}
+				if passphrase != "" {
+					params["passphrase"] = passphrase
+				}
+				resp, err := daemon.SendRequest(sock, "unfollow", params)
+				if err == nil {
 					if m, ok := resp.Result.(map[string]any); ok {
 						if id, ok := m["unfollowed"].(string); ok {
 							cmd.Printf("unfollowed %s\n", id)
@@ -376,6 +399,12 @@ func unfollowCmd() *cobra.Command {
 					}
 					return fmt.Errorf("unexpected unfollow response: %v", resp.Result)
 				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required when the daemon is not running")
 			}
 			s, err := openStoreAt(dbPath)
 			if err != nil {
@@ -412,7 +441,7 @@ func unfollowCmd() *cobra.Command {
 		},
 	}
 	addDBFlag(c)
-	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key")
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
 	return c
 }
 
@@ -617,6 +646,7 @@ func daemonCmd() *cobra.Command {
 	var keyFile string
 	var bootstrapFile string
 	var bootstrapKeyFile string
+	var idleLockStr string
 	c := &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the long-running daemon and control socket",
@@ -643,6 +673,13 @@ func daemonCmd() *cobra.Command {
 				}
 				d.SetBootstrap(bootstrapFile, verifyKey)
 			}
+			if idleLockStr != "" {
+				dur, err := time.ParseDuration(idleLockStr)
+				if err != nil {
+					return fmt.Errorf("--idle-lock: %w", err)
+				}
+				d.SetIdleLock(dur)
+			}
 			if err := d.Start(sock); err != nil {
 				return err
 			}
@@ -661,12 +698,90 @@ func daemonCmd() *cobra.Command {
 		},
 	}
 	addDBFlagPersistent(c)
-	c.AddCommand(daemonStopCmd(), daemonStatusCmd())
+	c.AddCommand(daemonStopCmd(), daemonStatusCmd(), daemonUnlockCmd(), daemonLockCmd())
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run in foreground with logs on stdout")
 	c.Flags().StringVar(&keyFile, "key", "", "path to a persistent tailcat key file (stable address token across restarts)")
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed peers")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
+	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h); default keeps it unlocked until 'daemon lock' or stop")
 	return c
+}
+
+func daemonUnlockCmd() *cobra.Command {
+	var passphrase string
+	c := &cobra.Command{
+		Use:   "unlock",
+		Short: "Unlock the daemon's signing key so post/follow/unfollow don't need a passphrase",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sock, err := daemonSocketPath()
+			if err != nil {
+				return err
+			}
+			params := map[string]any{}
+			if passphrase != "" {
+				params["passphrase"] = passphrase
+			} else {
+				p, err := readPassphrase("passphrase: ")
+				if err != nil {
+					return err
+				}
+				if p == "" {
+					return fmt.Errorf("passphrase required")
+				}
+				params["passphrase"] = p
+			}
+			if _, err := daemon.SendRequest(sock, "unlock", params); err != nil {
+				return err
+			}
+			cmd.Println("key unlocked")
+			return nil
+		},
+	}
+	addDBFlag(c)
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (prompted if omitted)")
+	return c
+}
+
+func daemonLockCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "lock",
+		Short: "Clear the daemon's in-memory signing key",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sock, err := daemonSocketPath()
+			if err != nil {
+				return err
+			}
+			if _, err := daemon.SendRequest(sock, "lock", nil); err != nil {
+				return err
+			}
+			cmd.Println("key locked")
+			return nil
+		},
+	}
+	addDBFlag(c)
+	return c
+}
+
+// readPassphrase reads a single line from the terminal without echoing it.
+// It falls back to reading from stdin when the process has no TTY (e.g.
+// piped input), in which case the input is visible.
+func readPassphrase(prompt string) (string, error) {
+	fmt.Fprint(os.Stderr, prompt)
+	if term.IsTerminal(int(os.Stdin.Fd())) {
+		b, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", fmt.Errorf("read passphrase: %w", err)
+		}
+		return string(b), nil
+	}
+	var line string
+	if _, err := fmt.Scanln(&line); err != nil {
+		return "", fmt.Errorf("read passphrase: %w", err)
+	}
+	return line, nil
 }
 
 // decodeBootstrapKey reads a base64 Ed25519 public key from a file. An empty
@@ -732,6 +847,7 @@ func daemonStatusCmd() *cobra.Command {
 			cmd.Printf("socket: %v\n", result["socket"])
 			cmd.Printf("peers: %v\n", result["peers"])
 			cmd.Printf("transport: %v\n", result["transport"])
+			cmd.Printf("unlocked: %v\n", result["unlocked"])
 			if addr, _ := result["listen_addr"].(string); addr != "" {
 				cmd.Printf("listen_addr: %v\n", addr)
 			}
@@ -746,19 +862,39 @@ func tuiCmd() *cobra.Command {
 		Short: "Launch the terminal UI",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			s, err := openStoreAt(dbPath)
+			sock, err := daemonSocketPath()
 			if err != nil {
 				return err
 			}
-			defer s.Close()
-			id, ok, err := s.Identity()
+			// The TUI is a thin client of the daemon's control socket; it
+			// never opens the store, so it can run alongside the daemon
+			// (which holds the bbolt lock).
+			whoami, err := daemon.SendRequest(sock, "whoami", nil)
 			if err != nil {
-				return err
+				return fmt.Errorf("daemon not running; start it with 'driftnode daemon' first: %w", err)
 			}
+			m, ok := whoami.Result.(map[string]any)
 			if !ok {
+				return fmt.Errorf("unexpected whoami response")
+			}
+			identity, _ := m["identity"].(string)
+			if identity == "" {
 				return fmt.Errorf("no identity found; run 'driftnode init' first")
 			}
-			return tui.Run(id.String())
+			// Unlock the daemon's signing key once, so compose can post
+			// without re-prompting. If already unlocked, the daemon keeps
+			// the existing key.
+			status, _ := daemon.SendRequest(sock, "status", nil)
+			if sm, ok := status.Result.(map[string]any); ok && !sm["unlocked"].(bool) {
+				passphrase, err := readPassphrase("passphrase: ")
+				if err != nil {
+					return err
+				}
+				if _, err := daemon.SendRequest(sock, "unlock", map[string]any{"passphrase": passphrase}); err != nil {
+					return err
+				}
+			}
+			return tui.Run(sock, identity)
 		},
 	}
 	addDBFlag(c)

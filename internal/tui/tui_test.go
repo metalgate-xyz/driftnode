@@ -8,14 +8,14 @@ import (
 )
 
 func TestModelInit(t *testing.T) {
-	m := newModel("driftnode:test")
-	if cmd := m.Init(); cmd != nil {
-		t.Fatal("Init should return nil")
+	m := newModel("", "driftnode:test")
+	if cmd := m.Init(); cmd == nil {
+		t.Fatal("Init should return a refresh command")
 	}
 }
 
 func TestModelQuit(t *testing.T) {
-	m := newModel("driftnode:test")
+	m := newModel("", "driftnode:test")
 	// Esc unfocuses compose but doesn't quit; q quits.
 	m2, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	if cmd == nil {
@@ -25,7 +25,7 @@ func TestModelQuit(t *testing.T) {
 }
 
 func TestModelComposeAndPost(t *testing.T) {
-	m := newModel("driftnode:test")
+	m := newModel("", "driftnode:test")
 	// Enter compose mode.
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 	m = m2.(model)
@@ -38,22 +38,19 @@ func TestModelComposeAndPost(t *testing.T) {
 	if m.composeBuf.String() != "hello" {
 		t.Fatalf("compose buf: want %q, got %q", "hello", m.composeBuf.String())
 	}
-	// Enter to post.
+	// Enter triggers a post command; compose mode exits, buffer clears.
 	m2, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = m2.(model)
 	if m.composing {
 		t.Fatal("should exit compose mode after enter")
 	}
-	if len(m.feed) != 1 {
-		t.Fatalf("feed: want 1 item, got %d", len(m.feed))
-	}
-	if m.feed[0].text != "hello" {
-		t.Fatalf("feed item: want %q, got %q", "hello", m.feed[0].text)
+	if m.composeBuf.Len() != 0 {
+		t.Fatal("compose buffer should be cleared after enter")
 	}
 }
 
 func TestModelEscExitsCompose(t *testing.T) {
-	m := newModel("driftnode:test")
+	m := newModel("", "driftnode:test")
 	m2, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
 	m = m2.(model)
 	if !m.composing {
@@ -70,7 +67,7 @@ func TestModelEscExitsCompose(t *testing.T) {
 }
 
 func TestModelViewRenders(t *testing.T) {
-	m := newModel("driftnode:test")
+	m := newModel("", "driftnode:test")
 	m.width = 80
 	m.height = 24
 	m.feed = []feedItem{
@@ -82,5 +79,8 @@ func TestModelViewRenders(t *testing.T) {
 	}
 	if !strings.Contains(out, "gm") {
 		t.Fatal("view should contain feed text")
+	}
+	if !strings.Contains(out, "key: locked") {
+		t.Fatal("view should render key status")
 	}
 }

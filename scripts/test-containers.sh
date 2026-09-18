@@ -50,6 +50,10 @@ start_daemon() {
   docker exec -d "$container" sh -c "driftnode --db /data/node.db daemon --foreground $* > /data/daemon.log 2>&1"
 }
 
+# Unlock a node's signing key so post/follow omit the passphrase. Run after
+# start_daemon; the daemon must be up for the unlock RPC to connect.
+unlock_node() { docker exec "$1" driftnode --db /data/node.db daemon unlock -p "$2" >/dev/null 2>&1; }
+
 # Create placeholder bootstrap files so the bind mounts exist at container
 # start. Real content is written after seed tokens are known.
 touch "$REPO_ROOT/bootstrap-eu.yaml" "$REPO_ROOT/bootstrap-us.yaml"
@@ -121,6 +125,9 @@ start_daemon carol --bootstrap /bootstrap/bootstrap.yaml
 start_daemon dave --bootstrap /bootstrap/bootstrap.yaml
 start_daemon eve --bootstrap /bootstrap/bootstrap.yaml
 sleep 10
+unlock_node carol carolpass
+unlock_node dave davepass
+unlock_node eve evepass
 
 CAROL_FEED=$(dn carol feed)
 contains "$CAROL_FEED" "hello from eu" && ok "P1.1 carol sees seed-eu post (bootstrap auto-dial)" || bad "P1.1 carol sees seed-eu" "$CAROL_FEED"
@@ -148,27 +155,27 @@ contains "$DAVE_FEED2" "hello from eu" && ok "P2.2 dave discovers seed-eu (not i
 
 printf "\n===== Phase 3: Peer exchange between fresh nodes =====\n"
 # Dave discovers carol through peer exchange (seed-eu relays carol's token).
-dnq dave follow -p davepass "$CAROL_ID"
-dnq carol post -p carolpass "carol's first post"
+dnq dave follow "$CAROL_ID"
+dnq carol post "carol's first post"
 dnq dave sync --now
 sleep 10
 DAVE_FEED3=$(dn dave feed)
 contains "$DAVE_FEED3" "carol's first post" && ok "P3.1 dave sees carol's post (followed)" || bad "P3.1 dave sees carol" "$DAVE_FEED3"
 
 printf "\n===== Phase 4: Bidirectional follow =====\n"
-dnq carol follow -p carolpass "$DAVE_ID"
-dnq dave post -p davepass "dave posts here"
+dnq carol follow "$DAVE_ID"
+dnq dave post "dave posts here"
 dnq carol sync --now
 sleep 10
 CAROL_FEED3=$(dn carol feed)
 contains "$CAROL_FEED3" "dave posts here" && ok "P4.1 carol sees dave's post (followed)" || bad "P4.1 carol sees dave" "$CAROL_FEED3"
 
 printf "\n===== Phase 5: Eve discovers the network =====\n"
-dnq eve post -p evepass "eve checking in"
-dnq eve follow -p evepass "$CAROL_ID"
+dnq eve post "eve checking in"
+dnq eve follow "$CAROL_ID"
 dnq eve sync --now
 sleep 10
-dnq carol follow -p carolpass "$EVE_ID"
+dnq carol follow "$EVE_ID"
 dnq carol sync --now
 sleep 10
 CAROL_FEED4=$(dn carol feed)
@@ -193,7 +200,7 @@ CAROL_COUNT_AFTER=$(dn carol feed | wc -l | tr -d ' ')
 [[ "$CAROL_COUNT_BEFORE" == "$CAROL_COUNT_AFTER" ]] && ok "P7.1 idempotent re-sync" || bad "P7.1 idempotent" "before: $CAROL_COUNT_BEFORE after: $CAROL_COUNT_AFTER"
 
 printf "\n===== Phase 8: Late post propagation =====\n"
-dnq carol post -p carolpass "carol late post"
+dnq carol post "carol late post"
 dnq dave sync --now
 sleep 10
 DAVE_FEED4=$(dn dave feed)
