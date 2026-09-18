@@ -1,10 +1,10 @@
-// Package sync implements the event-log sync protocol between two peers
+// Package sync implements the event-log sync protocol between two zens
 // (design 7.3). Synchronizing a log is a set-reconciliation problem: each
 // side learns which signed events the other has that it does not, and
 // transfers only those. The baseline mechanism is a timestamp cursor:
 // "send me every event in log X after time T." Messages are framed as
 // length-prefixed CBOR and sent over a byte stream (a tailcat tunnel
-// between native peers, or a WebRTC data channel for browsers).
+// between native zens, or a WebRTC data channel for browsers).
 package sync
 
 import (
@@ -22,31 +22,40 @@ const (
 	MsgRequest MsgKind = 1
 	MsgEvents  MsgKind = 2
 	MsgDone    MsgKind = 3
-	// MsgReverse signals role reversal: the pulling peer has finished
-	// requesting and now offers to serve. The peer that received the
+	// MsgReverse signals role reversal: the pulling zen has finished
+	// requesting and now offers to serve. The zen that received the
 	// signal switches from serving to requesting. This makes a single
-	// connection carry a bidirectional sync (section 7.3): the peer
-	// that initiated the dial pulls first, then the listening peer pulls
+	// connection carry a bidirectional sync (section 7.3): the zen
+	// that initiated the dial pulls first, then the listening zen pulls
 	// back, without either side needing to dial separately.
 	MsgReverse MsgKind = 4
-	// MsgPeers carries known peer tokens so peers can discover each
+	// MsgZens carries known zen tokens so zens can discover each
 	// other beyond the initial bootstrap seeds (section 6.1). The
 	// receiver learns these tokens and may dial them later.
-	MsgPeers MsgKind = 5
+	MsgZens MsgKind = 5
+	// MsgHello is the first message of the session handshake: each side
+	// announces its driftnode identity and a fresh nonce for the other to
+	// sign. Sent by both sides before any sync traffic.
+	MsgHello MsgKind = 6
+	// MsgAuth carries the Ed25519 signature of the zen's nonce, proving
+	// possession of the private key for the identity announced in Hello.
+	MsgAuth MsgKind = 7
 )
 
 // Message is the wire envelope. The Kind field determines which payload
 // field is set. This single type lets the receiver decode the Kind before
 // committing to a specific payload struct.
 type Message struct {
-	Kind    MsgKind            `cbor:"k"`
-	Request *Request           `cbor:"r,omitempty"`
-	Events  *Events            `cbor:"e,omitempty"`
-	Done    *Done              `cbor:"d,omitempty"`
-	Peers   *Peers             `cbor:"p,omitempty"`
+	Kind    MsgKind  `cbor:"k"`
+	Request *Request `cbor:"r,omitempty"`
+	Events  *Events  `cbor:"e,omitempty"`
+	Done    *Done    `cbor:"d,omitempty"`
+	Zens    *Zens    `cbor:"p,omitempty"`
+	Hello   *Hello   `cbor:"h,omitempty"`
+	Auth    *Auth    `cbor:"a,omitempty"`
 }
 
-// Request asks the peer to send events in the named log after the given
+// Request asks the zen to send events in the named log after the given
 // timestamp (unix nanoseconds). Author is optional: an empty author means
 // "your own logs"; a non-empty author means that specific identity's log.
 type Request struct {
@@ -63,9 +72,23 @@ type Events struct {
 // Done signals the end of a batch.
 type Done struct{}
 
-// Peers carries known peer tokens for peer exchange (section 6.1).
-type Peers struct {
+// Zens carries known zen tokens for zen exchange (section 6.1).
+type Zens struct {
 	Tokens []string `cbor:"t"`
+}
+
+// Hello is the first handshake message: the sender's driftnode identity and a
+// fresh 32-byte nonce the receiver must sign to prove possession of the
+// identity's private key.
+type Hello struct {
+	Identity core.Identity `cbor:"i"`
+	Nonce    [32]byte      `cbor:"n"`
+}
+
+// Auth carries the Ed25519 signature over the zen's Hello nonce, proving the
+// sender holds the private key for the identity it announced.
+type Auth struct {
+	Signature []byte `cbor:"s"`
 }
 
 // maxFrameSize is the upper bound on a single message size.
@@ -131,13 +154,24 @@ func NewDone() *Message {
 	return &Message{Kind: MsgDone, Done: &Done{}}
 }
 
-// NewReverse builds a Reverse message, signalling that the pulling peer has
+// NewReverse builds a Reverse message, signalling that the pulling zen has
 // finished and now offers to serve.
 func NewReverse() *Message {
 	return &Message{Kind: MsgReverse}
 }
 
-// NewPeers builds a Peers message carrying known peer tokens.
-func NewPeers(tokens []string) *Message {
-	return &Message{Kind: MsgPeers, Peers: &Peers{Tokens: tokens}}
+// NewZens builds a Zens message carrying known zen tokens.
+func NewZens(tokens []string) *Message {
+	return &Message{Kind: MsgZens, Zens: &Zens{Tokens: tokens}}
+}
+
+// NewHello builds a Hello message announcing an identity and a nonce for the
+// zen to sign.
+func NewHello(id core.Identity, nonce [32]byte) *Message {
+	return &Message{Kind: MsgHello, Hello: &Hello{Identity: id, Nonce: nonce}}
+}
+
+// NewAuth builds an Auth message carrying a signature over the zen's nonce.
+func NewAuth(sig []byte) *Message {
+	return &Message{Kind: MsgAuth, Auth: &Auth{Signature: sig}}
 }

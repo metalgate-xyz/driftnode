@@ -18,7 +18,7 @@ func NewLog(events []SignedEvent) *Log {
 }
 
 // SortedByTime returns the events ordered by timestamp then sequence, so two
-// peers with different partial views compute the same order.
+// zens with different partial views compute the same order.
 func (l *Log) SortedByTime() []SignedEvent {
 	out := make([]SignedEvent, len(l.Events))
 	copy(out, l.Events)
@@ -96,7 +96,7 @@ func (l *Log) FollowSet() *FollowSet {
 }
 
 // Tombstoned returns the set of event IDs deleted by Delete events in this
-// log. A deleted event is a tombstone, not erasure (§7.2): peers who already
+// log. A deleted event is a tombstone, not erasure (§7.2): zens who already
 // replicated the original may still hold a copy.
 func (l *Log) Tombstoned() map[EventID]bool {
 	out := make(map[EventID]bool)

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"io"
 	"testing"
 
@@ -182,5 +183,127 @@ func TestSyncRejectsForgedEvent(t *testing.T) {
 	}
 	if merged != 0 {
 		t.Fatalf("merged: want 0 (forged), got %d", merged)
+	}
+}
+
+// TestSessionHandshake proves two sessions with their respective keys
+// authenticate each other: each learns the other's driftnode identity, and
+// the sync protocol runs to completion over the authenticated connection.
+func TestSessionHandshake(t *testing.T) {
+	aliceStore := newTestStore(t)
+	bobStore := newTestStore(t)
+	aliceKP := makeKey(t)
+	bobKP := makeKey(t)
+
+	enc := core.DefaultKeyEncryption()
+	ae, _ := enc.Encrypt(aliceKP.Private, []byte("a"))
+	aliceStore.InitIdentity(aliceKP, ae)
+	be, _ := enc.Encrypt(bobKP.Private, []byte("b"))
+	bobStore.InitIdentity(bobKP, be)
+
+	// Give bob a post so alice has something to pull.
+	bobStore.AppendOwnEvent(core.PostLog, signPost(t, bobKP, 1, 100, "hi"))
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+
+	// Server side (bob), listener.
+	serverDone := make(chan error, 1)
+	go func() {
+		defer serverW.Close()
+		defer serverR.Close()
+		sess := NewSession(bobStore, nil)
+		sess.SetKey(bobKP)
+		if _, err := sess.RunListener(serverR, serverW); err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+
+	defer clientR.Close()
+	defer clientW.Close()
+
+	// Client side (alice), initiator.
+	var authed core.Identity
+	sess := NewSession(aliceStore, nil)
+	sess.SetKey(aliceKP)
+	sess.SetAuthed(func(id core.Identity) { authed = id })
+	_, err := sess.RunInitiator(clientR, clientW)
+	if err != nil {
+		t.Fatalf("RunInitiator: %v", err)
+	}
+	if authed != bobKP.Identity() {
+		t.Fatalf("authed identity: want %s, got %s", bobKP.Identity(), authed)
+	}
+	// Bob's post must have landed in alice's store.
+	events, err := aliceStore.FollowedEvents(bobKP.Identity())
+	if err != nil {
+		t.Fatalf("FollowedEvents: %v", err)
+	}
+	found := false
+	for _, se := range events {
+		if se.Event.Post != nil && se.Event.Post.Text == "hi" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("bob's post not synced into alice's store; events=%d", len(events))
+	}
+}
+
+// TestSessionHandshakeRejectsBadSignature proves a session rejects a zen
+// whose Auth signature does not verify against the identity it announced.
+func TestSessionHandshakeRejectsBadSignature(t *testing.T) {
+	aliceKP := makeKey(t)
+	malloryKP := makeKey(t) // different key, signs the nonce
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+
+	// Server (the "zen") announces alice's identity but signs with
+	// mallory's key, so the Auth signature won't verify.
+	serverDone := make(chan error, 1)
+	go func() {
+		defer serverW.Close()
+		defer serverR.Close()
+		ourNonce := [32]byte{1, 2, 3}
+		if err := WriteMsg(serverW, NewHello(aliceKP.Identity(), ourNonce)); err != nil {
+			serverDone <- err
+			return
+		}
+		zenHello, err := ReadMsg(serverR)
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		sig := ed25519.Sign(malloryKP.Private, zenHello.Hello.Nonce[:])
+		if err := WriteMsg(serverW, NewAuth(sig)); err != nil {
+			serverDone <- err
+			return
+		}
+		// Expect the client to hang up; a read error here is fine.
+		ReadMsg(serverR)
+		serverDone <- nil
+	}()
+
+	defer clientR.Close()
+	defer clientW.Close()
+
+	sess := NewSession(nil, nil)
+	sess.SetKey(aliceKP)
+	_, err := sess.Handshake(clientR, clientW)
+	if err == nil {
+		t.Fatal("Handshake: expected error for bad signature, got nil")
+	}
+}
+
+// TestSessionHandshakeSkipsWhenNoKey proves a nil key skips the handshake,
+// so direct Server/Client callers that don't use sessions still work.
+func TestSessionHandshakeSkipsWhenNoKey(t *testing.T) {
+	sess := NewSession(nil, nil)
+	_, err := sess.Handshake(nil, nil)
+	if err != nil {
+		t.Fatalf("Handshake with nil key should skip, got: %v", err)
 	}
 }

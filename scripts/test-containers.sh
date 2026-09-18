@@ -3,17 +3,17 @@
 # isolated Docker containers, managed via docker compose.
 #
 # Five nodes (two seeds in different regions, three fresh users) discover
-# each other through bootstrap, crawling, and peer exchange, then sync feeds
+# each other through bootstrap, crawling, and zen exchange, then sync feeds
 # over real tailcat tunnels.
 #
 # Discovery chain:
-#   seed-eu, seed-us: genesis peers, follow each other, post.
-#   carol: bootstraps seed-eu only. Discovers seed-us through peer exchange
+#   seed-eu, seed-us: genesis zens, follow each other, post.
+#   carol: bootstraps seed-eu only. Discovers seed-us through zen exchange
 #         (seed-eu relays seed-us's token) and the crawler (walks seed-eu's
 #         follow graph). NOT through a direct bootstrap dial.
 #   dave: bootstraps seed-us only. Discovers seed-eu the same way.
-#   eve: bootstraps seed-eu. Discovers others through peer exchange + crawl.
-#   dave discovers carol via peer exchange (seed-eu relays carol's token).
+#   eve: bootstraps seed-eu. Discovers others through zen exchange + crawl.
+#   dave discovers carol via zen exchange (seed-eu relays carol's token).
 #   dave follows carol. carol follows dave. Both see each other's posts.
 #
 # Requires Docker (or OrbStack) and AF_ROUTE support in the containers.
@@ -63,7 +63,7 @@ docker compose build --quiet || { printf "BUILD FAILED\n"; exit 1; }
 
 printf "Starting containers...\n"
 docker compose up -d --quiet-pull
-sleep 2
+sleep 5
 
 printf "\n===== Phase 0: Seed initialization =====\n"
 SEED_EU_ID=$(dn seed-eu init -p seedpass)
@@ -77,27 +77,30 @@ dnq seed-us follow -p seedpass "$SEED_EU_ID" && ok "S2 seed-us follows seed-eu" 
 dnq seed-eu post -p seedpass "hello from eu" && ok "S3 seed-eu posts" || bad "S3 seed-eu posts" "failed"
 dnq seed-us post -p seedpass "hello from us" && ok "S3 seed-us posts" || bad "S3 seed-us posts" "failed"
 
-# Start seed daemons with persistent keys.
+# Start seed daemons with persistent keys, then unlock so follow-by-token
+# can sign and inbound sessions can authenticate.
 start_daemon seed-eu --key /data/tc.key
 start_daemon seed-us --key /data/tc.key
 sleep 5
+unlock_node seed-eu seedpass
+unlock_node seed-us seedpass
 
-SEED_EU_TOKEN=$(dn seed-eu peers token)
-SEED_US_TOKEN=$(dn seed-us peers token)
+SEED_EU_TOKEN=$(dn seed-eu zens token)
+SEED_US_TOKEN=$(dn seed-us zens token)
 [[ "$SEED_EU_TOKEN" == tc* ]] && ok "S4 seed-eu token" || bad "S4 seed-eu token" "$SEED_EU_TOKEN"
 [[ "$SEED_US_TOKEN" == tc* ]] && ok "S4 seed-us token" || bad "S4 seed-us token" "$SEED_US_TOKEN"
 
-dnq seed-eu peers add "$SEED_US_TOKEN" && ok "S5 seed-eu dials seed-us" || bad "S5 seed-eu dials seed-us" "failed"
-dnq seed-us peers add "$SEED_EU_TOKEN" && ok "S5 seed-us dials seed-eu" || bad "S5 seed-us dials seed-eu" "failed"
+dnq seed-eu follow -p seedpass "$SEED_US_TOKEN" && ok "S5 seed-eu dials seed-us" || bad "S5 seed-eu dials seed-us" "failed"
+dnq seed-us follow -p seedpass "$SEED_EU_TOKEN" && ok "S5 seed-us dials seed-eu" || bad "S5 seed-us dials seed-eu" "failed"
 sleep 5
 
 printf "\n===== Phase 0.5: Bootstrap files =====\n"
 cat > "$REPO_ROOT/bootstrap-eu.yaml" <<EOF
 version: 1
 signature: ""
-seed_peers:
+seed_zens:
   - token: "$SEED_EU_TOKEN"
-    kind: native_peer
+    kind: native_zen
 crawl_seeds:
   - "$SEED_EU_ID"
   - "$SEED_US_ID"
@@ -105,9 +108,9 @@ EOF
 cat > "$REPO_ROOT/bootstrap-us.yaml" <<EOF
 version: 1
 signature: ""
-seed_peers:
+seed_zens:
   - token: "$SEED_US_TOKEN"
-    kind: native_peer
+    kind: native_zen
 crawl_seeds:
   - "$SEED_EU_ID"
   - "$SEED_US_ID"
@@ -124,10 +127,13 @@ EVE_ID=$(dn eve init -p evepass)
 start_daemon carol --bootstrap /bootstrap/bootstrap.yaml
 start_daemon dave --bootstrap /bootstrap/bootstrap.yaml
 start_daemon eve --bootstrap /bootstrap/bootstrap.yaml
-sleep 10
+sleep 2
+# Unlock immediately: the daemon retries bootstrap auto-follow on unlock,
+# so seeds enter the follow graph even though the key was locked at start.
 unlock_node carol carolpass
 unlock_node dave davepass
 unlock_node eve evepass
+sleep 10
 
 CAROL_FEED=$(dn carol feed)
 contains "$CAROL_FEED" "hello from eu" && ok "P1.1 carol sees seed-eu post (bootstrap auto-dial)" || bad "P1.1 carol sees seed-eu" "$CAROL_FEED"
@@ -138,14 +144,22 @@ contains "$DAVE_FEED" "hello from us" && ok "P1.2 dave sees seed-us post (bootst
 EVE_FEED=$(dn eve feed)
 contains "$EVE_FEED" "hello from eu" && ok "P1.3 eve sees seed-eu post (bootstrap auto-dial)" || bad "P1.3 eve sees seed-eu" "$EVE_FEED"
 
-printf "\n===== Phase 2: Cross-seed discovery (peer exchange + crawl) =====\n"
-# Carol bootstrapped only seed-eu. She discovers seed-us through peer exchange
-# (seed-eu relays seed-us's token during sync) and dials it. The crawler walks
-# seed-eu's follow graph and fetches seed-us's ProfileLog. Trigger sync --now
-# to force a sync round (which also triggers a crawl pass).
+printf "\n===== Phase 2: Cross-seed discovery (zen exchange + crawl) =====\n"
+# Carol bootstrapped only seed-eu. She discovers seed-us through zen exchange
+# (seed-eu relays seed-us's token during sync) and the crawler (walks seed-eu's
+# follow graph and fetches seed-us's ProfileLog). Discovery alone does not
+# dial: carol must follow seed-us to enter it into her follow graph, then
+# sync again to pull its posts.
 dnq carol sync --now
 dnq dave sync --now
-sleep 15
+sleep 10
+# Now carol/dave have learned the cross-seed identity (via crawl) and token
+# (via zen exchange). Follow by identity, then sync to pull posts.
+dnq carol follow "$SEED_US_ID"
+dnq dave follow "$SEED_EU_ID"
+dnq carol sync --now
+dnq dave sync --now
+sleep 10
 
 CAROL_FEED2=$(dn carol feed)
 contains "$CAROL_FEED2" "hello from us" && ok "P2.1 carol discovers seed-us (not in her bootstrap)" || bad "P2.1 carol discovers seed-us" "$CAROL_FEED2"
@@ -153,8 +167,10 @@ contains "$CAROL_FEED2" "hello from us" && ok "P2.1 carol discovers seed-us (not
 DAVE_FEED2=$(dn dave feed)
 contains "$DAVE_FEED2" "hello from eu" && ok "P2.2 dave discovers seed-eu (not in his bootstrap)" || bad "P2.2 dave discovers seed-eu" "$DAVE_FEED2"
 
-printf "\n===== Phase 3: Peer exchange between fresh nodes =====\n"
-# Dave discovers carol through peer exchange (seed-eu relays carol's token).
+printf "\n===== Phase 3: Zen exchange between fresh nodes =====\n"
+# Dave discovers carol through zen exchange (seed-us relays carol's token
+# during sync). Following carol by pubkey enters her into dave's follow
+# graph; the next sync resolves her token (seed-us knows it) and dials her.
 dnq dave follow "$CAROL_ID"
 dnq carol post "carol's first post"
 dnq dave sync --now
@@ -182,14 +198,14 @@ CAROL_FEED4=$(dn carol feed)
 contains "$CAROL_FEED4" "eve checking in" && ok "P5.1 carol sees eve's post" || bad "P5.1 carol sees eve" "$CAROL_FEED4"
 
 printf "\n===== Phase 6: Persistent key stability =====\n"
-SEED_EU_TOKEN_BEFORE=$(dn seed-eu peers token)
+SEED_EU_TOKEN_BEFORE=$(dn seed-eu zens token)
 docker compose stop seed-eu 2>/dev/null
 sleep 2
 docker compose start seed-eu 2>/dev/null
 sleep 2
 start_daemon seed-eu --key /data/tc.key
 sleep 5
-SEED_EU_TOKEN_AFTER=$(dn seed-eu peers token)
+SEED_EU_TOKEN_AFTER=$(dn seed-eu zens token)
 [[ "$SEED_EU_TOKEN_BEFORE" == "$SEED_EU_TOKEN_AFTER" ]] && ok "P6.1 seed-eu token stable across restart" || bad "P6.1 token stable" "before: $SEED_EU_TOKEN_BEFORE after: $SEED_EU_TOKEN_AFTER"
 
 printf "\n===== Phase 7: Idempotency =====\n"

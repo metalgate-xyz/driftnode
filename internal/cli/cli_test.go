@@ -254,7 +254,7 @@ func TestBootstrapKeygenSignVerify(t *testing.T) {
 
 	// Write an unsigned bootstrap.yaml, then sign it with the keygen output.
 	if err := os.WriteFile(bootstrapPath, []byte(
-		"version: 1\nsignature: \"\"\nseed_peers:\n  - token: tctest\n    kind: native_peer\ncrawl_seeds:\n  - \"driftnode:abc\"\n"), 0o600); err != nil {
+		"version: 1\nsignature: \"\"\nseed_zens:\n  - token: tctest\n    kind: native_zen\ncrawl_seeds:\n  - \"driftnode:abc\"\n"), 0o600); err != nil {
 		t.Fatalf("write bootstrap: %v", err)
 	}
 	if _, err := runCLIStoreless(t, []string{"bootstrap", "sign", bootstrapPath, "--key", keyPath}); err != nil {

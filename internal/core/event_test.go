@@ -108,7 +108,7 @@ func TestValidateEventMissingFields(t *testing.T) {
 	}
 }
 
-// A SignedEvent must round-trip through canonical CBOR, since it is what peers
+// A SignedEvent must round-trip through canonical CBOR, since it is what zens
 // exchange and what the store persists.
 func TestSignedEventSerialization(t *testing.T) {
 	kp, _ := NewKeyPair()

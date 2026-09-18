@@ -65,7 +65,7 @@ func addDBFlagPersistent(c *cobra.Command) {
 func Root() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "driftnode",
-		Short: "driftnode native peer node (offline, Phase 0)",
+		Short: "driftnode native zen node (offline, Phase 0)",
 	}
 	// Cobra writes command output (cmd.Println) to stderr by default.
 	// All our commands produce user-facing output that belongs on stdout
@@ -82,7 +82,7 @@ func Root() *cobra.Command {
 		backupCmd(),
 		daemonCmd(),
 		tuiCmd(),
-		peersCmd(),
+		zensCmd(),
 		syncCmd(),
 		bootstrapCmd(),
 		relayCmd(),
@@ -310,8 +310,8 @@ func printFeedFromRPC(cmd *cobra.Command, resp *daemon.Response) error {
 func followCmd() *cobra.Command {
 	var passphrase string
 	c := &cobra.Command{
-		Use:   "follow <pubkey>",
-		Short: "Follow an identity (append a signed Follow event)",
+		Use:   "follow <pubkey-or-token>",
+		Short: "Follow an identity, or dial and follow a zen by its token",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sock, err := daemonSocketPath()
@@ -701,7 +701,7 @@ func daemonCmd() *cobra.Command {
 	c.AddCommand(daemonStopCmd(), daemonStatusCmd(), daemonUnlockCmd(), daemonLockCmd())
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run in foreground with logs on stdout")
 	c.Flags().StringVar(&keyFile, "key", "", "path to a persistent tailcat key file (stable address token across restarts)")
-	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed peers")
+	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h); default keeps it unlocked until 'daemon lock' or stop")
 	return c
@@ -845,7 +845,7 @@ func daemonStatusCmd() *cobra.Command {
 			}
 			cmd.Printf("running: %v\n", result["running"])
 			cmd.Printf("socket: %v\n", result["socket"])
-			cmd.Printf("peers: %v\n", result["peers"])
+			cmd.Printf("zens: %v\n", result["zens"])
 			cmd.Printf("transport: %v\n", result["transport"])
 			cmd.Printf("unlocked: %v\n", result["unlocked"])
 			if addr, _ := result["listen_addr"].(string); addr != "" {
@@ -901,20 +901,20 @@ func tuiCmd() *cobra.Command {
 	return c
 }
 
-func peersCmd() *cobra.Command {
+func zensCmd() *cobra.Command {
 	c := &cobra.Command{
-		Use:   "peers",
-		Short: "Manage peer connections",
+		Use:   "zens",
+		Short: "Show your network: connected zens and your address token",
 	}
 	addDBFlagPersistent(c)
-	c.AddCommand(peersListCmd(), peersAddCmd(), peersTokenCmd())
+	c.AddCommand(zensListCmd(), zensTokenCmd())
 	return c
 }
 
-func peersTokenCmd() *cobra.Command {
+func zensTokenCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "token",
-		Short: "Print this node's tailcat address token for peers to dial",
+		Short: "Print this node's address token for other zens to dial",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sock, err := daemonSocketPath()
@@ -940,52 +940,32 @@ func peersTokenCmd() *cobra.Command {
 	}
 }
 
-func peersListCmd() *cobra.Command {
+func zensListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "Show currently connected peers",
+		Short: "Show currently connected zens",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			sock, err := daemonSocketPath()
 			if err != nil {
 				return err
 			}
-			resp, err := daemon.SendRequest(sock, "peers", nil)
+			resp, err := daemon.SendRequest(sock, "zens", nil)
 			if err != nil {
 				return err
 			}
-			peers, ok := resp.Result.([]any)
-			if !ok || len(peers) == 0 {
-				cmd.Println("(no peers connected)")
+			zens, ok := resp.Result.([]any)
+			if !ok || len(zens) == 0 {
+				cmd.Println("(no zens connected)")
 				return nil
 			}
-			for _, p := range peers {
+			for _, p := range zens {
 				pm, ok := p.(map[string]any)
 				if !ok {
 					continue
 				}
 				cmd.Printf("%s %s (%s)\n", pm["status"], pm["id"], pm["kind"])
 			}
-			return nil
-		},
-	}
-}
-
-func peersAddCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "add <token>",
-		Short: "Manually connect to a peer's Tailcat token",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
-			if err != nil {
-				return err
-			}
-			_, err = daemon.SendRequest(sock, "peers_add", map[string]any{"token": args[0]})
-			if err != nil {
-				return err
-			}
-			cmd.Println("connecting to", args[0])
 			return nil
 		},
 	}
@@ -1123,7 +1103,7 @@ func bootstrapVerifyCmd() *cobra.Command {
 			cmd.Printf("version: %d\n", bf.Version)
 			cmd.Printf("seed_relays: %d\n", len(bf.SeedRelays))
 			cmd.Printf("derp_relays: %d\n", len(bf.DERPRelays))
-			cmd.Printf("seed_peers: %d\n", len(bf.SeedPeers))
+			cmd.Printf("seed_zens: %d\n", len(bf.SeedZens))
 			cmd.Printf("crawl_seeds: %d\n", len(bf.CrawlSeeds))
 			if bf.Signature == "" {
 				cmd.Println("signature: (none)")

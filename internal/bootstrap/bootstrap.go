@@ -1,5 +1,5 @@
 // Package bootstrap parses and verifies the signed bootstrap.yaml file that
-// a fresh install uses to find its first peers (section 6.1). The file is a
+// a fresh install uses to find its first zens (section 6.1). The file is a
 // static, signed YAML document: verified content, not trusted location.
 package bootstrap
 
@@ -14,12 +14,12 @@ import (
 
 // File is the structure of bootstrap.yaml.
 type File struct {
-	Version   int        `yaml:"version"`
-	Signature string     `yaml:"signature"`
+	Version    int         `yaml:"version"`
+	Signature  string      `yaml:"signature"`
 	SeedRelays []SeedRelay `yaml:"seed_relays"`
 	DERPRelays []DERPRelay `yaml:"derp_relays"`
-	SeedPeers []SeedPeer  `yaml:"seed_peers"`
-	CrawlSeeds []string   `yaml:"crawl_seeds"`
+	SeedZens   []SeedZen   `yaml:"seed_zens"`
+	CrawlSeeds []string    `yaml:"crawl_seeds"`
 }
 
 // SeedRelay is a WebRTC signaling relay URL.
@@ -34,8 +34,8 @@ type DERPRelay struct {
 	URL    string `yaml:"url"`
 }
 
-// SeedPeer is a native peer's tailcat token.
-type SeedPeer struct {
+// SeedZen is a native zen's tailcat token.
+type SeedZen struct {
 	Token string `yaml:"token"`
 	Kind  string `yaml:"kind"`
 }
@@ -46,7 +46,7 @@ type signedContent struct {
 	Version    int         `yaml:"version"`
 	SeedRelays []SeedRelay `yaml:"seed_relays"`
 	DERPRelays []DERPRelay `yaml:"derp_relays"`
-	SeedPeers  []SeedPeer  `yaml:"seed_peers"`
+	SeedZens   []SeedZen   `yaml:"seed_zens"`
 	CrawlSeeds []string    `yaml:"crawl_seeds"`
 }
 
@@ -55,7 +55,7 @@ func (f *File) content() signedContent {
 		Version:    f.Version,
 		SeedRelays: f.SeedRelays,
 		DERPRelays: f.DERPRelays,
-		SeedPeers:  f.SeedPeers,
+		SeedZens:   f.SeedZens,
 		CrawlSeeds: f.CrawlSeeds,
 	}
 }

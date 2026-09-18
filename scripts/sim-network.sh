@@ -5,7 +5,7 @@
 # Same five-node topology as test-containers.sh (two regional seeds, three
 # fresh users that bootstrap off them), but the daemons keep running after
 # setup so the network behaves like a live one: posts keep propagating,
-# peers stay connected, the crawler keeps walking the follow graph. Daemon
+# zens stay connected, the crawler keeps walking the follow graph. Daemon
 # logs are copied to sim-logs/ on the host for easy retrieval.
 #
 # Usage:
@@ -72,19 +72,19 @@ teardown() {
 print_status() {
   printf "\n===== Network status =====\n"
   for c in $NODES; do
-    local id token peers
+    local id token zens
     id=$(dn "$c" whoami 2>/dev/null | head -1)
-    token=$(dn "$c" peers token 2>/dev/null | head -1)
-    peers=$(dn "$c" peers list 2>/dev/null | grep -vc 'no peers connected')
+    token=$(dn "$c" zens token 2>/dev/null | head -1)
+    zens=$(dn "$c" zens list 2>/dev/null | grep -vc 'no zens connected')
     printf "  %s\n" "$c"
     printf "    id:    %s\n" "${id:-none}"
     printf "    token: %s\n" "${token:-none}"
-    printf "    peers: %s connected\n" "$peers"
+    printf "    zens: %s connected\n" "$zens"
   done
 
   printf "\n----- carol's feed (first 10) -----\n"
   dn carol feed 2>/dev/null | head -10 || true
-  printf "----- end -----\n"
+  printf -- "----- end -----\n"
 
   printf "\nInteract with a node (example):\n"
   printf "  docker exec -it carol driftnode --db /data/node.db daemon unlock -p carolpass\n"
@@ -104,7 +104,7 @@ print_status() {
   printf "  driftnode --db <path> daemon --bootstrap bootstrap-eu.yaml \\\n"
   printf "    --bootstrap-key bootstrap-pubkey.b64\n"
   printf "The daemon verifies the bootstrap signature, auto-dials the seed, and\n"
-  printf "joins the network through peer exchange and crawling.\n"
+  printf "joins the network through zen exchange and crawling.\n"
 
   printf "\nDaemon logs saved to: %s\n" "$LOG_DIR"
   printf "Stop the network:     bash scripts/sim-network.sh --down\n"
@@ -148,7 +148,7 @@ docker compose build --quiet || { printf "BUILD FAILED\n"; exit 1; }
 
 printf "Starting containers...\n"
 docker compose up -d --quiet-pull
-sleep 2
+sleep 5
 
 printf "\n===== Seeds =====\n"
 SEED_EU_ID=$(dn seed-eu init -p seedpass)
@@ -166,15 +166,17 @@ dnq seed-us post -p seedpass "hello from us" && ok "seed-us posts" || warn "seed
 start_daemon seed-eu --key /data/tc.key
 start_daemon seed-us --key /data/tc.key
 sleep 5
+unlock_node seed-eu seedpass
+unlock_node seed-us seedpass
 
-SEED_EU_TOKEN=$(dn seed-eu peers token)
-SEED_US_TOKEN=$(dn seed-us peers token)
+SEED_EU_TOKEN=$(dn seed-eu zens token)
+SEED_US_TOKEN=$(dn seed-us zens token)
 [[ "$SEED_EU_TOKEN" == tc* ]] || fatal "seed-eu token: $SEED_EU_TOKEN"
 [[ "$SEED_US_TOKEN" == tc* ]] || fatal "seed-us token: $SEED_US_TOKEN"
 ok "seed tokens ready"
 
-dnq seed-eu peers add "$SEED_US_TOKEN" && ok "seed-eu dials seed-us" || warn "seed-eu dial" "failed"
-dnq seed-us peers add "$SEED_EU_TOKEN" && ok "seed-us dials seed-eu" || warn "seed-us dial" "failed"
+dnq seed-eu follow -p seedpass "$SEED_US_TOKEN" && ok "seed-eu dials seed-us" || warn "seed-eu dial" "failed"
+dnq seed-us follow -p seedpass "$SEED_EU_TOKEN" && ok "seed-us dials seed-eu" || warn "seed-us dial" "failed"
 sleep 5
 
 printf "\n===== Bootstrap signing key =====\n"
@@ -202,9 +204,9 @@ printf "\n===== Bootstrap files =====\n"
 cat > "$REPO_ROOT/bootstrap-eu.yaml" <<EOF
 version: 1
 signature: ""
-seed_peers:
+seed_zens:
   - token: "$SEED_EU_TOKEN"
-    kind: native_peer
+    kind: native_zen
 crawl_seeds:
   - "$SEED_EU_ID"
   - "$SEED_US_ID"
@@ -212,9 +214,9 @@ EOF
 cat > "$REPO_ROOT/bootstrap-us.yaml" <<EOF
 version: 1
 signature: ""
-seed_peers:
+seed_zens:
   - token: "$SEED_US_TOKEN"
-    kind: native_peer
+    kind: native_zen
 crawl_seeds:
   - "$SEED_EU_ID"
   - "$SEED_US_ID"
@@ -228,7 +230,10 @@ for f in bootstrap-eu bootstrap-us; do
   docker cp "$REPO_ROOT/$f.yaml" seed-eu:/tmp/$f.yaml
   docker exec seed-eu driftnode bootstrap sign /tmp/$f.yaml --key /tmp/bs-sign.key >/dev/null 2>&1 \
     || fatal "sign $f.yaml failed"
-  docker cp seed-eu:/tmp/$f.yaml "$REPO_ROOT/$f.yaml"
+  # Write the signed file back in-place (preserving the host inode) so the
+  # read-only bind mounts in the fresh-node containers stay valid. Replacing
+  # the file via `docker cp` would unlink the old inode the mounts point at.
+  docker exec seed-eu cat /tmp/$f.yaml > "$REPO_ROOT/$f.yaml"
 done
 ok "bootstrap files signed"
 
@@ -266,16 +271,37 @@ done
 start_daemon carol --bootstrap /bootstrap/bootstrap.yaml --bootstrap-key /data/bs-pubkey.b64
 start_daemon dave --bootstrap /bootstrap/bootstrap.yaml --bootstrap-key /data/bs-pubkey.b64
 start_daemon eve --bootstrap /bootstrap/bootstrap.yaml --bootstrap-key /data/bs-pubkey.b64
-sleep 10
+sleep 2
 unlock_node carol carolpass
 unlock_node dave davepass
 unlock_node eve evepass
-ok "fresh nodes bootstrapped"
+sleep 10
+
+# Verify each fresh node pulled its bootstrap seed's post. The daemon logs
+# bootstrap load failures as a non-fatal WARN, so an unconditional "ok"
+# would mask a broken bind mount or bad signature.
+contains() { echo "$1" | grep -qF "$2"; }
+verify_boot() {
+  local node="$1" want="$2" feed
+  feed=$(dn "$node" feed 2>/dev/null)
+  contains "$feed" "$want" && ok "$node bootstrap (seed post visible)" || warn "$node bootstrap" "seed post '$want' not in feed"
+}
+verify_boot carol "hello from eu"
+verify_boot dave "hello from us"
+verify_boot eve "hello from eu"
 
 printf "\n===== Cross-seed discovery =====\n"
+# Discovery via zen exchange + crawl reveals the cross-seed identity and
+# token, but does not dial. Follow the discovered seed to enter it into the
+# follow graph, then sync to pull its posts.
 dnq carol sync --now
 dnq dave sync --now
-sleep 15
+sleep 10
+dnq carol follow "$SEED_US_ID"
+dnq dave follow "$SEED_EU_ID"
+dnq carol sync --now
+dnq dave sync --now
+sleep 10
 
 printf "\n===== Building social graph =====\n"
 dnq dave follow "$CAROL_ID"

@@ -13,7 +13,7 @@ import (
 	"charm.land/lipgloss/v2"
 )
 
-// refreshInterval is how often the model polls the daemon for feed/peers/status.
+// refreshInterval is how often the model polls the daemon for feed/zens/status.
 const refreshInterval = 2 * time.Second
 
 // focus identifies which widget receives text input.
@@ -40,7 +40,7 @@ type model struct {
 	height   int
 
 	feed   []feedItem
-	peers  []peerInfo
+	zens   []zenInfo
 	status statusInfo
 	cursor int
 
@@ -57,14 +57,14 @@ type feedItem struct {
 	age    string
 }
 
-type peerInfo struct {
+type zenInfo struct {
 	id     string
 	kind   string
 	status string
 }
 
 type statusInfo struct {
-	peers     int
+	zens      int
 	transport bool
 	listen    string
 	unlocked  bool
@@ -82,7 +82,7 @@ func (m model) Init() tea.Cmd {
 	return refresh(m.socket)
 }
 
-// refresh is a tea.Cmd that queries the daemon for feed, peers, and status
+// refresh is a tea.Cmd that queries the daemon for feed, zens, and status
 // and returns a refreshMsg bundling all three.
 func refresh(socket string) tea.Cmd {
 	return func() tea.Msg {
@@ -92,10 +92,10 @@ func refresh(socket string) tea.Cmd {
 		} else {
 			msg.feedErr = err
 		}
-		if resp, err := daemon.SendRequest(socket, "peers", nil); err == nil {
-			msg.peers, msg.peersErr = parsePeers(resp)
+		if resp, err := daemon.SendRequest(socket, "zens", nil); err == nil {
+			msg.zens, msg.zensErr = parseZens(resp)
 		} else {
-			msg.peersErr = err
+			msg.zensErr = err
 		}
 		if resp, err := daemon.SendRequest(socket, "status", nil); err == nil {
 			msg.status, msg.statusErr = parseStatus(resp)
@@ -110,8 +110,8 @@ func refresh(socket string) tea.Cmd {
 type refreshMsg struct {
 	feed      []feedItem
 	feedErr   error
-	peers     []peerInfo
-	peersErr  error
+	zens      []zenInfo
+	zensErr   error
 	status    statusInfo
 	statusErr error
 	time      time.Time
@@ -138,26 +138,26 @@ func parseFeed(resp *daemon.Response) ([]feedItem, error) {
 	return out, nil
 }
 
-func parsePeers(resp *daemon.Response) ([]peerInfo, error) {
-	peers, ok := resp.Result.([]any)
+func parseZens(resp *daemon.Response) ([]zenInfo, error) {
+	zens, ok := resp.Result.([]any)
 	if !ok {
-		return nil, fmt.Errorf("unexpected peers response")
+		return nil, fmt.Errorf("unexpected zens response")
 	}
-	out := make([]peerInfo, 0, len(peers))
-	for _, p := range peers {
+	out := make([]zenInfo, 0, len(zens))
+	for _, p := range zens {
 		pm, ok := p.(map[string]any)
 		if !ok {
 			continue
 		}
-		out = append(out, peerInfo{
+		out = append(out, zenInfo{
 			id:     shortID(fmt.Sprintf("%v", pm["id"])),
 			kind:   fmt.Sprintf("%v", pm["kind"]),
 			status: fmt.Sprintf("%v", pm["status"]),
 		})
 	}
-	// The daemon builds the peer list from a map, so its order is
+	// The daemon builds the zen list from a map, so its order is
 	// non-deterministic across refreshes. Sort to keep the pane stable.
-	slices.SortFunc(out, func(a, b peerInfo) int {
+	slices.SortFunc(out, func(a, b zenInfo) int {
 		return strings.Compare(a.id, b.id)
 	})
 	return out, nil
@@ -168,12 +168,12 @@ func parseStatus(resp *daemon.Response) (statusInfo, error) {
 	if !ok {
 		return statusInfo{}, fmt.Errorf("unexpected status response")
 	}
-	peers, _ := m["peers"].(float64)
+	zens, _ := m["zens"].(float64)
 	transport, _ := m["transport"].(bool)
 	unlocked, _ := m["unlocked"].(bool)
 	listen, _ := m["listen_addr"].(string)
 	return statusInfo{
-		peers:     int(peers),
+		zens:      int(zens),
 		transport: transport,
 		listen:    listen,
 		unlocked:  unlocked,
@@ -220,8 +220,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.notice = "feed: " + msg.feedErr.Error()
 		}
-		if msg.peersErr == nil {
-			m.peers = msg.peers
+		if msg.zensErr == nil {
+			m.zens = msg.zens
 		}
 		if msg.statusErr == nil {
 			m.status = msg.status
@@ -330,9 +330,9 @@ func (m model) View() tea.View {
 	// Panels fill their column width and are capped to the body height via
 	// MaxHeight, so they take only the space they need and never overflow.
 	feedBlock := renderFeed(m, styles, layout.feedW, layout.bodyRows)
-	peersBlock := renderPeers(m, styles, layout.sideW, layout.bodyRows/2)
+	zensBlock := renderZens(m, styles, layout.sideW, layout.bodyRows/2)
 	statusBlock := renderStatus(m, styles, layout.sideW, layout.bodyRows/2)
-	sideColumn := lipgloss.JoinVertical(lipgloss.Left, peersBlock, statusBlock)
+	sideColumn := lipgloss.JoinVertical(lipgloss.Left, zensBlock, statusBlock)
 	// Cap the stacked side column to the body height so it matches the feed.
 	sideColumn = lipgloss.NewStyle().MaxHeight(layout.bodyRows).Render(sideColumn)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, feedBlock, sideColumn)
@@ -406,10 +406,10 @@ type styles struct {
 	panel lipgloss.Style
 
 	author lipgloss.Style
-	age   lipgloss.Style
+	age    lipgloss.Style
 	cursor lipgloss.Style
 
-	peerStatus map[string]lipgloss.Style
+	zenStatus map[string]lipgloss.Style
 
 	compose      lipgloss.Style
 	composeLabel lipgloss.Style
@@ -447,7 +447,7 @@ func newStyles() styles {
 	bad := lipgloss.Color("#f7768e")
 	warn := lipgloss.Color("#e0af68")
 
-	peerStatus := map[string]lipgloss.Style{
+	zenStatus := map[string]lipgloss.Style{
 		"connected":  lipgloss.NewStyle().Foreground(good).Bold(true),
 		"connecting": lipgloss.NewStyle().Foreground(warn),
 		"error":      lipgloss.NewStyle().Foreground(bad).Bold(true),
@@ -459,14 +459,14 @@ func newStyles() styles {
 			Foreground(lipgloss.Color("#c0caf5")).
 			Padding(0, 1),
 		identity:  lipgloss.NewStyle().Bold(true).Foreground(accent),
-		panelHead:  head,
-		panel:      border,
+		panelHead: head,
+		panel:     border,
 
 		author: lipgloss.NewStyle().Bold(true).Foreground(accent),
 		age:    lipgloss.NewStyle().Foreground(muted),
 		cursor: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e0af68")),
 
-		peerStatus: peerStatus,
+		zenStatus: zenStatus,
 
 		compose:      border,
 		composeLabel: lipgloss.NewStyle().Bold(true).Foreground(muted),
@@ -531,18 +531,18 @@ func renderFeed(m model, s styles, w, maxH int) string {
 	return s.panel.Width(w).MaxHeight(maxH).Render(head + "\n" + body)
 }
 
-func renderPeers(m model, s styles, w, maxH int) string {
-	head := s.panelHead.Render("Peers")
+func renderZens(m model, s styles, w, maxH int) string {
+	head := s.panelHead.Render("Zens")
 	var lines []string
-	if len(m.peers) == 0 {
-		lines = []string{s.dim.Render("(no peers)")}
+	if len(m.zens) == 0 {
+		lines = []string{s.dim.Render("(no zens)")}
 	}
 	// Content width for the id field: panel width minus borders, padding,
 	// the status column, the kind column, and the two separating spaces.
 	const statusCol = 11
 	contentW := w - 2 - 2
-	for _, p := range m.peers {
-		stStyle, ok := s.peerStatus[p.status]
+	for _, p := range m.zens {
+		stStyle, ok := s.zenStatus[p.status]
 		if !ok {
 			stStyle = s.dim
 		}
@@ -583,7 +583,7 @@ func renderStatus(m model, s styles, w, maxH int) string {
 		listen = s.accent.Render(truncate(listen, listenW))
 	}
 	lines := []string{
-		fmt.Sprintf("peers     %s", s.accent.Render(fmt.Sprintf("%d", m.status.peers))),
+		fmt.Sprintf("zens      %s", s.accent.Render(fmt.Sprintf("%d", m.status.zens))),
 		fmt.Sprintf("transport %s", transport),
 		fmt.Sprintf("key       %s", key),
 		fmt.Sprintf("listen    %s", listen),
@@ -658,7 +658,7 @@ func renderHelp(s styles, w, h int, _ string) string {
 		padTop = 0
 	}
 	padded := strings.Repeat("\n", padTop) + box
-	return lipgloss.Place(w, h, lipgloss.Position(float64(x)/float64(max(w,1))), lipgloss.Top, padded)
+	return lipgloss.Place(w, h, lipgloss.Position(float64(x)/float64(max(w, 1))), lipgloss.Top, padded)
 }
 
 // Run starts the TUI as a client of the daemon control socket. The daemon

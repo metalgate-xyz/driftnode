@@ -17,7 +17,7 @@ import (
 // application-level port for event-log sync (section 7.3).
 const SyncPort uint16 = 7421
 
-// Listener listens for inbound peer connections over tailcat and runs the
+// Listener listens for inbound zen connections over tailcat and runs the
 // sync protocol on each (section 5.1).
 type Listener struct {
 	tcServer *tailcat.Server
@@ -41,7 +41,7 @@ type KeyConfig struct {
 // NewListener creates a tailcat listener that accepts inbound connections and
 // dispatches them to handler. The handler receives a duplex byte stream over
 // which the sync protocol runs. OnTCP returns a fresh handler per inbound
-// connection, so one listener handles many concurrent peers (section 5.1).
+// connection, so one listener handles many concurrent zens (section 5.1).
 func NewListener(handler func(net.Conn), logger *slog.Logger) (*Listener, error) {
 	return NewListenerWithKey(handler, logger, nil)
 }
@@ -105,24 +105,24 @@ func (l *Listener) SaveKeyFile(path string) error {
 	return nil
 }
 
-// Addr returns the tailcat address (tc<base64>) that peers dial to reach this
+// Addr returns the tailcat address (tc<base64>) that zens dial to reach this
 // listener.
 func (l *Listener) Addr() tailcat.Addr { return l.addr }
 
 // Close stops the listener.
 func (l *Listener) Close() error { return l.tcServer.Close() }
 
-// Dialer dials a remote peer's tailcat address and returns a connected stream.
+// Dialer dials a remote zen's tailcat address and returns a connected stream.
 type Dialer struct {
 	logger *slog.Logger
 }
 
-// NewDialer creates a dialer for outbound peer connections.
+// NewDialer creates a dialer for outbound zen connections.
 func NewDialer(logger *slog.Logger) *Dialer {
 	return &Dialer{logger: logger}
 }
 
-// Dial connects to a peer's tailcat address and returns a duplex stream over
+// Dial connects to a zen's tailcat address and returns a duplex stream over
 // which the sync protocol runs.
 func (d *Dialer) Dial(ctx context.Context, addr tailcat.Addr) (net.Conn, error) {
 	c := tailcat.NewClient(addr)

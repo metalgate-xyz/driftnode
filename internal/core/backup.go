@@ -6,9 +6,9 @@ package core
 // Profile logs are re-fetchable cache, not backup-critical, and are excluded
 // to keep the file small.
 type BackupData struct {
-	Key     *EncryptedKey `cbor:"k"`
-	OwnLogs []SignedEvent `cbor:"o"` // own Profile log + PostLog, set union on import
-	Petnames []Petname    `cbor:"p,omitempty"`
+	Key      *EncryptedKey `cbor:"k"`
+	OwnLogs  []SignedEvent `cbor:"o"` // own Profile log + PostLog, set union on import
+	Petnames []Petname     `cbor:"p,omitempty"`
 }
 
 // Petname is a local nickname for a followed identity, stored in the user's

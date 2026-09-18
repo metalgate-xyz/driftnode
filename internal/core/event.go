@@ -39,16 +39,16 @@ const (
 // covers and what the event ID hashes. Field order and cbor tag numbers are
 // fixed: reordering fields or renumbering tags changes every event ID.
 type Event struct {
-	Kind      Kind      `cbor:"k"`
-	Log       LogName   `cbor:"l"`
-	Timestamp int64     `cbor:"t"` // unix nanoseconds
-	Sequence  uint64    `cbor:"s"` // per-author per-log monotonic counter
-	Profile   *Profile  `cbor:"p,omitempty"`
-	Follow    *Follow   `cbor:"f,omitempty"`
-	Post      *Post     `cbor:"P,omitempty"`
-	Reply     *Reply    `cbor:"R,omitempty"`
-	Like      *Like     `cbor:"L,omitempty"`
-	Delete    *Delete   `cbor:"D,omitempty"`
+	Kind      Kind     `cbor:"k"`
+	Log       LogName  `cbor:"l"`
+	Timestamp int64    `cbor:"t"` // unix nanoseconds
+	Sequence  uint64   `cbor:"s"` // per-author per-log monotonic counter
+	Profile   *Profile `cbor:"p,omitempty"`
+	Follow    *Follow  `cbor:"f,omitempty"`
+	Post      *Post    `cbor:"P,omitempty"`
+	Reply     *Reply   `cbor:"R,omitempty"`
+	Like      *Like    `cbor:"L,omitempty"`
+	Delete    *Delete  `cbor:"D,omitempty"`
 }
 
 // Profile is an upsert into the author's current profile (last-write-wins by
@@ -81,13 +81,13 @@ type Reply struct {
 
 // Like is recorded in the liker's own PostLog, never the target's: nobody can
 // write into someone else's log without a valid signature from that
-// identity's key, so a like count is always "events this peer has observed,"
+// identity's key, so a like count is always "events this zen has observed,"
 // never a global truth (§7.2).
 type Like struct {
 	TargetID EventID `cbor:"t"`
 }
 
-// Delete is a tombstone, not erasure: peers who already replicated the
+// Delete is a tombstone, not erasure: zens who already replicated the
 // original content before the delete propagated may still hold a copy (§7.2).
 type Delete struct {
 	TargetID EventID `cbor:"t"`
@@ -98,9 +98,9 @@ type Delete struct {
 // the embedded Event; the author and signature are carried alongside, not
 // inside, those bytes.
 type SignedEvent struct {
-	Event     Event     `cbor:"e"`
-	Author    Identity  `cbor:"a"`
-	Signature []byte    `cbor:"s"`
+	Event     Event    `cbor:"e"`
+	Author    Identity `cbor:"a"`
+	Signature []byte   `cbor:"s"`
 }
 
 // Sign produces a SignedEvent by signing the canonical encoding of ev with
@@ -123,7 +123,7 @@ func (k *KeyPair) Sign(ev Event) (*SignedEvent, error) {
 
 // Verify checks that the signature was produced by the author's private key
 // over the event's canonical bytes. A verified event is authentic and belongs
-// to the claimed identity's log, regardless of which peer relayed it (§7).
+// to the claimed identity's log, regardless of which zen relayed it (§7).
 func (e *SignedEvent) Verify() error {
 	if e == nil {
 		return errors.New("nil event")
@@ -155,7 +155,7 @@ func (e *SignedEvent) ID() (EventID, error) {
 }
 
 // validateEvent enforces that an event's Kind is consistent with the log it
-// claims to live in, so a peer can reject a mis-logged event before accepting
+// claims to live in, so a zen can reject a mis-logged event before accepting
 // it into a store.
 func validateEvent(ev Event) error {
 	if ev.Kind == 0 {

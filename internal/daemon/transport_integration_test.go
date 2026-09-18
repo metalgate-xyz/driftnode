@@ -15,36 +15,38 @@ import (
 )
 
 // pipeTransport implements Transport by pairing an in-process net.Pipe to a
-// running sync server, so the daemon's dial-and-sync path can be exercised
-// without a tailcat network monitor. Each Dial spins up a server goroutine
-// on the remote end of the pipe.
+// running sync session, so the daemon's dial-and-sync path can be exercised
+// without a tailcat network monitor. Each Dial spins up a server-side session
+// (with handshake) on the remote end of the pipe, using the zen's keypair.
 type pipeTransport struct {
 	serverStore *store.Store
+	serverKey   *core.KeyPair
 	logger      *slog.Logger
 }
 
 func (t pipeTransport) Dial(ctx context.Context, token string) (net.Conn, error) {
 	clientConn, serverConn := net.Pipe()
-	srv := syncproto.NewServer(t.serverStore, t.logger)
 	go func() {
 		defer serverConn.Close()
-		if err := srv.Serve(serverConn, serverConn); err != nil {
-			t.logger.Debug("pipe sync server ended", "err", err)
+		sess := syncproto.NewSession(t.serverStore, t.logger)
+		sess.SetKey(t.serverKey)
+		if _, err := sess.RunListener(serverConn, serverConn); err != nil {
+			t.logger.Debug("pipe sync session ended", "err", err)
 		}
 	}()
 	return clientConn, nil
 }
 
-// TestDaemonPeerSyncOverTransport proves the daemon's peers_add / sync path
-// dials a peer transport, runs the real sync protocol, and merges the peer's
+// TestDaemonZenSyncOverTransport proves the daemon's follow / sync path
+// dials a zen transport, runs the real sync protocol, and merges the zen's
 // events into the local store. This exercises the actual daemon code path
-// (control-socket dispatch → connectAndSync → Transport.Dial → sync protocol
-// → store merge) over an injectable transport, since tailcat needs a network
-// monitor unavailable in CI/sandboxes.
-func TestDaemonPeerSyncOverTransport(t *testing.T) {
+// (control-socket dispatch → handleFollow → Transport.Dial → handshake →
+// sync protocol → store merge) over an injectable transport, since tailcat
+// needs a network monitor unavailable in CI/sandboxes.
+func TestDaemonZenSyncOverTransport(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// Set up two stores: the daemon's (alice) and the peer's (bob).
+	// Set up two stores: the daemon's (alice) and the zen's (bob).
 	aliceStore := openTestStore(t)
 	bobStore := openTestStore(t)
 
@@ -59,20 +61,30 @@ func TestDaemonPeerSyncOverTransport(t *testing.T) {
 	// Daemon backed by alice's store, with an in-process transport that
 	// connects to bob's sync server.
 	d := New(aliceStore, logger)
-	d.SetTransport(pipeTransport{serverStore: bobStore, logger: logger})
+	d.SetTransport(pipeTransport{serverStore: bobStore, serverKey: bobKP, logger: logger})
 	sock := testSocketPath(t)
 	if err := d.Start(sock); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer d.Stop()
 
-	// Trigger a sync round via the control socket, targeting bob's token.
-	resp, err := SendRequest(sock, "peers_add", map[string]any{"token": string(bobKP.Identity())})
+	// Unlock alice's key so the daemon can authenticate the session.
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "alicepass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	// follow <token>: dial, learn identity, write Follow, bind routing.
+	// Pass a tc-prefixed token so handleFollow takes the dial path (the
+	// pipe transport ignores the token value).
+	resp, err := SendRequest(sock, "follow", map[string]any{
+		"target":     "tctest-token-bob",
+		"passphrase": "alicepass",
+	})
 	if err != nil {
-		t.Fatalf("peers_add: %v", err)
+		t.Fatalf("follow: %v", err)
 	}
 	if _, ok := resp.Result.(map[string]any); !ok {
-		t.Fatalf("peers_add result: %T", resp.Result)
+		t.Fatalf("follow result: %T", resp.Result)
 	}
 
 	// Give the async sync round time to complete.
@@ -105,29 +117,38 @@ func TestDaemonPeerSyncOverTransport(t *testing.T) {
 }
 
 // TestDaemonSyncNowOverTransport proves the sync --now control method dials
-// all known peers and runs the protocol.
+// all known zens and runs the protocol.
 func TestDaemonSyncNowOverTransport(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	aliceStore := openTestStore(t)
 	bobStore := openTestStore(t)
 	bobKP := initTestIdentityAt(t, bobStore, "bobpass")
+	initTestIdentityAt(t, aliceStore, "alicepass")
 
 	if err := bobStore.AppendOwnEvent(core.PostLog, mustSignPost(t, bobKP, "bob again", 1)); err != nil {
 		t.Fatalf("bob post: %v", err)
 	}
 
 	d := New(aliceStore, logger)
-	d.SetTransport(pipeTransport{serverStore: bobStore, logger: logger})
+	d.SetTransport(pipeTransport{serverStore: bobStore, serverKey: bobKP, logger: logger})
 	sock := testSocketPath(t)
 	if err := d.Start(sock); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer d.Stop()
 
-	// Add bob as a peer first (this triggers one sync round), then trigger
-	// an explicit sync --now and confirm events still present.
-	_, _ = SendRequest(sock, "peers_add", map[string]any{"token": string(bobKP.Identity())})
+	// Unlock alice's key so the daemon can authenticate the session.
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "alicepass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	// Follow bob (by token) first, then trigger an explicit sync --now
+	// and confirm events still present.
+	_, _ = SendRequest(sock, "follow", map[string]any{
+		"target":     "tctest-token-bob",
+		"passphrase": "alicepass",
+	})
 
 	// Wait for the first sync round.
 	deadline := time.Now().Add(5 * time.Second)

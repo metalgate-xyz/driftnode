@@ -38,9 +38,9 @@ Five containers, each an isolated node with its own store:
 2. Fresh nodes load a signed `bootstrap.yaml` listing only their regional
    seed, auto-dial it, and sync (Phase 1).
 3. The crawler walks the seed's follow graph, discovering the other seed
-   that was NOT in the bootstrap file (Phase 2). Peer exchange relays the
+   that was NOT in the bootstrap file (Phase 2). Zen exchange relays the
    other seed's token so the fresh node can dial it.
-4. Fresh nodes discover each other through peer exchange (the seed relays
+4. Fresh nodes discover each other through zen exchange (the seed relays
    their tokens), follow, and sync posts bidirectionally (Phases 3-4).
 5. Eve joins and discovers the network the same way (Phase 5).
 6. The seed's tailcat token stays stable across a container restart
@@ -55,7 +55,7 @@ containerized test exercises end-to-end:
 
 - Core: identity, canonical encoding, signing, event/log model
 - Store: bbolt CRUD, followed-event dedup by event ID, merged feed
-- Sync: wire protocol, bidirectional session, peer exchange, signature
+- Sync: wire protocol, bidirectional session, zen exchange, signature
   verification
 - Bootstrap: sign, verify, tamper detection
 - Crawler: BFS, depth limit, dedup

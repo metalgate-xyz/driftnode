@@ -25,7 +25,7 @@ import (
 	"github.com/tailscale/tailcat"
 )
 
-// Transport dials a peer by its address token and returns a duplex stream
+// Transport dials a zen by its address token and returns a duplex stream
 // over which the sync protocol runs. The production implementation is the
 // tailcat Dialer; tests inject an in-process transport to exercise the
 // daemon's sync wiring without a network monitor.
@@ -37,7 +37,7 @@ type Transport interface {
 // JSON-lines control API over a Unix domain socket (section 12.1). The CLI
 // and TUI are thin clients of this socket.
 //
-// It owns the tailcat listener (section 5.1) for inbound peer sync and a
+// It owns the tailcat listener (section 5.1) for inbound zen sync and a
 // dialer for outbound sync. The sync protocol (section 7.3) runs over each
 // tailcat stream.
 type Daemon struct {
@@ -46,7 +46,7 @@ type Daemon struct {
 	logger   *slog.Logger
 	mu       sync.Mutex
 	listener net.Listener
-	peers    map[string]*PeerInfo
+	zens     map[string]*ZenInfo
 
 	// Network state. The tailcat listener accepts inbound sync connections;
 	// nil when the transport is unavailable (the daemon still serves the
@@ -68,28 +68,35 @@ type Daemon struct {
 	lastSignAt time.Time
 	idleLock   time.Duration
 
-	// knownTokens is the set of peer tokens learned through bootstrap or
-	// peer exchange. connectAndSync dials these; newly learned tokens are
-	// added here and to the peers map.
+	// knownTokens is the set of zen tokens learned through bootstrap or
+	// zen exchange, used for zen-exchange offers and dedup. The auto-dial
+	// set is the follow graph (FollowGraph) plus the routing table
+	// (identity -> token); knownTokens is only for offering tokens to
+	// zens and recording discovered tokens for future intent.
 	knownTokens map[string]bool
 
 	// keyFile, if set, persists the tailcat private key so the node's
 	// address token stays stable across restarts (section 5.2).
 	keyFile string
 
-	// bootstrapPath, if set, is loaded on start. Its seed_peers are
+	// bootstrapPath, if set, is loaded on start. Its seed_zens are
 	// auto-dialed after the listener is up (section 6.1).
 	bootstrapPath      string
 	bootstrapVerifyKey ed25519.PublicKey
 
 	// crawler runs the background BFS of the follow graph (section 9.3).
 	crawler *crawler.Crawler
+
+	// bootstrapDone is true once the bootstrap seeds have been followed.
+	// Cleared while the key is locked, so the next unlock retries the
+	// bootstrap auto-follow if it ran before the key was available.
+	bootstrapDone bool
 }
 
-// PeerInfo describes a known peer and its connection state.
-type PeerInfo struct {
-	ID     string `json:"id"`     // tailcat token of the peer
-	Kind   string `json:"kind"`   // native_peer or browser
+// ZenInfo describes a known zen and its connection state.
+type ZenInfo struct {
+	ID     string `json:"id"`     // tailcat token of the zen
+	Kind   string `json:"kind"`   // native_zen or browser
 	Status string `json:"status"` // connecting, connected, error
 }
 
@@ -101,7 +108,7 @@ func New(s *store.Store, logger *slog.Logger) *Daemon {
 	return &Daemon{
 		store:       s,
 		logger:      logger,
-		peers:       make(map[string]*PeerInfo),
+		zens:        make(map[string]*ZenInfo),
 		knownTokens: make(map[string]bool),
 		syncNow:     make(chan struct{}, 1),
 		done:        make(chan struct{}),
@@ -116,7 +123,7 @@ func (d *Daemon) SetKeyFile(path string) {
 	d.mu.Unlock()
 }
 
-// SetTransport overrides the outbound peer transport. Used by tests to
+// SetTransport overrides the outbound zen transport. Used by tests to
 // inject an in-process transport without a network monitor.
 func (d *Daemon) SetTransport(t Transport) {
 	d.mu.Lock()
@@ -125,7 +132,7 @@ func (d *Daemon) SetTransport(t Transport) {
 }
 
 // SetBootstrap configures the daemon to load a bootstrap.yaml on start,
-// verify its signature, and auto-dial its seed_peers (section 6.1).
+// verify its signature, and auto-dial its seed_zens (section 6.1).
 func (d *Daemon) SetBootstrap(path string, verifyKey ed25519.PublicKey) {
 	d.mu.Lock()
 	d.bootstrapPath = path
@@ -180,7 +187,7 @@ func (d *Daemon) Start(socketPath string) error {
 	d.logger.Info("daemon started", "socket", socketPath)
 	go d.acceptLoop()
 
-	// Start the tailcat listener for inbound peer sync. Non-fatal if the
+	// Start the tailcat listener for inbound zen sync. Non-fatal if the
 	// transport cannot start (the sandbox may lack a network monitor). A
 	// transport injected via SetTransport (for tests) is not overwritten.
 	d.mu.Lock()
@@ -198,12 +205,12 @@ func (d *Daemon) Start(socketPath string) error {
 	}
 	tcListener, err := p2p.NewListenerWithKey(func(conn net.Conn) {
 		defer conn.Close()
-		if _, err := d.runSession(conn, false); err != nil {
+		if _, err := d.runSession(conn, false, nil); err != nil {
 			d.logger.Warn("inbound sync ended", "err", err)
 		}
 	}, d.logger, keyCfg)
 	if err != nil {
-		d.logger.Warn("tailcat listener unavailable; inbound peer sync disabled", "err", err)
+		d.logger.Warn("tailcat listener unavailable; inbound zen sync disabled", "err", err)
 	} else {
 		d.mu.Lock()
 		d.tcListener = tcListener
@@ -217,13 +224,13 @@ func (d *Daemon) Start(socketPath string) error {
 		}
 	}
 
-	// Background sync loop: pull from known peers periodically and on demand.
+	// Background sync loop: pull from known zens periodically and on demand.
 	ctx, cancel := context.WithCancel(context.Background())
 	d.syncCancel = cancel
 	go d.syncLoop(ctx)
 
-	// Auto-dial bootstrap seed peers (section 6.1). A fresh node finds its
-	// first peers this way; the file is verified before any dial.
+	// Auto-dial bootstrap seed zens (section 6.1). A fresh node finds its
+	// first zens this way; the file is verified before any dial.
 	d.mu.Lock()
 	bootstrapPath := d.bootstrapPath
 	bootstrapKey := d.bootstrapVerifyKey
@@ -379,32 +386,14 @@ func (d *Daemon) dispatch(req Request) Response {
 		}
 		d.mu.Unlock()
 		return Response{Result: map[string]string{"token": string(addr)}}
-	case "peers":
+	case "zens":
 		d.mu.Lock()
-		peers := make([]*PeerInfo, 0, len(d.peers))
-		for _, p := range d.peers {
-			peers = append(peers, p)
+		zens := make([]*ZenInfo, 0, len(d.zens))
+		for _, p := range d.zens {
+			zens = append(zens, p)
 		}
 		d.mu.Unlock()
-		return Response{Result: peers}
-	case "peers_add":
-		var p struct {
-			Token string `json:"token"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Token == "" {
-			return Response{Error: "token required"}
-		}
-		d.addPeer(p.Token, "native_peer", "connecting")
-		d.mu.Lock()
-		d.knownTokens[p.Token] = true
-		d.mu.Unlock()
-		go d.connectAndSync(p.Token)
-		return Response{Result: map[string]string{"status": "connecting", "token": p.Token}}
+		return Response{Result: zens}
 	case "follow":
 		var p struct {
 			Target     string `json:"target"`
@@ -496,7 +485,7 @@ func (d *Daemon) dispatch(req Request) Response {
 		d.mu.Unlock()
 		return Response{Result: map[string]any{
 			"running":     true,
-			"peers":       len(d.peers),
+			"zens":        len(d.zens),
 			"socket":      d.socket,
 			"transport":   tcUp,
 			"listen_addr": string(addr),
@@ -583,8 +572,16 @@ func (d *Daemon) handleUnlock(passphrase string) unlockResult {
 	d.mu.Lock()
 	d.unlocked = kp
 	d.lastSignAt = time.Now()
+	bootstrapPath := d.bootstrapPath
+	bootstrapKey := d.bootstrapVerifyKey
+	bootstrapDone := d.bootstrapDone
 	d.mu.Unlock()
 	d.logger.Info("key unlocked")
+	// If the bootstrap auto-follow ran while the key was locked, retry
+	// it now that the key is available so seeds enter the follow graph.
+	if !bootstrapDone && bootstrapPath != "" {
+		go d.dialBootstrapSeeds(bootstrapPath, bootstrapKey)
+	}
 	return unlockResult{kp: kp, resp: Response{Result: map[string]string{"status": "unlocked", "identity": kp.Identity().String()}}}
 }
 
@@ -627,12 +624,73 @@ func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
-// handleFollow signs a Follow event and appends it to the local ProfileLog.
+// handleFollow is the single "add a zen" gesture: it records a Follow event
+// for the target identity. The target may be a driftnode identity/pubkey or a
+// tailcat token. When given a token, it dials the zen, learns the identity
+// from the session handshake, writes the Follow event, and binds the token
+// to that identity in the routing table so future sync rounds can dial it.
+// When given a pubkey (the offline path), it writes the Follow event only;
+// the routing binding is filled in later when the identity is contacted.
 func (d *Daemon) handleFollow(targetStr string, kp *core.KeyPair) Response {
-	target, err := resolvePubkey(targetStr)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("resolve target: %s", err)}
+	// The target is either a driftnode identity/pubkey (offline path:
+	// write a Follow only) or a tailcat token (dial path: dial, learn
+	// identity from the handshake, write Follow, bind routing). Identities
+	// and raw base32 pubkeys can be parsed unambiguously, so try that
+	// first; anything else is treated as a token.
+	if target, err := resolvePubkey(targetStr); err == nil {
+		return d.writeFollow(target, kp)
 	}
+	return d.followByToken(targetStr, kp)
+}
+
+// followByToken dials a tailcat token, runs the handshake to learn the zen's
+// identity, writes a Follow event for it, and binds the token to that
+// identity in the routing table.
+func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
+	d.addZen(token, "native_zen", "connecting")
+	d.mu.Lock()
+	transport := d.transport
+	d.mu.Unlock()
+	if transport == nil {
+		return Response{Error: "no transport configured"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	conn, err := transport.Dial(ctx, token)
+	if err != nil {
+		d.setZenStatus(token, "error")
+		return Response{Error: fmt.Sprintf("dial: %s", err)}
+	}
+	defer conn.Close()
+	d.setZenStatus(token, "connected")
+	var zenID core.Identity
+	if _, err := d.runSession(conn, true, &zenID); err != nil {
+		d.logger.Warn("follow: session failed", "token", token, "err", err)
+		return Response{Error: fmt.Sprintf("session: %s", err)}
+	}
+	if zenID == "" {
+		return Response{Error: "session: zen did not authenticate"}
+	}
+	pub, err := zenID.PubkeyBytes()
+	if err != nil {
+		return Response{Error: fmt.Sprintf("zen identity: %s", err)}
+	}
+	if err := d.store.PutRouting(zenID, token); err != nil {
+		return Response{Error: fmt.Sprintf("routing: %s", err)}
+	}
+	d.mu.Lock()
+	d.knownTokens[token] = true
+	d.mu.Unlock()
+	resp := d.writeFollow([32]byte(pub), kp)
+	if resp.Error != "" {
+		return resp
+	}
+	resp.Result = map[string]string{"followed": zenID.String(), "token": token}
+	return resp
+}
+
+// writeFollow signs and appends a Follow event for the given target pubkey.
+func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 	seq, err := d.store.OwnEventCount(core.ProfileLog)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("sequence: %s", err)}
@@ -654,8 +712,10 @@ func (d *Daemon) handleFollow(targetStr string, kp *core.KeyPair) Response {
 	return Response{Result: map[string]string{"followed": core.IdentityFromPubkey(ed25519.PublicKey(target[:])).String()}}
 }
 
-// handleUnfollow signs an Unfollow event and appends it to the local
-// ProfileLog.
+// handleUnfollow signs an Unfollow event, removes the routing binding for
+// the target, and drops the zen from the zens map. This is the single
+// "remove a zen" gesture: unfollowing stops the daemon from dialing the
+// identity on future sync rounds.
 func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	target, err := resolvePubkey(targetStr)
 	if err != nil {
@@ -678,8 +738,18 @@ func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
+	token, hadToken, _ := d.store.Routing(id)
+	if err := d.store.DeleteRouting(id); err != nil {
+		d.logger.Warn("unfollow: delete routing", "zen", id, "err", err)
+	}
+	if hadToken {
+		d.RemoveZen(token)
+	} else {
+		d.RemoveZen(string(id))
+	}
 	d.touchSignAt()
-	return Response{Result: map[string]string{"unfollowed": core.IdentityFromPubkey(ed25519.PublicKey(target[:])).String()}}
+	return Response{Result: map[string]string{"unfollowed": id.String()}}
 }
 
 // touchSignAt records that a signing call just happened, for idle-lock
@@ -690,10 +760,12 @@ func (d *Daemon) touchSignAt() {
 	d.mu.Unlock()
 }
 
-// connectAndSync dials a peer by its address token and runs a bidirectional
-// sync session (section 7.3): this peer pulls the remote peer's logs, then
-// serves its own logs back over the same connection. Peer tokens learned
-// during the exchange are recorded for future dials (section 6.1).
+// connectAndSync dials a zen by its address token and runs a bidirectional
+// sync session (section 7.3): this zen pulls the remote zen's logs, then
+// serves its own logs back over the same connection. On success, the
+// authenticated zen identity is bound to the token in the routing table so
+// future sync rounds can dial it by identity. Zen tokens learned during the
+// exchange are recorded for future dials (section 6.1).
 func (d *Daemon) connectAndSync(token string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -701,27 +773,33 @@ func (d *Daemon) connectAndSync(token string) {
 	transport := d.transport
 	d.mu.Unlock()
 	if transport == nil {
-		d.logger.Warn("peer dial failed: no transport configured", "token", token)
-		d.setPeerStatus(token, "error")
+		d.logger.Warn("zen dial failed: no transport configured", "token", token)
+		d.setZenStatus(token, "error")
 		return
 	}
 	conn, err := transport.Dial(ctx, token)
 	if err != nil {
-		d.logger.Warn("peer dial failed", "token", token, "err", err)
-		d.setPeerStatus(token, "error")
+		d.logger.Warn("zen dial failed", "token", token, "err", err)
+		d.setZenStatus(token, "error")
 		return
 	}
 	defer conn.Close()
-	d.setPeerStatus(token, "connected")
-	merged, err := d.runSession(conn, true)
+	d.setZenStatus(token, "connected")
+	var zenID core.Identity
+	merged, err := d.runSession(conn, true, &zenID)
 	if err != nil {
 		d.logger.Warn("sync round failed", "token", token, "err", err)
 	}
-	d.logger.Info("sync round done", "token", token, "merged", merged)
+	if zenID != "" {
+		if err := d.store.PutRouting(zenID, token); err != nil {
+			d.logger.Warn("routing bind failed", "zen", zenID, "err", err)
+		}
+	}
+	d.logger.Info("sync round done", "token", token, "zen", zenID, "merged", merged)
 }
 
 // dialBootstrapSeeds loads a bootstrap.yaml, verifies its signature, and
-// dials each seed peer (section 6.1). Called asynchronously from Start.
+// dials each seed zen (section 6.1). Called asynchronously from Start.
 func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 	bf, err := bootstrap.Load(path)
 	if err != nil {
@@ -733,27 +811,13 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 			d.logger.Warn("bootstrap signature verification failed", "err", err)
 			return
 		}
-		d.logger.Info("bootstrap verified", "seed_peers", len(bf.SeedPeers))
+		d.logger.Info("bootstrap verified", "seed_zens", len(bf.SeedZens))
 	} else {
-		d.logger.Info("bootstrap loaded (no verification key)", "seed_peers", len(bf.SeedPeers))
+		d.logger.Info("bootstrap loaded (no verification key)", "seed_zens", len(bf.SeedZens))
 	}
-	for _, sp := range bf.SeedPeers {
-		if sp.Token == "" {
-			continue
-		}
-		d.mu.Lock()
-		already := d.knownTokens[sp.Token]
-		d.knownTokens[sp.Token] = true
-		d.mu.Unlock()
-		if already {
-			continue
-		}
-		d.addPeer(sp.Token, sp.Kind, "connecting")
-		d.connectAndSync(sp.Token)
-	}
-
 	// Seed the crawler from crawl_seeds (section 9.3). The crawler walks
-	// the follow graph, fetching Profile logs only.
+	// the follow graph, fetching Profile logs only. Crawl seeds can be
+	// loaded without the signing key; the fetches will fail until unlock.
 	var seeds []core.Identity
 	for _, s := range bf.CrawlSeeds {
 		if id, err := core.ParseIdentity(s); err == nil {
@@ -768,10 +832,46 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 		d.mu.Unlock()
 		d.logger.Info("crawl seeds loaded", "count", len(seeds))
 	}
+
+	d.mu.Lock()
+	kp := d.unlocked
+	d.mu.Unlock()
+	if kp == nil {
+		// Key is locked: defer the auto-follow until unlock. Leave
+		// bootstrapDone false so handleUnlock retries dialBootstrapSeeds.
+		d.logger.Warn("bootstrap: key locked; deferring seed auto-follow")
+		return
+	}
+	for _, sp := range bf.SeedZens {
+		if sp.Token == "" {
+			continue
+		}
+		d.mu.Lock()
+		already := d.knownTokens[sp.Token]
+		d.mu.Unlock()
+		if already {
+			continue
+		}
+		d.addZen(sp.Token, sp.Kind, "connecting")
+		// handleFollow -> followByToken dials, handshakes, writes the
+		// Follow event, binds routing, and marks the token known on
+		// success. On failure the token stays unmarked so a retry can
+		// attempt it again.
+		resp := d.handleFollow(sp.Token, kp)
+		if resp.Error != "" {
+			d.logger.Warn("bootstrap: auto-follow seed failed", "token", sp.Token, "err", resp.Error)
+			continue
+		}
+	}
+
+	// Mark bootstrap complete so handleUnlock doesn't retry it.
+	d.mu.Lock()
+	d.bootstrapDone = true
+	d.mu.Unlock()
 }
 
-// knownTokensList returns the current set of known peer tokens for peer
-// exchange, including this node's own listener address so peers can dial
+// knownTokensList returns the current set of known zen tokens for zen
+// exchange, including this node's own listener address so zens can dial
 // it back and discover it through the exchange.
 func (d *Daemon) knownTokensList() []string {
 	d.mu.Lock()
@@ -789,9 +889,12 @@ func (d *Daemon) knownTokensList() []string {
 	return out
 }
 
-// learnPeerToken records a peer token learned through peer exchange and adds
-// it to the peers map for a future sync round.
-func (d *Daemon) learnPeerToken(token string) {
+// learnZenToken records a zen token learned through zen exchange. The
+// token is added to knownTokens (for zen-exchange offers and dedup) and the
+// zens map (for display), but NOT to seedZens, so it is not auto-dialed.
+// Dialing a discovered zen requires explicit intent: a follow by token or a
+// follow-resolved dial.
+func (d *Daemon) learnZenToken(token string) {
 	if token == "" {
 		return
 	}
@@ -801,14 +904,14 @@ func (d *Daemon) learnPeerToken(token string) {
 		return
 	}
 	d.knownTokens[token] = true
-	_, exists := d.peers[token]
+	_, exists := d.zens[token]
 	d.mu.Unlock()
 	if !exists {
-		d.addPeer(token, "native_peer", "discovered")
+		d.addZen(token, "native_zen", "discovered")
 	}
 }
 
-// syncLoop periodically syncs with all known peers and also fires on demand
+// syncLoop periodically syncs with all known zens and also fires on demand
 // when syncNow is signaled. It also runs the crawler periodically to walk
 // the follow graph (section 9.3).
 func (d *Daemon) syncLoop(ctx context.Context) {
@@ -823,10 +926,10 @@ func (d *Daemon) syncLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-d.syncNow:
-			d.syncAllPeers()
+			d.syncAllZens()
 			d.runCrawl(ctx)
 		case <-syncTicker.C:
-			d.syncAllPeers()
+			d.syncAllZens()
 		case <-crawlTicker.C:
 			d.runCrawl(ctx)
 		}
@@ -849,7 +952,7 @@ func (d *Daemon) runCrawl(ctx context.Context) {
 	d.logger.Info("crawl complete", "fetched", fetched, "visited", c.VisitedCount())
 }
 
-// crawlFetcher implements crawler.Fetcher by dialing known peers to fetch
+// crawlFetcher implements crawler.Fetcher by dialing known zens to fetch
 // Profile logs.
 type crawlFetcher struct{ d *Daemon }
 
@@ -857,55 +960,132 @@ func (f *crawlFetcher) FetchProfileLog(ctx context.Context, id core.Identity) ([
 	return f.d.crawlFetch(ctx, id)
 }
 
-// syncAllPeers runs a sync round against every known peer token.
-func (d *Daemon) syncAllPeers() {
-	d.mu.Lock()
-	tokens := make([]string, 0, len(d.peers))
-	for tok := range d.peers {
-		tokens = append(tokens, tok)
+// syncAllZens runs a sync round against every followed identity whose
+// routing token is known. The follow graph is the auto-dial set: a zen is
+// dialed while it is followed and its token is bound. Unfollowing removes
+// the identity from the dial set; a followed identity with no bound token
+// (e.g. followed offline by pubkey) is resolved by probing known tokens:
+// each is dialed, the handshake reveals the identity, and if it matches a
+// pending follow, the token is bound and the identity is synced.
+func (d *Daemon) syncAllZens() {
+	ids, err := d.store.FollowGraph()
+	if err != nil {
+		d.logger.Warn("sync: read follow graph", "err", err)
+		return
 	}
-	d.mu.Unlock()
-	for _, tok := range tokens {
-		d.connectAndSync(tok)
+	// Split into bound (have a token) and pending (need resolution).
+	var bound []core.Identity
+	var pending []core.Identity
+	for _, id := range ids {
+		_, ok, err := d.store.Routing(id)
+		if err != nil {
+			d.logger.Warn("sync: read routing", "zen", id, "err", err)
+			continue
+		}
+		if ok {
+			bound = append(bound, id)
+		} else {
+			pending = append(pending, id)
+		}
+	}
+	// Dial bound identities directly.
+	for _, id := range bound {
+		token, _, _ := d.store.Routing(id)
+		d.connectAndSync(token)
+	}
+	// Resolve pending follows by probing known tokens.
+	if len(pending) > 0 {
+		d.resolvePendingFollows(pending)
 	}
 }
 
-// AddPeer records a connected peer.
-func (d *Daemon) AddPeer(id, kind, status string) {
+// resolvePendingFollows dials known tokens to find the routing for followed
+// identities that have no bound token. Each token is dialed, the handshake
+// reveals the zen's identity, and if that identity is in the pending set,
+// the token is bound and the identity is synced. Used when a follow was
+// recorded by pubkey (offline) and the token is learned later via zen
+// exchange or another sync.
+func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
+	pendingSet := make(map[core.Identity]bool, len(pending))
+	for _, id := range pending {
+		pendingSet[id] = true
+	}
+	for _, tok := range d.knownTokensList() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		conn, err := d.transport.Dial(ctx, tok)
+		if err != nil {
+			cancel()
+			continue
+		}
+		var zenID core.Identity
+		_, err = d.runSession(conn, true, &zenID)
+		if err != nil {
+			conn.Close()
+			cancel()
+			continue
+		}
+		if pendingSet[zenID] {
+			if err := d.store.PutRouting(zenID, tok); err != nil {
+				d.logger.Warn("resolve: routing bind", "zen", zenID, "err", err)
+			}
+		}
+		conn.Close()
+		cancel()
+	}
+}
+
+// AddZen records a connected zen.
+func (d *Daemon) AddZen(id, kind, status string) {
 	d.mu.Lock()
-	d.peers[id] = &PeerInfo{ID: id, Kind: kind, Status: status}
+	d.zens[id] = &ZenInfo{ID: id, Kind: kind, Status: status}
 	d.mu.Unlock()
 }
 
-// addPeer is the internal recorder used by peers_add.
-func (d *Daemon) addPeer(id, kind, status string) {
-	d.AddPeer(id, kind, status)
+// addZen is the internal recorder for zen connection state.
+func (d *Daemon) addZen(id, kind, status string) {
+	d.AddZen(id, kind, status)
 }
 
-// RemovePeer removes a peer record.
-func (d *Daemon) RemovePeer(id string) {
+// RemoveZen removes a zen record.
+func (d *Daemon) RemoveZen(id string) {
 	d.mu.Lock()
-	delete(d.peers, id)
+	delete(d.zens, id)
 	d.mu.Unlock()
 }
 
-// setPeerStatus updates a recorded peer's status.
-func (d *Daemon) setPeerStatus(id, status string) {
+// setZenStatus updates a recorded zen's status.
+func (d *Daemon) setZenStatus(id, status string) {
 	d.mu.Lock()
-	if p, ok := d.peers[id]; ok {
+	if p, ok := d.zens[id]; ok {
 		p.Status = status
 	}
 	d.mu.Unlock()
 }
 
 // crawlFetch fetches a remote identity's ProfileLog by dialing each known
-// peer and requesting that identity's Profile log (section 9.3). Returns
-// the events from the first peer that has them.
+// zen and requesting that identity's Profile log (section 9.3). Returns
+// the events from the first zen that has them. Each dial runs the session
+// handshake first, so the connection is authenticated before any sync
+// traffic.
 func (d *Daemon) crawlFetch(ctx context.Context, id core.Identity) ([]core.SignedEvent, error) {
+	d.mu.Lock()
+	kp := d.unlocked
+	transport := d.transport
+	d.mu.Unlock()
+	if kp == nil {
+		return nil, errors.New("key is locked; cannot authenticate crawl session")
+	}
 	tokens := d.knownTokensList()
 	for _, tok := range tokens {
-		conn, err := d.transport.Dial(ctx, tok)
+		conn, err := transport.Dial(ctx, tok)
 		if err != nil {
+			continue
+		}
+		sess := syncproto.NewSession(d.store, d.logger)
+		sess.SetKey(kp)
+		if _, err := sess.Handshake(conn, conn); err != nil {
+			d.logger.Warn("crawl: handshake failed", "token", tok, "err", err)
+			conn.Close()
 			continue
 		}
 		events, err := syncproto.NewClient(d.store, d.logger).SyncLogRaw(conn, conn, core.ProfileLog, 0, id)
@@ -922,12 +1102,25 @@ func (d *Daemon) crawlFetch(ctx context.Context, id core.Identity) ([]core.Signe
 
 // runSession runs a bidirectional sync session over conn. When initiator is
 // true, this side opened the connection and pulls first; otherwise the
-// remote side opened it and we serve first. Peer tokens learned during the
-// exchange are recorded for future dials.
-func (d *Daemon) runSession(conn net.Conn, initiator bool) (int, error) {
+// remote side opened it and we serve first. The session handshake
+// authenticates both sides' Ed25519 identities before any sync traffic;
+// zenID (if non-empty) receives the authenticated zen identity. The
+// listener must have its signing key unlocked to participate; a locked
+// daemon rejects inbound sessions.
+func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity) (int, error) {
 	sess := syncproto.NewSession(d.store, d.logger)
-	sess.SetPeerSource(d.knownTokensList)
-	sess.SetPeerSink(d.learnPeerToken)
+	sess.SetZenSource(d.knownTokensList)
+	sess.SetZenSink(d.learnZenToken)
+	d.mu.Lock()
+	kp := d.unlocked
+	d.mu.Unlock()
+	if kp == nil {
+		return 0, errors.New("key is locked; cannot authenticate session")
+	}
+	sess.SetKey(kp)
+	if zenID != nil {
+		sess.SetAuthed(func(id core.Identity) { *zenID = id })
+	}
 	if initiator {
 		return sess.RunInitiator(conn, conn)
 	}

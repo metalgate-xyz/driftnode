@@ -1,6 +1,7 @@
 package store
 
 import (
+	"crypto/ed25519"
 	"path/filepath"
 	"testing"
 
@@ -193,5 +194,57 @@ func TestExportImportBackup(t *testing.T) {
 	events, _ = s2.OwnEvents(core.PostLog)
 	if len(events) != 1 {
 		t.Fatalf("after re-import: want 1 event, got %d", len(events))
+	}
+}
+
+func TestFollowGraph(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	target1, _, _ := ed25519.GenerateKey(nil)
+	target2, _, _ := ed25519.GenerateKey(nil)
+
+	sign := func(kind core.Kind, seq uint64, pub []byte) *core.SignedEvent {
+		se, err := kp.Sign(core.Event{
+			Kind: kind, Log: core.ProfileLog, Timestamp: core.Now64(), Sequence: seq,
+			Follow: &core.Follow{TargetPubkey: [32]byte(pub)},
+		})
+		if err != nil {
+			t.Fatalf("Sign: %v", err)
+		}
+		return se
+	}
+
+	if err := s.AppendOwnEvent(core.ProfileLog, sign(core.KindFollow, 1, target1)); err != nil {
+		t.Fatalf("append follow1: %v", err)
+	}
+	if err := s.AppendOwnEvent(core.ProfileLog, sign(core.KindFollow, 2, target2)); err != nil {
+		t.Fatalf("append follow2: %v", err)
+	}
+
+	ids, err := s.FollowGraph()
+	if err != nil {
+		t.Fatalf("FollowGraph: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("want 2 followed identities, got %d", len(ids))
+	}
+
+	// Unfollowing target1 should leave only target2.
+	if err := s.AppendOwnEvent(core.ProfileLog, sign(core.KindUnfollow, 3, target1)); err != nil {
+		t.Fatalf("append unfollow1: %v", err)
+	}
+	ids, err = s.FollowGraph()
+	if err != nil {
+		t.Fatalf("FollowGraph after unfollow: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("after unfollow: want 1 followed identity, got %d", len(ids))
+	}
+	want := core.IdentityFromPubkey(ed25519.PublicKey(target2))
+	if ids[0] != want {
+		t.Fatalf("after unfollow: want %s, got %s", want, ids[0])
 	}
 }

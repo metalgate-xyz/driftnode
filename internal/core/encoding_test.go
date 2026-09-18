@@ -11,7 +11,7 @@ import (
 
 // The canonical form is whatever the shared function produces, and two
 // encodings of the same event must be byte-identical so that event IDs and
-// signatures are stable across peers and across the two build targets (§7.2).
+// signatures are stable across zens and across the two build targets (§7.2).
 func TestCanonicalEncodingDeterministic(t *testing.T) {
 	ev := Event{
 		Kind:      KindPost,

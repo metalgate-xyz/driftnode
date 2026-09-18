@@ -14,8 +14,8 @@ func TestSignAndVerify(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	f := &File{
 		Version: 1,
-		SeedPeers: []SeedPeer{
-			{Token: "tcexample123", Kind: "native_peer"},
+		SeedZens: []SeedZen{
+			{Token: "tcexample123", Kind: "native_zen"},
 		},
 		CrawlSeeds: []string{"driftnode:abc123"},
 	}
@@ -65,7 +65,7 @@ func TestLoadAndVerify(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	f := &File{
 		Version:    1,
-		SeedPeers:  []SeedPeer{{Token: "tctest", Kind: "native_peer"}},
+		SeedZens:   []SeedZen{{Token: "tctest", Kind: "native_zen"}},
 		CrawlSeeds: []string{"driftnode:seed1"},
 	}
 	f.Sign(priv)
@@ -91,9 +91,9 @@ func TestParse(t *testing.T) {
 	yamlData := []byte(`
 version: 1
 signature: "ed25519:abcd"
-seed_peers:
+seed_zens:
   - token: "tctest"
-    kind: native_peer
+    kind: native_zen
 crawl_seeds:
   - "driftnode:abc"
 `)
@@ -104,8 +104,8 @@ crawl_seeds:
 	if f.Version != 1 {
 		t.Fatalf("version: want 1, got %d", f.Version)
 	}
-	if len(f.SeedPeers) != 1 || f.SeedPeers[0].Token != "tctest" {
-		t.Fatalf("seed peers: %+v", f.SeedPeers)
+	if len(f.SeedZens) != 1 || f.SeedZens[0].Token != "tctest" {
+		t.Fatalf("seed zens: %+v", f.SeedZens)
 	}
 	if len(f.CrawlSeeds) != 1 || f.CrawlSeeds[0] != "driftnode:abc" {
 		t.Fatalf("crawl seeds: %+v", f.CrawlSeeds)

@@ -2,7 +2,7 @@
 
 A bootstrap node is a `driftnode` that has a stable network address and is
 listed in a signed `bootstrap.yaml` so that fresh installs can find their first
-peers. The network needs a handful of these across regions. Anyone can run
+zens. The network needs a handful of these across regions. Anyone can run
 one.
 
 Running a bootstrap node does not give you any special privilege. A bootstrap
@@ -11,8 +11,8 @@ point, not a server with user data.
 
 ## Why volunteer
 
-A fresh `driftnode` install knows no peers. It fetches a signed
-`bootstrap.yaml`, dials the seed peers listed there, and joins the network
+A fresh `driftnode` install knows no zens. It fetches a signed
+`bootstrap.yaml`, dials the seed zens listed there, and joins the network
 through them. Without bootstrap nodes, new users have no way in.
 
 The more bootstrap nodes there are, across more regions and networks, the
@@ -54,10 +54,10 @@ address token it produces stays the same.
 With the daemon running:
 
 ```sh
-driftnode --db /var/lib/driftnode/node.db peers token
+driftnode --db /var/lib/driftnode/node.db zens token
 ```
 
-This prints a `tc...` string. That is your node's dialable address. Peers and
+This prints a `tc...` string. That is your node's dialable address. Zens and
 fresh installs use it to connect to you.
 
 ## Step 3: Verify your token is stable
@@ -67,7 +67,7 @@ Restart the daemon and check the token again:
 ```sh
 driftnode --db /var/lib/driftnode/node.db daemon stop
 driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
-driftnode --db /var/lib/driftnode/node.db peers token
+driftnode --db /var/lib/driftnode/node.db zens token
 ```
 
 The token should be identical. If it changed, the key file path is wrong or
@@ -89,15 +89,15 @@ real content on their first sync.
 
 ## Step 5: Create and sign a bootstrap.yaml
 
-A `bootstrap.yaml` is a static YAML file listing seed peers and crawl seeds.
+A `bootstrap.yaml` is a static YAML file listing seed zens and crawl seeds.
 It is signed with an Ed25519 key so that any mirror serving it can be verified.
 
 ```yaml
 version: 1
 signature: ""
-seed_peers:
+seed_zens:
   - token: "tc...your-token..."
-    kind: native_peer
+    kind: native_zen
 crawl_seeds:
   - "driftnode:your-pubkey"
   - "driftnode:other-seed-pubkey"
@@ -196,7 +196,7 @@ longer needs `crawl_seeds`.
 - Tailcat uses WireGuard. It attempts UDP hole-punching and falls back to a
   DERP relay if that fails. No port forwarding is required; a node behind NAT
   or a changing IP works fine. A node with a public IP and direct UDP
-  reachability provides lower latency for peers dialing in, but it is not a
+  reachability provides lower latency for zens dialing in, but it is not a
   prerequisite.
 - The `--cap-add=NET_ADMIN` Docker flag is needed for Tailcat's network
   monitor. OrbStack provides this. On Linux, the container runtime grants it.
@@ -210,16 +210,16 @@ A bootstrap node is lightweight:
 - Disk: grows with the number of followed post logs and the crawl cache. A
   `postlog_retention_days` config cap is available if you want to limit
   history. Crawled profile logs are bounded by an LRU cache.
-- Bandwidth: proportional to the number of peers syncing with you. Each sync
+- Bandwidth: proportional to the number of zens syncing with you. Each sync
   round transfers only new events since the last sync.
 
 ## Trust and what a bootstrap node can and cannot do
 
 A bootstrap node:
 
-- Can see the public profile logs and post logs of peers it syncs with
+- Can see the public profile logs and post logs of zens it syncs with
   (these are already public, signed content).
-- Can relay routing information (peer tokens) so new nodes discover each other.
+- Can relay routing information (zen tokens) so new nodes discover each other.
 - Cannot forge posts or follows (every event is signed by its author's key).
 - Cannot read private messages (there are no private messages in v1).
 - Cannot censor or rank anyone's feed (feed construction is entirely

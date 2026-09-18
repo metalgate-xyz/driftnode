@@ -1,6 +1,8 @@
 package sync
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +12,7 @@ import (
 	"driftnode/internal/store"
 )
 
-// Server handles incoming sync requests from a peer. It reads requests and
+// Server handles incoming sync requests from a zen. It reads requests and
 // responds with events from the local store.
 type Server struct {
 	store *store.Store
@@ -26,7 +28,7 @@ func NewServer(s *store.Store, log *slog.Logger) *Server {
 }
 
 // Serve handles one sync connection. It reads messages from r and writes
-// responses to w until the peer sends Done or the connection closes.
+// responses to w until the zen sends Done or the connection closes.
 func (s *Server) Serve(r io.Reader, w io.Writer) error {
 	for {
 		msg, err := ReadMsg(r)
@@ -223,9 +225,9 @@ func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 	return c.store.PutFollowedEvent(se, seq)
 }
 
-// Session runs a full bidirectional sync between two peers over a single
+// Session runs a full bidirectional sync between two zens over a single
 // connection (section 7.3). The initiator pulls first, then signals role
-// reversal so the listener pulls back. Both sides exchange known peer
+// reversal so the listener pulls back. Both sides exchange known zen
 // tokens for discovery (section 6.1).
 //
 // A Session is the peer-to-peer primitive the daemon uses for outbound
@@ -234,10 +236,19 @@ func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 // logs, then sends MsgReverse; the other side then does the same. This
 // avoids a second dial and makes a sync connection symmetric.
 type Session struct {
-	store  *store.Store
-	log    *slog.Logger
-	peers  func() []string // known peer tokens to offer; may be nil
-	onPeer func(string)     // called for each learned peer token; may be nil
+	store *store.Store
+	log   *slog.Logger
+	zens  func() []string // known zen tokens to offer; may be nil
+	onZen func(string)    // called for each learned zen token; may be nil
+
+	// key is this node's Ed25519 keypair, used to authenticate the session.
+	// Set with SetKey before RunInitiator/RunListener; a nil key means no
+	// handshake is performed (for callers that use Server/Client directly).
+	key *core.KeyPair
+
+	// onAuthed is called with the zen's authenticated driftnode identity
+	// after a successful handshake, before sync traffic begins. May be nil.
+	onAuthed func(core.Identity)
 }
 
 // NewSession creates a bidirectional sync session.
@@ -248,20 +259,101 @@ func NewSession(s *store.Store, log *slog.Logger) *Session {
 	return &Session{store: s, log: log}
 }
 
-// SetPeerSource sets the function that returns this node's known peer tokens
-// to offer during peer exchange.
-func (s *Session) SetPeerSource(fn func() []string) { s.peers = fn }
+// SetKey sets the Ed25519 keypair used to authenticate the session handshake.
+// Required before RunInitiator/RunListener; a nil key skips the handshake.
+func (s *Session) SetKey(k *core.KeyPair) { s.key = k }
 
-// SetPeerSink sets the callback invoked for each peer token learned from the
+// SetAuthed sets the callback invoked with the zen's authenticated identity
+// after a successful handshake.
+func (s *Session) SetAuthed(fn func(core.Identity)) { s.onAuthed = fn }
+
+// SetZenSource sets the function that returns this node's known zen tokens
+// to offer during zen exchange.
+func (s *Session) SetZenSource(fn func() []string) { s.zens = fn }
+
+// SetZenSink sets the callback invoked for each zen token learned from the
 // remote side.
-func (s *Session) SetPeerSink(fn func(string)) { s.onPeer = fn }
+func (s *Session) SetZenSink(fn func(string)) { s.onZen = fn }
 
-// RunInitiator is called by the peer that opened the connection. It pulls
-// both logs from the remote peer, exchanges peer tokens, then signals role
+// Handshake authenticates both sides of the connection by proving possession
+// Handshake authenticates both sides' Ed25519 identities before sync traffic
+// begins. Each side sends a Hello (identity + nonce), then signs the zen's
+// nonce and sends Auth. The zen's identity is returned on success.
+//
+// Send and receive run concurrently: on synchronous, unbuffered connections
+// (like net.Pipe), writing Hello before reading the zen's Hello would
+// deadlock, since both sides would block on Write with neither reading.
+// A nil key skips the handshake (for callers using Server/Client directly).
+func (s *Session) Handshake(r io.Reader, w io.Writer) (core.Identity, error) {
+	if s.key == nil {
+		return "", nil
+	}
+	ourNonce, err := randNonce()
+	if err != nil {
+		return "", fmt.Errorf("handshake nonce: %w", err)
+	}
+	ourHello := NewHello(s.key.Identity(), ourNonce)
+
+	// Send our Hello while reading the zen's, to avoid deadlock on
+	// unbuffered connections.
+	writeErr := make(chan error, 1)
+	go func() { writeErr <- WriteMsg(w, ourHello) }()
+	zenHello, err := ReadMsg(r)
+	if err != nil {
+		return "", fmt.Errorf("read hello: %w", err)
+	}
+	if err := <-writeErr; err != nil {
+		return "", fmt.Errorf("write hello: %w", err)
+	}
+	if zenHello.Kind != MsgHello || zenHello.Hello == nil {
+		return "", fmt.Errorf("handshake: expected hello, got kind %d", zenHello.Kind)
+	}
+	zenID := zenHello.Hello.Identity
+	zenPub, err := zenID.PubkeyBytes()
+	if err != nil {
+		return "", fmt.Errorf("zen identity: %w", err)
+	}
+
+	// Sign the zen's nonce and send Auth while reading theirs.
+	sig := ed25519.Sign(s.key.Private, zenHello.Hello.Nonce[:])
+	writeErr = make(chan error, 1)
+	go func() { writeErr <- WriteMsg(w, NewAuth(sig)) }()
+	zenAuth, err := ReadMsg(r)
+	if err != nil {
+		return "", fmt.Errorf("read auth: %w", err)
+	}
+	if err := <-writeErr; err != nil {
+		return "", fmt.Errorf("write auth: %w", err)
+	}
+	if zenAuth.Kind != MsgAuth || zenAuth.Auth == nil {
+		return "", fmt.Errorf("handshake: expected auth, got kind %d", zenAuth.Kind)
+	}
+	if !ed25519.Verify(zenPub, ourNonce[:], zenAuth.Auth.Signature) {
+		return "", errors.New("handshake: zen signature verification failed")
+	}
+	if s.onAuthed != nil {
+		s.onAuthed(zenID)
+	}
+	return zenID, nil
+}
+
+func randNonce() ([32]byte, error) {
+	var n [32]byte
+	if _, err := rand.Read(n[:]); err != nil {
+		return [32]byte{}, err
+	}
+	return n, nil
+}
+
+// RunInitiator is called by the zen that opened the connection. It pulls
+// both logs from the remote zen, exchanges zen tokens, then signals role
 // reversal and serves its own logs back.
 func (s *Session) RunInitiator(r io.Reader, w io.Writer) (int, error) {
+	if _, err := s.Handshake(r, w); err != nil {
+		return 0, err
+	}
 	merged := 0
-	// Pull phase: request the remote peer's PostLog and ProfileLog.
+	// Pull phase: request the remote zen's PostLog and ProfileLog.
 	for _, lg := range []core.LogName{core.PostLog, core.ProfileLog} {
 		n, err := s.pullLog(r, w, lg, 0, "")
 		if err != nil {
@@ -269,15 +361,15 @@ func (s *Session) RunInitiator(r io.Reader, w io.Writer) (int, error) {
 		}
 		merged += n
 	}
-	// Peer exchange: send our known tokens, receive theirs.
-	if err := s.exchangePeers(r, w); err != nil {
+	// Zen exchange: send our known tokens, receive theirs.
+	if err := s.exchangeZens(r, w); err != nil {
 		return merged, err
 	}
-	// Role reversal: tell the remote peer it is now its turn to pull.
+	// Role reversal: tell the remote zen it is now its turn to pull.
 	if err := WriteMsg(w, NewReverse()); err != nil {
 		return merged, fmt.Errorf("write reverse: %w", err)
 	}
-	// Serve phase: the remote peer now requests our logs.
+	// Serve phase: the remote zen now requests our logs.
 	n, err := s.serve(r, w)
 	if err != nil {
 		return merged, err
@@ -286,20 +378,23 @@ func (s *Session) RunInitiator(r io.Reader, w io.Writer) (int, error) {
 	return merged, nil
 }
 
-// RunListener is called by the peer that accepted the connection. It serves
-// the initiator's requests, exchanges peer tokens, then waits for the
+// RunListener is called by the zen that accepted the connection. It serves
+// the initiator's requests, exchanges zen tokens, then waits for the
 // role-reversal signal and pulls back.
 func (s *Session) RunListener(r io.Reader, w io.Writer) (int, error) {
+	if _, err := s.Handshake(r, w); err != nil {
+		return 0, err
+	}
 	merged := 0
-	// Serve phase: respond to the initiator's requests and peer exchange.
-	// serveWithPeers returns when it receives MsgReverse (the initiator's
+	// Serve phase: respond to the initiator's requests and zen exchange.
+	// serveWithZens returns when it receives MsgReverse (the initiator's
 	// signal that it is done pulling and wants to be pulled from).
-	n, err := s.serveWithPeers(r, w)
+	n, err := s.serveWithZens(r, w)
 	if err != nil {
 		return merged, err
 	}
 	merged += n
-	// Pull phase: request the remote peer's PostLog and ProfileLog.
+	// Pull phase: request the remote zen's PostLog and ProfileLog.
 	for _, lg := range []core.LogName{core.PostLog, core.ProfileLog} {
 		n, err := s.pullLog(r, w, lg, 0, "")
 		if err != nil {
@@ -311,7 +406,7 @@ func (s *Session) RunListener(r io.Reader, w io.Writer) (int, error) {
 }
 
 // pullLog sends a request for one log and merges the received events.
-// A peer closing the connection (EOF) before MsgDone is treated as a clean
+// A zen closing the connection (EOF) before MsgDone is treated as a clean
 // end of stream: any events already received are kept, and the caller can
 // retry on the next sync round.
 func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int64, author core.Identity) (int, error) {
@@ -354,7 +449,7 @@ func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int6
 	}
 }
 
-// serve reads requests and responds with events until the peer sends
+// serve reads requests and responds with events until the zen sends
 // MsgReverse or closes.
 func (s *Session) serve(r io.Reader, w io.Writer) (int, error) {
 	served := 0
@@ -381,12 +476,12 @@ func (s *Session) serve(r io.Reader, w io.Writer) (int, error) {
 	}
 }
 
-// serveWithPeers is like serve but also handles MsgPeers by invoking the
-// peer sink, and sends our peer tokens after the requests complete.
-func (s *Session) serveWithPeers(r io.Reader, w io.Writer) (int, error) {
+// serveWithZens is like serve but also handles MsgZens by invoking the
+// zen sink, and sends our zen tokens after the requests complete.
+func (s *Session) serveWithZens(r io.Reader, w io.Writer) (int, error) {
 	served := 0
 	srv := NewServer(s.store, s.log)
-	sentPeers := false
+	sentZens := false
 	for {
 		msg, err := ReadMsg(r)
 		if err != nil {
@@ -401,24 +496,24 @@ func (s *Session) serveWithPeers(r io.Reader, w io.Writer) (int, error) {
 				return served, err
 			}
 			served++
-		case MsgPeers:
-			if msg.Peers != nil {
-				for _, tok := range msg.Peers.Tokens {
-					if s.onPeer != nil {
-						s.onPeer(tok)
+		case MsgZens:
+			if msg.Zens != nil {
+				for _, tok := range msg.Zens.Tokens {
+					if s.onZen != nil {
+						s.onZen(tok)
 					}
 				}
 			}
-			// Reply with our peers once.
-			if !sentPeers {
+			// Reply with our zens once.
+			if !sentZens {
 				var tokens []string
-				if s.peers != nil {
-					tokens = s.peers()
+				if s.zens != nil {
+					tokens = s.zens()
 				}
-				if err := WriteMsg(w, NewPeers(tokens)); err != nil {
-					return served, fmt.Errorf("write peers: %w", err)
+				if err := WriteMsg(w, NewZens(tokens)); err != nil {
+					return served, fmt.Errorf("write zens: %w", err)
 				}
-				sentPeers = true
+				sentZens = true
 			}
 		case MsgReverse:
 			return served, nil
@@ -430,29 +525,29 @@ func (s *Session) serveWithPeers(r io.Reader, w io.Writer) (int, error) {
 	}
 }
 
-// exchangePeers sends our known tokens and receives the remote side's tokens.
-func (s *Session) exchangePeers(r io.Reader, w io.Writer) error {
+// exchangeZens sends our known tokens and receives the remote side's tokens.
+func (s *Session) exchangeZens(r io.Reader, w io.Writer) error {
 	var tokens []string
-	if s.peers != nil {
-		tokens = s.peers()
+	if s.zens != nil {
+		tokens = s.zens()
 	}
-	if err := WriteMsg(w, NewPeers(tokens)); err != nil {
-		return fmt.Errorf("write peers: %w", err)
+	if err := WriteMsg(w, NewZens(tokens)); err != nil {
+		return fmt.Errorf("write zens: %w", err)
 	}
 	for {
 		msg, err := ReadMsg(r)
 		if err != nil {
-			return fmt.Errorf("read peers: %w", err)
+			return fmt.Errorf("read zens: %w", err)
 		}
-		if msg.Kind == MsgPeers {
-			if msg.Peers != nil && s.onPeer != nil {
-				for _, tok := range msg.Peers.Tokens {
-					s.onPeer(tok)
+		if msg.Kind == MsgZens {
+			if msg.Zens != nil && s.onZen != nil {
+				for _, tok := range msg.Zens.Tokens {
+					s.onZen(tok)
 				}
 			}
 			return nil
 		}
-		s.log.Warn("sync: unexpected message kind during peer exchange", "kind", msg.Kind)
+		s.log.Warn("sync: unexpected message kind during zen exchange", "kind", msg.Kind)
 	}
 }
 

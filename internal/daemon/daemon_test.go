@@ -111,26 +111,26 @@ func TestDaemonStatus(t *testing.T) {
 	}
 }
 
-func TestDaemonPeers(t *testing.T) {
+func TestDaemonZens(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)
 	sock := testSocketPath(t)
 	d.Start(sock)
 	defer d.Stop()
 
-	d.AddPeer("peer1", "native", "connected")
-	d.AddPeer("peer2", "browser", "connected")
+	d.AddZen("zen1", "native", "connected")
+	d.AddZen("zen2", "browser", "connected")
 
 	conn, _ := Dial(sock)
 	defer conn.Close()
 	enc := json.NewEncoder(conn)
 	dec := json.NewDecoder(conn)
-	enc.Encode(Request{Method: "peers"})
+	enc.Encode(Request{Method: "zens"})
 	var resp Response
 	dec.Decode(&resp)
-	peers := resp.Result.([]any)
-	if len(peers) != 2 {
-		t.Fatalf("want 2 peers, got %d", len(peers))
+	zens := resp.Result.([]any)
+	if len(zens) != 2 {
+		t.Fatalf("want 2 zens, got %d", len(zens))
 	}
 }
 

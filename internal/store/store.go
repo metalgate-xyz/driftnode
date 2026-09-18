@@ -5,6 +5,7 @@
 package store
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -19,13 +20,15 @@ import (
 // Bucket names. Own events are keyed by event ID (BLAKE3-256 of the canonical
 // signed bytes) within per-log buckets, so backup import merges as a set
 // union of immutable events. Followed events are keyed by event ID within
-// per-author buckets for the same dedup property.
+// per-author buckets for the same dedup property. Routing maps a followed
+// identity to the tailcat token currently used to reach it.
 var (
 	bucketMeta    = []byte("meta")
 	bucketKey     = []byte("key")     // single EncryptedKey value under key "key"
 	bucketOwn     = []byte("own")     // own logs: sub-buckets per log name
 	bucketFollows = []byte("follows") // synced PostLogs, keyed by author+eventID
 	bucketMedia   = []byte("media")   // content-addressed blobs
+	bucketRouting = []byte("routing") // identity -> tailcat token
 )
 
 // meta keys
@@ -63,7 +66,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketFollows, bucketMedia} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketFollows, bucketMedia, bucketRouting} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -390,7 +393,8 @@ func (s *Store) CrawledProfiles(author core.Identity) ([]core.SignedEvent, error
 }
 
 // FollowedIdentities returns the set of identities whose events are cached in
-// the follows bucket.
+// the follows bucket. This is the set of zens we have synced with, not the
+// declared follow graph; use FollowGraph for the latter.
 func (s *Store) FollowedIdentities() ([]core.Identity, error) {
 	var out []core.Identity
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -400,6 +404,55 @@ func (s *Store) FollowedIdentities() ([]core.Identity, error) {
 		})
 	})
 	return out, err
+}
+
+// FollowGraph returns the identities this node currently follows, derived by
+// replaying its own ProfileLog Follow/Unfollow events (section 7.1). This is
+// the authoritative auto-dial set: a zen is dialed while it is followed and
+// its routing token is bound.
+func (s *Store) FollowGraph() ([]core.Identity, error) {
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		return nil, err
+	}
+	fs := core.NewLog(events).FollowSet()
+	var out []core.Identity
+	fs.Each(func(target [32]byte) {
+		out = append(out, core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
+	})
+	return out, nil
+}
+
+// PutRouting records the tailcat token used to reach a followed identity.
+// The binding is updated whenever a session with that identity completes.
+func (s *Store) PutRouting(id core.Identity, token string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRouting).Put([]byte(id), []byte(token))
+	})
+}
+
+// Routing returns the token bound to an identity, or false if no binding
+// exists (the identity is followed but its token is not yet known).
+func (s *Store) Routing(id core.Identity) (string, bool, error) {
+	var token []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		token = tx.Bucket(bucketRouting).Get([]byte(id))
+		return nil
+	})
+	if err != nil {
+		return "", false, err
+	}
+	if token == nil {
+		return "", false, nil
+	}
+	return string(token), true, nil
+}
+
+// DeleteRouting removes the routing binding for an identity, used on unfollow.
+func (s *Store) DeleteRouting(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRouting).Delete([]byte(id))
+	})
 }
 
 // AllPosts returns own PostLog events plus all synced PostLog events from

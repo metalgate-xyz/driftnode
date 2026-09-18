@@ -30,26 +30,26 @@ func TestSendRequestWhoami(t *testing.T) {
 	}
 }
 
-func TestSendRequestPeers(t *testing.T) {
+func TestSendRequestZens(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)
 	sock := testSocketPath(t)
 	d.Start(sock)
 	defer d.Stop()
 
-	d.AddPeer("p1", "native", "connected")
-	d.AddPeer("p2", "browser", "connected")
+	d.AddZen("p1", "native", "connected")
+	d.AddZen("p2", "browser", "connected")
 
-	resp, err := SendRequest(sock, "peers", nil)
+	resp, err := SendRequest(sock, "zens", nil)
 	if err != nil {
 		t.Fatalf("SendRequest: %v", err)
 	}
-	peers, ok := resp.Result.([]any)
+	zens, ok := resp.Result.([]any)
 	if !ok {
 		t.Fatalf("result is not a slice: %T", resp.Result)
 	}
-	if len(peers) != 2 {
-		t.Fatalf("want 2 peers, got %d", len(peers))
+	if len(zens) != 2 {
+		t.Fatalf("want 2 zens, got %d", len(zens))
 	}
 }
 
@@ -103,12 +103,19 @@ func TestSendRequestNotRunning(t *testing.T) {
 
 func TestSendRequestParamsMarshal(t *testing.T) {
 	s := newTestStore(t)
+	kp := initTestIdentity(t, s)
 	d := New(s, nil)
 	sock := testSocketPath(t)
 	d.Start(sock)
 	defer d.Stop()
 
-	resp, err := SendRequest(sock, "peers_add", map[string]any{"token": "tcexample"})
+	// follow <pubkey> (offline path): requires a passphrase to sign the
+	// Follow event. Passing the node's own identity as target proves the
+	// params marshal and dispatch.
+	resp, err := SendRequest(sock, "follow", map[string]any{
+		"target":     string(kp.Identity()),
+		"passphrase": "pass",
+	})
 	if err != nil {
 		t.Fatalf("SendRequest: %v", err)
 	}
@@ -116,8 +123,8 @@ func TestSendRequestParamsMarshal(t *testing.T) {
 	if !ok {
 		t.Fatalf("result is not a map: %T", resp.Result)
 	}
-	if result["status"] != "connecting" {
-		t.Fatalf("unexpected status: %v", result["status"])
+	if result["followed"] == nil {
+		t.Fatalf("unexpected result: %v", result)
 	}
 }
 
