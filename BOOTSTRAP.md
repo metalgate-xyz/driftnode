@@ -37,13 +37,13 @@ as the key file is preserved. Without a persistent key, the token changes
 every time the daemon restarts.
 
 ```sh
-driftnode init -p "your-passphrase"
+driftnode --db /var/lib/driftnode/node.db init -p "your-passphrase"
 ```
 
 Start the daemon with the `--key` flag to persist the Tailcat key:
 
 ```sh
-driftnode daemon --foreground --key /var/lib/driftnode/tc.key
+driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
 ```
 
 The key file is created on first run and reused on subsequent restarts. The
@@ -54,7 +54,7 @@ address token it produces stays the same.
 With the daemon running:
 
 ```sh
-driftnode peers token
+driftnode --db /var/lib/driftnode/node.db peers token
 ```
 
 This prints a `tc...` string. That is your node's dialable address. Peers and
@@ -65,9 +65,9 @@ fresh installs use it to connect to you.
 Restart the daemon and check the token again:
 
 ```sh
-driftnode daemon stop
-driftnode daemon --foreground --key /var/lib/driftnode/tc.key
-driftnode peers token
+driftnode --db /var/lib/driftnode/node.db daemon stop
+driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
+driftnode --db /var/lib/driftnode/node.db peers token
 ```
 
 The token should be identical. If it changed, the key file path is wrong or
@@ -79,8 +79,8 @@ A bootstrap node is a normal node. Create some content and follow the other
 seeds so the genesis graph is not empty:
 
 ```sh
-driftnode post -p "your-passphrase" "seed node online in EU"
-driftnode follow -p "your-passphrase" driftnode:<other-seed-pubkey>
+driftnode --db /var/lib/driftnode/node.db post -p "your-passphrase" "seed node online in EU"
+driftnode --db /var/lib/driftnode/node.db follow -p "your-passphrase" driftnode:<other-seed-pubkey>
 ```
 
 Fresh nodes crawl the follow graph starting from `crawl_seeds` in
@@ -103,16 +103,30 @@ crawl_seeds:
   - "driftnode:other-seed-pubkey"
 ```
 
-Sign it with a private key (a 64-byte raw Ed25519 key file):
+Sign it with a private key (a 64-byte raw Ed25519 key file). Generate one with
+`driftnode bootstrap keygen`, which writes the private key to `--key-out` and
+prints the corresponding base64 public key:
 
 ```sh
+# Generate a keypair: writes the private key and prints the base64 public key.
+driftnode bootstrap keygen --key-out ed25519-private.key > ed25519-public.key
+# ed25519-public.key now contains the base64 public key.
 driftnode bootstrap sign bootstrap.yaml --key ed25519-private.key
 ```
 
-Anyone can verify it against the corresponding public key:
+Back up the private key. To recover the public key later from a saved private
+key (for example on a new machine), pass `--key` instead of `--key-out`:
 
 ```sh
-driftnode bootstrap verify bootstrap.yaml --key <base64-public-key>
+driftnode bootstrap keygen --key ed25519-private.key > ed25519-public.key
+# prints the same base64 public key, without writing anything
+```
+
+Anyone can verify a signed file against the corresponding public key. The
+`--key` flag reads the base64 public key from a file:
+
+```sh
+driftnode bootstrap verify bootstrap.yaml --key ed25519-public.key
 ```
 
 Distribute the signed file. It can be served from GitHub raw, an IPFS gateway,
@@ -133,7 +147,7 @@ Description=driftnode bootstrap node
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/driftnode daemon --foreground --key /var/lib/driftnode/tc.key
+ExecStart=/usr/local/bin/driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
 Restart=always
 User=driftnode
 StateDirectory=driftnode

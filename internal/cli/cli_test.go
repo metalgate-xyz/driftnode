@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,19 @@ func runCLI(t *testing.T, dbPath string, args []string) (string, error) {
 	root.SetOut(&buf)
 	root.SetErr(&buf)
 	root.SetArgs(full)
+	err := root.Execute()
+	return buf.String(), err
+}
+
+// runCLIStoreless runs commands that don't take --db (bootstrap keygen/
+// sign/verify) without injecting it.
+func runCLIStoreless(t *testing.T, args []string) (string, error) {
+	t.Helper()
+	var buf bytes.Buffer
+	root := Root()
+	root.SetOut(&buf)
+	root.SetErr(&buf)
+	root.SetArgs(args)
 	err := root.Execute()
 	return buf.String(), err
 }
@@ -202,5 +216,85 @@ func TestWrongPassphrase(t *testing.T) {
 	_, err = runCLI(t, dbPath, []string{"post", "should fail", "--passphrase", "wrong"})
 	if err == nil {
 		t.Fatal("post with wrong passphrase should fail")
+	}
+}
+
+func TestBootstrapKeygenSignVerify(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "bs.key")
+	bootstrapPath := filepath.Join(dir, "bootstrap.yaml")
+
+	// keygen prints the base64 public key to stdout and writes the raw
+	// 64-byte private key to --key-out.
+	pubB64, err := runCLIStoreless(t, []string{"bootstrap", "keygen", "--key-out", keyPath})
+	if err != nil {
+		t.Fatalf("keygen: %v", err)
+	}
+	pubB64 = strings.TrimSpace(pubB64)
+	if pubB64 == "" {
+		t.Fatal("keygen printed empty public key")
+	}
+	pub, err := base64.StdEncoding.DecodeString(pubB64)
+	if err != nil {
+		t.Fatalf("decode public key: %v", err)
+	}
+	if len(pub) != 32 {
+		t.Fatalf("public key: want 32 bytes, got %d", len(pub))
+	}
+	keyData, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatalf("read key file: %v", err)
+	}
+	if len(keyData) != 64 {
+		t.Fatalf("private key file: want 64 bytes, got %d", len(keyData))
+	}
+	if fi, _ := os.Stat(keyPath); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("private key mode: want 0600, got %#o", fi.Mode().Perm())
+	}
+
+	// Write an unsigned bootstrap.yaml, then sign it with the keygen output.
+	if err := os.WriteFile(bootstrapPath, []byte(
+		"version: 1\nsignature: \"\"\nseed_peers:\n  - token: tctest\n    kind: native_peer\ncrawl_seeds:\n  - \"driftnode:abc\"\n"), 0o600); err != nil {
+		t.Fatalf("write bootstrap: %v", err)
+	}
+	if _, err := runCLIStoreless(t, []string{"bootstrap", "sign", bootstrapPath, "--key", keyPath}); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	// verify --key reads the public key from a file. Write the base64
+	// public key that keygen printed to a file and verify against it.
+	pubKeyFile := filepath.Join(dir, "bs.pub")
+	if err := os.WriteFile(pubKeyFile, []byte(pubB64), 0o600); err != nil {
+		t.Fatalf("write pub key file: %v", err)
+	}
+	out, err := runCLIStoreless(t, []string{"bootstrap", "verify", bootstrapPath, "--key", pubKeyFile})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !strings.Contains(out, "signature: verified") {
+		t.Fatalf("verify output: %q", out)
+	}
+
+	// A different key must reject it.
+	otherPubB64, _ := runCLIStoreless(t, []string{"bootstrap", "keygen", "--key-out", filepath.Join(dir, "other.key")})
+	otherPubB64 = strings.TrimSpace(otherPubB64)
+	otherPubFile := filepath.Join(dir, "other.pub")
+	if err := os.WriteFile(otherPubFile, []byte(otherPubB64), 0o600); err != nil {
+		t.Fatalf("write other pub key: %v", err)
+	}
+	out, err = runCLIStoreless(t, []string{"bootstrap", "verify", bootstrapPath, "--key", otherPubFile})
+	if err == nil {
+		t.Fatalf("verify with wrong key should fail, output: %q", out)
+	}
+
+	// keygen --key derives the same public key from the saved private key
+	// without generating or writing a new one.
+	derivedPubB64, err := runCLIStoreless(t, []string{"bootstrap", "keygen", "--key", keyPath})
+	if err != nil {
+		t.Fatalf("keygen --key: %v", err)
+	}
+	derivedPubB64 = strings.TrimSpace(derivedPubB64)
+	if derivedPubB64 != pubB64 {
+		t.Fatalf("keygen --key derived %q, want %q", derivedPubB64, pubB64)
 	}
 }

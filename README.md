@@ -46,23 +46,23 @@ docker build -t driftnode .
 
 ```sh
 # Create your identity (Ed25519 keypair, encrypted at rest with your passphrase)
-driftnode init -p "your-passphrase"
+driftnode --db ~/.driftnode/node.db init -p "your-passphrase"
 # -> driftnode:9f2a...c001
 
 # Post something
-driftnode post -p "your-passphrase" "gm, the sun is out"
+driftnode --db ~/.driftnode/node.db post -p "your-passphrase" "gm, the sun is out"
 
 # Read your local timeline (posts from people you follow, merged by time)
-driftnode feed
+driftnode --db ~/.driftnode/node.db feed
 
 # Follow someone (paste their driftnode: identity string)
-driftnode follow -p "your-passphrase" driftnode:abc123...
+driftnode --db ~/.driftnode/node.db follow -p "your-passphrase" driftnode:abc123...
 
 # Start the daemon (background networking: sync, crawl, peer exchange)
-driftnode daemon
+driftnode --db ~/.driftnode/node.db daemon
 # In another terminal:
-driftnode sync --now
-driftnode peers list
+driftnode --db ~/.driftnode/node.db sync --now
+driftnode --db ~/.driftnode/node.db peers list
 ```
 
 ## How it works
@@ -74,14 +74,14 @@ hostname baked in. The private key signs every event you publish. Losing the
 key means losing the identity; there is no account recovery. Back it up:
 
 ```sh
-driftnode backup export -o my-account.cbor
+driftnode --db ~/.driftnode/node.db backup export -o my-account.cbor
 # Store this file safely. It is your account.
 ```
 
 Restore or migrate to a new device:
 
 ```sh
-driftnode backup import my-account.cbor
+driftnode --db ~/.driftnode/node.db backup import my-account.cbor
 ```
 
 ### Event logs
@@ -132,16 +132,16 @@ socket. Commands that don't (`post`, `whoami`, `feed`) work offline, directly
 on the local store, and queue for the next sync.
 
 ```sh
-driftnode daemon            # start in background
-driftnode daemon --foreground  # logs to stdout
-driftnode daemon stop       # stop via control socket
-driftnode daemon status     # check if running
+driftnode --db ~/.driftnode/node.db daemon            # start in background
+driftnode --db ~/.driftnode/node.db daemon --foreground  # logs to stdout
+driftnode --db ~/.driftnode/node.db daemon stop       # stop via control socket
+driftnode --db ~/.driftnode/node.db daemon status     # check if running
 ```
 
 ### The TUI
 
 ```sh
-driftnode tui
+driftnode --db ~/.driftnode/node.db tui
 ```
 
 A terminal dashboard showing your live feed, connected peers, sync status, and
@@ -165,8 +165,9 @@ an inline compose box. Vim-style keybindings: `j`/`k` scroll, `i` to compose,
 | `peers list` | Show connected peers |
 | `peers add <token>` | Dial a peer by its Tailcat token |
 | `peers token` | Print your node's address token |
+| `bootstrap keygen [--key-out <path> \| --key <path>]` | Generate a bootstrap signing keypair, or derive the public key from an existing private key |
 | `bootstrap sign <file> --key <keyfile>` | Sign a bootstrap.yaml |
-| `bootstrap verify <file> [--key <pubkey-b64>]` | Verify a bootstrap.yaml |
+| `bootstrap verify <file> [--key <pubkey-file>]` | Verify a bootstrap.yaml against a base64 public key file |
 | `backup export [-o <path>]` | Export your account to a single file |
 | `backup import <path>` | Restore from a backup file |
 | `key export [-o <path>]` | Export your encrypted keypair |
@@ -180,17 +181,18 @@ Daemon flags:
 |---|---|
 | `--key <path>` | Persistent Tailcat key file (stable address token across restarts) |
 | `--bootstrap <path>` | Load a signed bootstrap.yaml and auto-dial its seed peers |
-| `--bootstrap-key <b64>` | Base64 Ed25519 public key to verify the bootstrap signature |
+| `--bootstrap-key <path>` | File containing the base64 Ed25519 public key that signed the bootstrap |
 | `--foreground` | Run in foreground with logs on stdout |
 
 ## Data location
 
-The local store (bbolt) and control socket use XDG paths by default:
+The local store (bbolt) path is set with the required `--db` flag. Each store
+gets its own control socket, derived from the store path, so multiple daemons
+on the same machine don't collide.
 
-- Store: `$XDG_DATA_HOME/driftnode/node.db`
-- Control socket: `$XDG_RUNTIME_DIR/driftnode/control.sock`
-
-Override the store path with `--db <path>`.
+```sh
+driftnode --db ~/.driftnode/node.db init -p "your-passphrase"
+```
 
 ## Testing
 

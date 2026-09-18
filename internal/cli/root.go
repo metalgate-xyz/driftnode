@@ -6,11 +6,13 @@ package cli
 
 import (
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	bootstrappkg "driftnode/internal/bootstrap"
@@ -19,31 +21,15 @@ import (
 	"driftnode/internal/store"
 	"driftnode/internal/tui"
 
-	"github.com/adrg/xdg"
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 )
 
-// defaultDBPath returns the default bbolt store path under the user's XDG
-// data directory.
-func defaultDBPath() (string, error) {
-	p, err := xdg.DataFile("driftnode/node.db")
-	if err != nil {
-		return "", fmt.Errorf("resolve data dir: %w", err)
-	}
-	return p, nil
-}
-
-// resolveDBPath picks the store path: the --db flag if set, else the default.
-func resolveDBPath(flag string) (string, error) {
-	if flag != "" {
-		return flag, nil
-	}
-	return defaultDBPath()
-}
-
 // openStore opens the store at the given path, creating the parent directory.
 func openStoreAt(path string) (*store.Store, error) {
+	if path == "" {
+		return nil, fmt.Errorf("no store path: pass --db <path>")
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("create data dir: %w", err)
 	}
@@ -54,8 +40,23 @@ func openStoreAt(path string) (*store.Store, error) {
 	return s, nil
 }
 
-// dbPath holds the --db flag value, set on the root command.
+// dbPath holds the --db flag value. It is a required local flag on every
+// command that opens the store or talks to the daemon; store-less commands
+// (bootstrap keygen/sign/verify, relay) don't define it.
 var dbPath string
+
+// addDBFlag adds a required --db local flag to a standalone command.
+func addDBFlag(c *cobra.Command) {
+	c.Flags().StringVar(&dbPath, "db", "", "path to the local store")
+	_ = c.MarkFlagRequired("db")
+}
+
+// addDBFlagPersistent adds a required --db persistent flag to a parent
+// command so its subcommands inherit it.
+func addDBFlagPersistent(c *cobra.Command) {
+	c.PersistentFlags().StringVar(&dbPath, "db", "", "path to the local store")
+	_ = c.MarkPersistentFlagRequired("db")
+}
 
 // Root is the root command.
 func Root() *cobra.Command {
@@ -63,7 +64,6 @@ func Root() *cobra.Command {
 		Use:   "driftnode",
 		Short: "driftnode native peer node (offline, Phase 0)",
 	}
-	root.PersistentFlags().StringVar(&dbPath, "db", "", "path to the local store (default: XDG data dir)")
 	// Cobra writes command output (cmd.Println) to stderr by default.
 	// All our commands produce user-facing output that belongs on stdout
 	// for shell pipelines and command substitution.
@@ -119,12 +119,13 @@ func initCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to encrypt the private key at rest")
 	return c
 }
 
 func whoamiCmd() *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:   "whoami",
 		Short: "Print the identity's public key and fingerprint",
 		Args:  cobra.NoArgs,
@@ -156,6 +157,8 @@ func whoamiCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
+	return c
 }
 
 func postCmd() *cobra.Command {
@@ -212,6 +215,7 @@ func postCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key")
 	return c
 }
@@ -262,6 +266,7 @@ func feedCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().IntVarP(&limit, "limit", "n", 0, "maximum number of posts to show (0 = all)")
 	return c
 }
@@ -345,6 +350,7 @@ func followCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key")
 	return c
 }
@@ -405,6 +411,7 @@ func unfollowCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key")
 	return c
 }
@@ -414,6 +421,7 @@ func keyCmd() *cobra.Command {
 		Use:   "key",
 		Short: "Export or import the encrypted keypair",
 	}
+	addDBFlagPersistent(c)
 	c.AddCommand(keyExportCmd(), keyImportCmd())
 	return c
 }
@@ -448,6 +456,7 @@ func keyExportCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: driftnode-key.cbor)")
 	return c
 }
@@ -495,6 +504,7 @@ func keyImportCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to decrypt the key and derive the identity")
 	return c
 }
@@ -504,6 +514,7 @@ func backupCmd() *cobra.Command {
 		Use:   "backup",
 		Short: "Export or import a single-file account backup",
 	}
+	addDBFlagPersistent(c)
 	c.AddCommand(backupExportCmd(), backupImportCmd())
 	return c
 }
@@ -538,6 +549,7 @@ func backupExportCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: driftnode-backup.cbor)")
 	return c
 }
@@ -572,11 +584,10 @@ func backupImportCmd() *cobra.Command {
 }
 
 // daemonSocketPath returns the control socket path for the given --db path.
-// When --db is empty (default store), the global socket is used. Otherwise a
-// per-store socket is derived so multiple daemons don't collide.
+// Each store gets its own socket so multiple daemons don't collide.
 func daemonSocketPath() (string, error) {
 	if dbPath == "" {
-		return daemon.SocketPath()
+		return "", fmt.Errorf("no store path: pass --db <path>")
 	}
 	abs, err := filepath.Abs(dbPath)
 	if err != nil {
@@ -605,7 +616,7 @@ func daemonCmd() *cobra.Command {
 	var foreground bool
 	var keyFile string
 	var bootstrapFile string
-	var bootstrapKeyB64 string
+	var bootstrapKeyFile string
 	c := &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the long-running daemon and control socket",
@@ -626,7 +637,7 @@ func daemonCmd() *cobra.Command {
 				d.SetKeyFile(keyFile)
 			}
 			if bootstrapFile != "" {
-				verifyKey, err := decodeBootstrapKey(bootstrapKeyB64)
+				verifyKey, err := decodeBootstrapKey(bootstrapKeyFile)
 				if err != nil {
 					return err
 				}
@@ -649,21 +660,26 @@ func daemonCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlagPersistent(c)
 	c.AddCommand(daemonStopCmd(), daemonStatusCmd())
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run in foreground with logs on stdout")
 	c.Flags().StringVar(&keyFile, "key", "", "path to a persistent tailcat key file (stable address token across restarts)")
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed peers")
-	c.Flags().StringVar(&bootstrapKeyB64, "bootstrap-key", "", "base64 Ed25519 public key to verify the bootstrap signature")
+	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	return c
 }
 
-// decodeBootstrapKey decodes a base64 Ed25519 public key. An empty string
-// returns nil (no verification, for unsigned test bootstraps).
-func decodeBootstrapKey(b64 string) (ed25519.PublicKey, error) {
-	if b64 == "" {
+// decodeBootstrapKey reads a base64 Ed25519 public key from a file. An empty
+// path returns nil (no verification, for unsigned test bootstraps).
+func decodeBootstrapKey(keyFile string) (ed25519.PublicKey, error) {
+	if keyFile == "" {
 		return nil, nil
 	}
-	raw, err := base64.StdEncoding.DecodeString(b64)
+	b, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("read bootstrap key: %w", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b)))
 	if err != nil {
 		return nil, fmt.Errorf("decode bootstrap key: %w", err)
 	}
@@ -725,7 +741,7 @@ func daemonStatusCmd() *cobra.Command {
 }
 
 func tuiCmd() *cobra.Command {
-	return &cobra.Command{
+	c := &cobra.Command{
 		Use:   "tui",
 		Short: "Launch the terminal UI",
 		Args:  cobra.NoArgs,
@@ -745,6 +761,8 @@ func tuiCmd() *cobra.Command {
 			return tui.Run(id.String())
 		},
 	}
+	addDBFlag(c)
+	return c
 }
 
 func peersCmd() *cobra.Command {
@@ -752,6 +770,7 @@ func peersCmd() *cobra.Command {
 		Use:   "peers",
 		Short: "Manage peer connections",
 	}
+	addDBFlagPersistent(c)
 	c.AddCommand(peersListCmd(), peersAddCmd(), peersTokenCmd())
 	return c
 }
@@ -855,6 +874,7 @@ func syncCmd() *cobra.Command {
 			return nil
 		},
 	}
+	addDBFlag(c)
 	c.Flags().BoolVar(&now, "now", false, "trigger immediate sync instead of waiting for the interval")
 	return c
 }
@@ -864,7 +884,54 @@ func bootstrapCmd() *cobra.Command {
 		Use:   "bootstrap",
 		Short: "Manage the bootstrap file",
 	}
-	c.AddCommand(bootstrapSignCmd(), bootstrapVerifyCmd())
+	c.AddCommand(bootstrapKeygenCmd(), bootstrapSignCmd(), bootstrapVerifyCmd())
+	return c
+}
+
+// bootstrapKeygenCmd generates an Ed25519 keypair for signing bootstrap
+// files. The private key (64-byte raw, seed||pubkey) goes to --key-out; the
+// base64 public key is printed to stdout for use with `verify --key` and
+// `daemon --bootstrap-key`. With --key it instead derives the public key
+// from an existing private key without generating or writing anything.
+func bootstrapKeygenCmd() *cobra.Command {
+	var keyOut, keyIn string
+	c := &cobra.Command{
+		Use:   "keygen",
+		Short: "Generate an Ed25519 keypair, or derive the public key from an existing private key",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if keyIn != "" {
+				keyData, err := os.ReadFile(keyIn)
+				if err != nil {
+					return fmt.Errorf("read key: %w", err)
+				}
+				priv := ed25519.PrivateKey(keyData)
+				if len(priv) != ed25519.PrivateKeySize {
+					return fmt.Errorf("key file: want %d bytes, got %d", ed25519.PrivateKeySize, len(priv))
+				}
+				pub, ok := priv.Public().(ed25519.PublicKey)
+				if !ok {
+					return fmt.Errorf("invalid ed25519 private key")
+				}
+				cmd.Println(base64.StdEncoding.EncodeToString(pub))
+				return nil
+			}
+			if keyOut == "" {
+				return fmt.Errorf("--key-out is required (or use --key to derive a public key)")
+			}
+			pub, priv, err := ed25519.GenerateKey(rand.Reader)
+			if err != nil {
+				return fmt.Errorf("generate key: %w", err)
+			}
+			if err := os.WriteFile(keyOut, priv, 0o600); err != nil {
+				return fmt.Errorf("write private key: %w", err)
+			}
+			cmd.Println(base64.StdEncoding.EncodeToString(pub))
+			return nil
+		},
+	}
+	c.Flags().StringVar(&keyOut, "key-out", "", "path to write the 64-byte raw Ed25519 private key")
+	c.Flags().StringVar(&keyIn, "key", "", "path to an existing private key (derive its public key instead of generating)")
 	return c
 }
 
@@ -907,7 +974,7 @@ func bootstrapSignCmd() *cobra.Command {
 }
 
 func bootstrapVerifyCmd() *cobra.Command {
-	var keyB64 string
+	var keyFile string
 	c := &cobra.Command{
 		Use:   "verify <file>",
 		Short: "Verify a bootstrap.yaml's signature",
@@ -926,11 +993,11 @@ func bootstrapVerifyCmd() *cobra.Command {
 				cmd.Println("signature: (none)")
 				return nil
 			}
-			if keyB64 == "" {
+			if keyFile == "" {
 				cmd.Println("signature: present (no --key provided to verify against)")
 				return nil
 			}
-			pub, err := decodeBootstrapKey(keyB64)
+			pub, err := decodeBootstrapKey(keyFile)
 			if err != nil {
 				return err
 			}
@@ -941,7 +1008,7 @@ func bootstrapVerifyCmd() *cobra.Command {
 			return nil
 		},
 	}
-	c.Flags().StringVar(&keyB64, "key", "", "base64 Ed25519 public key to verify against")
+	c.Flags().StringVar(&keyFile, "key", "", "path to a file containing the base64 Ed25519 public key to verify against")
 	return c
 }
 

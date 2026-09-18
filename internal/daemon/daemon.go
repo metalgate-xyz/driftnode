@@ -22,7 +22,6 @@ import (
 	"driftnode/internal/store"
 	syncproto "driftnode/internal/sync"
 
-	"github.com/adrg/xdg"
 	"github.com/tailscale/tailcat"
 )
 
@@ -124,17 +123,6 @@ func (d *Daemon) SetBootstrap(path string, verifyKey ed25519.PublicKey) {
 	d.bootstrapPath = path
 	d.bootstrapVerifyKey = verifyKey
 	d.mu.Unlock()
-}
-
-// SocketPath returns the default control socket path for the default store.
-// For a non-default store, use SocketPathFor to derive a per-store path so
-// multiple daemons on the same machine don't collide.
-func SocketPath() (string, error) {
-	p, err := xdg.RuntimeFile("driftnode/control.sock")
-	if err != nil {
-		return "", fmt.Errorf("resolve runtime dir: %w", err)
-	}
-	return p, nil
 }
 
 // SocketPathFor derives a control socket path from the store path, so each
