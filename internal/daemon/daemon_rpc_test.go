@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"driftnode/internal/core"
+	syncproto "driftnode/internal/sync"
 )
 
 func TestSendRequestWhoami(t *testing.T) {
@@ -115,6 +116,46 @@ func TestSendRequestVerifyZens(t *testing.T) {
 	pm, _ = zens[0].(map[string]any)
 	if pm["verified"] == true {
 		t.Fatal("zen should not be verified after unverify")
+	}
+}
+
+// TestZensShowsIdentityWithoutName covers a discovered zen whose exchange
+// ref carried an identity but no name hint (the common case before the
+// crawler fetches the ProfileLog). The zens RPC must surface the identity
+// rather than leaving it blank.
+func TestZensShowsIdentityWithoutName(t *testing.T) {
+	s := newTestStore(t)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	d.Start(sock)
+	defer d.Stop()
+
+	peerKP, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	peerID := peerKP.Identity()
+
+	// Learn the zen through exchange with an identity but no name.
+	d.learnZenRef(syncproto.ZenRef{Token: "tok-no-name", Identity: peerID})
+
+	resp, err := SendRequest(sock, "zens", nil)
+	if err != nil {
+		t.Fatalf("zens: %v", err)
+	}
+	zens, ok := resp.Result.([]any)
+	if !ok || len(zens) != 1 {
+		t.Fatalf("want 1 zen, got %v", resp.Result)
+	}
+	pm, ok := zens[0].(map[string]any)
+	if !ok {
+		t.Fatalf("zen is not a map: %T", zens[0])
+	}
+	if got, _ := pm["identity"].(string); got != string(peerID) {
+		t.Fatalf("identity: want %s, got %q", peerID, got)
+	}
+	if got, _ := pm["name"].(string); got != "" {
+		t.Fatalf("name should be empty, got %q", got)
 	}
 }
 

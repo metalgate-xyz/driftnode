@@ -1224,18 +1224,20 @@ func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
 			}
 		}
 		d.mu.Unlock()
-		// Record the name hint on the zen entry for immediate display.
-		// A token can arrive first as a bare token and later pick up an
-		// identity/name hint from another exchange, so update even when
-		// the token was already known.
-		if ref.Name != "" {
-			d.mu.Lock()
-			if p, ok := d.zens[ref.Token]; ok {
-				p.Identity = string(ref.Identity)
+		// Record the identity on the zen entry so it displays even
+		// before the crawl fetches the name. A token can arrive first
+		// as a bare token and later pick up an identity hint from
+		// another exchange, so update even when the token was already
+		// known. Only set the name when the ref carries one, so an
+		// identity-only ref does not clobber a name learned earlier.
+		d.mu.Lock()
+		if p, ok := d.zens[ref.Token]; ok {
+			p.Identity = string(ref.Identity)
+			if ref.Name != "" {
 				p.Name = ref.Name
 			}
-			d.mu.Unlock()
 		}
+		d.mu.Unlock()
 	}
 }
 
