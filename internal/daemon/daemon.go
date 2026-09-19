@@ -1287,38 +1287,57 @@ func (d *Daemon) syncAllZens() {
 }
 
 // resolvePendingFollows dials known tokens to find the routing for followed
-// identities that have no bound token. Each token is dialed, the handshake
-// reveals the zen's identity, and if that identity is in the pending set,
-// the token is bound and the identity is synced. Used when a follow was
+// identities that have no bound token. Each token is dialed and a handshake
+// reveals the zen's identity; if that identity is in the pending set, the
+// token is bound and the identity is synced. Used when a follow was
 // recorded by pubkey (offline) and the token is learned later via zen
 // exchange or another sync.
+//
+// Only the handshake runs for non-matching tokens: a full sync session pulls
+// the remote zen's PostLog into the local follows cache, so syncing with a
+// token that is not a followed identity would leak that zen's posts into the
+// feed's source set. Binding the token here makes the confirmed follow
+// "bound", and the regular sync loop pulls its logs on the next round.
 func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
 	pendingSet := make(map[core.Identity]bool, len(pending))
 	for _, id := range pending {
 		pendingSet[id] = true
 	}
+	d.mu.Lock()
+	kp := d.unlocked
+	transport := d.transport
+	d.mu.Unlock()
+	if kp == nil {
+		d.logger.Warn("resolve: key locked; cannot probe pending follows")
+		return
+	}
 	for _, ref := range d.knownRefsList() {
 		tok := ref.Token
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		conn, err := d.transport.Dial(ctx, tok)
+		conn, err := transport.Dial(ctx, tok)
 		if err != nil {
 			cancel()
 			continue
 		}
-		var zenID core.Identity
-		_, err = d.runSession(conn, true, &zenID)
-		if err != nil {
-			conn.Close()
-			cancel()
-			continue
-		}
-		if pendingSet[zenID] {
-			if err := d.store.PutRouting(zenID, tok); err != nil {
-				d.logger.Warn("resolve: routing bind", "zen", zenID, "err", err)
-			}
-		}
+		sess := syncproto.NewSession(d.store, d.logger)
+		sess.SetKey(kp)
+		zenID, err := sess.Handshake(conn, conn)
 		conn.Close()
 		cancel()
+		if err != nil {
+			d.logger.Warn("resolve: handshake failed", "token", tok, "err", err)
+			continue
+		}
+		if !pendingSet[zenID] {
+			continue
+		}
+		if err := d.store.PutRouting(zenID, tok); err != nil {
+			d.logger.Warn("resolve: routing bind", "zen", zenID, "err", err)
+			continue
+		}
+		// Now that the follow is bound, sync its logs. This is the only
+		// sync in this path, and it runs solely for a confirmed follow.
+		d.connectAndSync(tok)
 	}
 }
 

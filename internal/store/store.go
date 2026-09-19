@@ -28,7 +28,7 @@ var (
 	bucketMeta     = []byte("meta")
 	bucketKey      = []byte("key")      // single EncryptedKey value under key "key"
 	bucketOwn      = []byte("own")      // own logs: sub-buckets per log name
-	bucketFollows  = []byte("follows")  // synced PostLogs, keyed by author+eventID
+	bucketCrawl    = []byte("crawl")    // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
 	bucketMedia    = []byte("media")    // content-addressed blobs
 	bucketRouting  = []byte("routing")  // identity -> tailcat token
 	bucketVerified = []byte("verified") // identity -> presence (out-of-band confirmed)
@@ -69,7 +69,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketFollows, bucketMedia, bucketRouting, bucketVerified} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -213,10 +213,10 @@ func (s *Store) AllOwnEvents() ([]core.SignedEvent, error) {
 	return append(append(prof, detail...), posts...), err
 }
 
-// PutFollowedEvent stores an event from a followed identity's PostLog,
-// keyed by event ID for set-union deduplication (an event already present is
-// not overwritten). Returns true if the event was newly inserted.
-func (s *Store) PutFollowedEvent(se *core.SignedEvent, seq uint64) (bool, error) {
+// PutCrawledEvent stores a remote event (synced PostLog or crawled Profile
+// log), keyed by event ID for set-union deduplication (an event already
+// present is not overwritten). Returns true if the event was newly inserted.
+func (s *Store) PutCrawledEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 	id, err := se.ID()
 	if err != nil {
 		return false, fmt.Errorf("event id: %w", err)
@@ -227,7 +227,7 @@ func (s *Store) PutFollowedEvent(se *core.SignedEvent, seq uint64) (bool, error)
 	}
 	inserted := false
 	err = s.db.Update(func(tx *bolt.Tx) error {
-		fb := tx.Bucket(bucketFollows)
+		fb := tx.Bucket(bucketCrawl)
 		authorBucket, err := fb.CreateBucketIfNotExists([]byte(se.Author))
 		if err != nil {
 			return fmt.Errorf("create author bucket: %w", err)
@@ -241,11 +241,11 @@ func (s *Store) PutFollowedEvent(se *core.SignedEvent, seq uint64) (bool, error)
 	return inserted, err
 }
 
-// FollowedEvents returns all synced events from a followed identity.
-func (s *Store) FollowedEvents(author core.Identity) ([]core.SignedEvent, error) {
+// CrawledEvents returns all cached events from a remote identity.
+func (s *Store) CrawledEvents(author core.Identity) ([]core.SignedEvent, error) {
 	var out []core.SignedEvent
 	err := s.db.View(func(tx *bolt.Tx) error {
-		authorBucket := tx.Bucket(bucketFollows).Bucket([]byte(author))
+		authorBucket := tx.Bucket(bucketCrawl).Bucket([]byte(author))
 		if authorBucket == nil {
 			return nil
 		}
@@ -368,8 +368,9 @@ func (s *Store) SetIdentity(id core.Identity) error {
 }
 
 // PutCrawledProfile stores a Profile-log event from a crawled (not followed)
-// identity. These form a bounded LRU cache (section 7.4), keyed by author
-// identity and event ID.
+// identity in the shared crawl bucket. The crawler stores only Profile logs;
+// PostLog events arrive via PutCrawledEvent from sync. Both share the same
+// per-author dedup by event ID.
 func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) error {
 	id, err := se.ID()
 	if err != nil {
@@ -380,7 +381,7 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 		return fmt.Errorf("encode: %w", err)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		authorBucket, err := tx.Bucket(bucketFollows).CreateBucketIfNotExists([]byte(author))
+		authorBucket, err := tx.Bucket(bucketCrawl).CreateBucketIfNotExists([]byte(author))
 		if err != nil {
 			return err
 		}
@@ -393,7 +394,7 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 func (s *Store) CrawledProfiles(author core.Identity) ([]core.SignedEvent, error) {
 	var out []core.SignedEvent
 	err := s.db.View(func(tx *bolt.Tx) error {
-		authorBucket := tx.Bucket(bucketFollows).Bucket([]byte(author))
+		authorBucket := tx.Bucket(bucketCrawl).Bucket([]byte(author))
 		if authorBucket == nil {
 			return nil
 		}
@@ -435,13 +436,13 @@ func (s *Store) DisplayName(id core.Identity) (string, error) {
 	return "", nil
 }
 
-// FollowedIdentities returns the set of identities whose events are cached in
-// the follows bucket. This is the set of zens we have synced with, not the
-// declared follow graph; use FollowGraph for the latter.
-func (s *Store) FollowedIdentities() ([]core.Identity, error) {
+// CrawledIdentities returns the set of identities whose events are cached in
+// the crawl bucket. This is the set of zens we have synced with or crawled,
+// not the declared follow graph; use FollowGraph for the latter.
+func (s *Store) CrawledIdentities() ([]core.Identity, error) {
 	var out []core.Identity
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketFollows).ForEach(func(k, v []byte) error {
+		return tx.Bucket(bucketCrawl).ForEach(func(k, v []byte) error {
 			out = append(out, core.Identity(k))
 			return nil
 		})
@@ -489,7 +490,7 @@ func (s *Store) ReceivedFollowers() ([]core.Identity, error) {
 	copy(ownArr[:], ownPub)
 	seen := make(map[core.Identity]bool)
 	err = s.db.View(func(tx *bolt.Tx) error {
-		fb := tx.Bucket(bucketFollows)
+		fb := tx.Bucket(bucketCrawl)
 		return fb.ForEach(func(authorKey, _ []byte) error {
 			authorBucket := fb.Bucket(authorKey)
 			if authorBucket == nil {
@@ -541,7 +542,7 @@ func (s *Store) ReceivedFollowEvents() ([]core.SignedEvent, error) {
 	copy(ownArr[:], ownPub)
 	var out []core.SignedEvent
 	err = s.db.View(func(tx *bolt.Tx) error {
-		fb := tx.Bucket(bucketFollows)
+		fb := tx.Bucket(bucketCrawl)
 		return fb.ForEach(func(authorKey, _ []byte) error {
 			authorBucket := fb.Bucket(authorKey)
 			if authorBucket == nil {
@@ -613,18 +614,22 @@ func (s *Store) RoutingByToken(token string) (core.Identity, bool, error) {
 }
 
 // AllPosts returns own PostLog events plus all synced PostLog events from
-// followed identities, for merged timeline construction (section 9.1).
+// followed identities, for merged timeline construction (section 9.1). Only
+// identities in the declared follow graph (FollowGraph) contribute; events
+// cached in the crawl bucket from non-followed zens (crawled profiles,
+// probed-but-not-followed tokens) are excluded so the feed matches who the
+// user actually follows.
 func (s *Store) AllPosts() ([]core.SignedEvent, error) {
 	own, err := s.OwnEvents(core.PostLog)
 	if err != nil {
 		return nil, err
 	}
-	identities, err := s.FollowedIdentities()
+	identities, err := s.FollowGraph()
 	if err != nil {
 		return nil, err
 	}
 	for _, id := range identities {
-		events, err := s.FollowedEvents(id)
+		events, err := s.CrawledEvents(id)
 		if err != nil {
 			return nil, err
 		}

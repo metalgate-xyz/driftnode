@@ -57,11 +57,11 @@ func main() {
 		return nil
 	})
 
-	fmt.Println("\n== follows/<author> (PostLog events only) ==")
+	fmt.Println("\n== crawl/<author> (PostLog events only) ==")
 	db.View(func(tx *bolt.Tx) error {
-		fb := tx.Bucket([]byte("follows"))
+		fb := tx.Bucket([]byte("crawl"))
 		if fb == nil {
-			fmt.Println("(no follows bucket)")
+			fmt.Println("(no crawl bucket)")
 			return nil
 		}
 		fb.ForEach(func(k, v []byte) error {
@@ -93,9 +93,9 @@ func main() {
 		return nil
 	})
 
-	fmt.Println("\n== follows bucket key count per author (all logs) ==")
+	fmt.Println("\n== crawl bucket key count per author (all logs) ==")
 	db.View(func(tx *bolt.Tx) error {
-		fb := tx.Bucket([]byte("follows"))
+		fb := tx.Bucket([]byte("crawl"))
 		if fb == nil {
 			return nil
 		}

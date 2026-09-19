@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -227,4 +228,114 @@ func mustSignPost(t *testing.T, kp *core.KeyPair, text string, seq uint64) *core
 		t.Fatalf("sign: %v", err)
 	}
 	return se
+}
+
+// multiPipeTransport routes each Dial to one of several in-process sync
+// servers keyed by token, so a test can stand up multiple zens behind a
+// single Transport.
+type multiPipeTransport struct {
+	servers map[string]pipeTransport
+}
+
+func (m multiPipeTransport) Dial(ctx context.Context, token string) (net.Conn, error) {
+	srv, ok := m.servers[token]
+	if !ok {
+		return nil, fmt.Errorf("unknown token %q", token)
+	}
+	return srv.Dial(ctx, token)
+}
+
+// TestResolvePendingFollowsDoesNotSyncNonFollowedZen proves that resolving a
+// pending (pubkey-only) follow only probes known tokens to learn their
+// identity, and does not pull logs from zens that are not the followed
+// identity. Alice follows Carol by pubkey (no routing token); Bob is a
+// known token but not followed. After sync, Carol's post is present and
+// Bob's post is absent from Alice's follows cache.
+func TestResolvePendingFollowsDoesNotSyncNonFollowedZen(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	aliceStore := openTestStore(t)
+	bobStore := openTestStore(t)
+	carolStore := openTestStore(t)
+
+	_ = initTestIdentityAt(t, aliceStore, "alicepass")
+	bobKP := initTestIdentityAt(t, bobStore, "bobpass")
+	carolKP := initTestIdentityAt(t, carolStore, "carolpass")
+
+	if err := bobStore.AppendOwnEvent(core.PostLog, mustSignPost(t, bobKP, "bob post", 1)); err != nil {
+		t.Fatalf("bob post: %v", err)
+	}
+	if err := carolStore.AppendOwnEvent(core.PostLog, mustSignPost(t, carolKP, "carol post", 1)); err != nil {
+		t.Fatalf("carol post: %v", err)
+	}
+
+	bobTok, carolTok := "tok-bob", "tok-carol"
+	transport := multiPipeTransport{
+		servers: map[string]pipeTransport{
+			bobTok:   {serverStore: bobStore, serverKey: bobKP, logger: logger},
+			carolTok: {serverStore: carolStore, serverKey: carolKP, logger: logger},
+		},
+	}
+
+	d := New(aliceStore, logger)
+	d.SetTransport(transport)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "alicepass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	// Follow Carol by pubkey: pending follow, no routing token bound.
+	if _, err := SendRequest(sock, "follow", map[string]any{"target": carolKP.Identity().String()}); err != nil {
+		t.Fatalf("follow carol: %v", err)
+	}
+
+	// Learn Bob's and Carol's tokens via zen exchange (as would happen
+	// during a real sync). Both become known tokens, but neither is
+	// auto-dialed until intent (a follow) exists.
+	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
+	d.learnZenRef(syncproto.ZenRef{Token: carolTok, Identity: carolKP.Identity()})
+
+	// Trigger a sync round: Carol is a pending follow, so
+	// resolvePendingFollows probes both known tokens. Only Carol's token
+	// matches a pending follow and gets synced; Bob's token is probed
+	// (handshake only) and must not pull Bob's post.
+	if _, err := SendRequest(sock, "sync", nil); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	var carolPresent, bobPresent bool
+	for time.Now().Before(deadline) && !carolPresent {
+		carolPresent = storeHasPost(aliceStore, carolKP.Identity(), "carol post")
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !carolPresent {
+		t.Fatalf("carol's post not synced into alice's store")
+	}
+	// Give any stray Bob sync a moment to land, then assert it never did.
+	time.Sleep(300 * time.Millisecond)
+	bobPresent = storeHasPost(aliceStore, bobKP.Identity(), "bob post")
+	if bobPresent {
+		t.Fatalf("bob's post leaked into alice's store via a non-followed token probe")
+	}
+}
+
+// storeHasPost reports whether the store has a PostLog event by author with
+// the given text in its follows cache.
+func storeHasPost(s *store.Store, author core.Identity, text string) bool {
+	events, err := s.CrawledEvents(author)
+	if err != nil {
+		return false
+	}
+	for _, se := range events {
+		if se.Event.Log == core.PostLog && se.Event.Post != nil && se.Event.Post.Text == text {
+			return true
+		}
+	}
+	return false
 }

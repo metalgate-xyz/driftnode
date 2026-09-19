@@ -294,6 +294,97 @@ func TestFollowGraph(t *testing.T) {
 	}
 }
 
+// TestAllPostsScopedToFollowGraph proves the merged feed (section 9.1) only
+// includes PostLog events from identities the user actually follows. Events
+// from non-followed zens can land in the crawl bucket via crawled profiles
+// or probed-but-not-followed tokens; they must not surface in the feed.
+func TestAllPostsScopedToFollowGraph(t *testing.T) {
+	s := newTestStore(t)
+	me, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("me: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Two peers: followed (alice) and not followed (bob).
+	alice, _ := core.NewKeyPair()
+	bob, _ := core.NewKeyPair()
+
+	// Follow alice only.
+	alicePub, _ := alice.Identity().PubkeyBytes()
+	followAlice, err := me.Sign(core.Event{
+		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 1, Sequence: 1,
+		Follow: &core.Follow{TargetPubkey: [32]byte(alicePub)},
+	})
+	if err != nil {
+		t.Fatalf("sign follow: %v", err)
+	}
+	if err := s.AppendOwnEvent(core.ProfileLog, followAlice); err != nil {
+		t.Fatalf("append follow: %v", err)
+	}
+
+	// Both peers have PostLog events in the crawl bucket (as if synced
+	// or crawled). Only alice's must appear in AllPosts.
+	alicePost, err := alice.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 10, Sequence: 1,
+		Post: &core.Post{Text: "alice post"},
+	})
+	if err != nil {
+		t.Fatalf("sign alice post: %v", err)
+	}
+	bobPost, err := bob.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 20, Sequence: 1,
+		Post: &core.Post{Text: "bob post"},
+	})
+	if err != nil {
+		t.Fatalf("sign bob post: %v", err)
+	}
+	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+		t.Fatalf("put alice post: %v", err)
+	}
+	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+		t.Fatalf("put bob post: %v", err)
+	}
+
+	// Sanity: both are cached in the crawl bucket.
+	ids, err := s.CrawledIdentities()
+	if err != nil {
+		t.Fatalf("CrawledIdentities: %v", err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("crawl bucket: want 2 authors, got %d", len(ids))
+	}
+
+	posts, err := s.AllPosts()
+	if err != nil {
+		t.Fatalf("AllPosts: %v", err)
+	}
+	var texts []string
+	for _, se := range posts {
+		if se.Event.Post != nil {
+			texts = append(texts, se.Event.Post.Text)
+		}
+	}
+	for _, txt := range texts {
+		if txt == "bob post" {
+			t.Fatalf("AllPosts leaked non-followed bob's post: %v", texts)
+		}
+	}
+	foundAlice := false
+	for _, txt := range texts {
+		if txt == "alice post" {
+			foundAlice = true
+		}
+	}
+	if !foundAlice {
+		t.Fatalf("AllPosts missing followed alice's post: %v", texts)
+	}
+}
+
 func makeFollowEventFor(t *testing.T, follower *core.KeyPair, seq uint64, target core.Identity) *core.SignedEvent {
 	t.Helper()
 	pub, err := target.PubkeyBytes()
@@ -335,12 +426,12 @@ func TestReceivedFollowers(t *testing.T) {
 	// Alice and Bob follow Carol (the local identity). Dave follows Bob.
 	for _, follower := range []*core.KeyPair{alice, bob} {
 		se := makeFollowEventFor(t, follower, 1, carol.Identity())
-		if _, err := s.PutFollowedEvent(se, 1); err != nil {
-			t.Fatalf("PutFollowedEvent: %v", err)
+		if _, err := s.PutCrawledEvent(se, 1); err != nil {
+			t.Fatalf("PutCrawledEvent: %v", err)
 		}
 	}
 	daveFollow := makeFollowEventFor(t, dave, 1, bob.Identity())
-	_, _ = s.PutFollowedEvent(daveFollow, 1)
+	_, _ = s.PutCrawledEvent(daveFollow, 1)
 
 	got, err := s.ReceivedFollowers()
 	if err != nil {
@@ -378,8 +469,8 @@ func TestReceivedFollowEvents(t *testing.T) {
 	alice, _ := core.NewKeyPair()
 
 	se := makeFollowEventFor(t, alice, 1, carol.Identity())
-	if _, err := s.PutFollowedEvent(se, 1); err != nil {
-		t.Fatalf("PutFollowedEvent: %v", err)
+	if _, err := s.PutCrawledEvent(se, 1); err != nil {
+		t.Fatalf("PutCrawledEvent: %v", err)
 	}
 
 	events, err := s.ReceivedFollowEvents()

@@ -116,7 +116,7 @@ func (s *Server) fetchEvents(req *Request) ([]core.SignedEvent, error) {
 		return s.fetchOwnEvents(req)
 	}
 	// Return cached events for this author (followed or crawled).
-	cached, err := s.store.FollowedEvents(req.Author)
+	cached, err := s.store.CrawledEvents(req.Author)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +283,7 @@ func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 		return true, c.store.AppendOwnEvent(se.Event.Log, se)
 	}
 	seq := uint64(se.Event.Sequence)
-	return c.store.PutFollowedEvent(se, seq)
+	return c.store.PutCrawledEvent(se, seq)
 }
 
 // Session runs a full bidirectional sync between two zens over a single
@@ -646,5 +646,5 @@ func (s *Session) mergeEvent(se *core.SignedEvent) (bool, error) {
 		return true, s.store.AppendOwnEvent(se.Event.Log, se)
 	}
 	seq := uint64(se.Event.Sequence)
-	return s.store.PutFollowedEvent(se, seq)
+	return s.store.PutCrawledEvent(se, seq)
 }

@@ -108,9 +108,9 @@ func TestSyncFullRoundTrip(t *testing.T) {
 	}
 
 	// Verify the client has the events.
-	clientEvents, err := clientStore.FollowedEvents(kp.Identity())
+	clientEvents, err := clientStore.CrawledEvents(kp.Identity())
 	if err != nil {
-		t.Fatalf("FollowedEvents: %v", err)
+		t.Fatalf("CrawledEvents: %v", err)
 	}
 	if len(clientEvents) != 2 {
 		t.Fatalf("client events: want 2, got %d", len(clientEvents))
@@ -162,7 +162,7 @@ func TestSyncFollowers(t *testing.T) {
 	serverStore.InitIdentity(serverKP, ek)
 
 	// Two followers follow the server. Their Follow events live in their
-	// own logs and arrive at the server via sync (PutFollowedEvent).
+	// own logs and arrive at the server via sync (PutCrawledEvent).
 	followerA := makeKey(t)
 	followerB := makeKey(t)
 	for _, fkp := range []*core.KeyPair{followerA, followerB} {
@@ -176,8 +176,8 @@ func TestSyncFollowers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sign: %v", err)
 		}
-		if _, err := serverStore.PutFollowedEvent(se, 1); err != nil {
-			t.Fatalf("PutFollowedEvent: %v", err)
+		if _, err := serverStore.PutCrawledEvent(se, 1); err != nil {
+			t.Fatalf("PutCrawledEvent: %v", err)
 		}
 	}
 
@@ -297,9 +297,9 @@ func TestSessionHandshake(t *testing.T) {
 		t.Fatalf("authed identity: want %s, got %s", bobKP.Identity(), authed)
 	}
 	// Bob's post must have landed in alice's store.
-	events, err := aliceStore.FollowedEvents(bobKP.Identity())
+	events, err := aliceStore.CrawledEvents(bobKP.Identity())
 	if err != nil {
-		t.Fatalf("FollowedEvents: %v", err)
+		t.Fatalf("CrawledEvents: %v", err)
 	}
 	found := false
 	for _, se := range events {

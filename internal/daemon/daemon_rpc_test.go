@@ -440,8 +440,8 @@ func TestFollowsAndFollowersRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if _, err := s.PutFollowedEvent(followEvent, 1); err != nil {
-		t.Fatalf("PutFollowedEvent: %v", err)
+	if _, err := s.PutCrawledEvent(followEvent, 1); err != nil {
+		t.Fatalf("PutCrawledEvent: %v", err)
 	}
 
 	// followers RPC returns the follower.
