@@ -4,115 +4,173 @@ import (
 	"strings"
 	"testing"
 
+	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 )
 
-func TestModelInit(t *testing.T) {
+// asModel asserts the tea.Model returned by Update back to the concrete model.
+func asModel(t *testing.T, m tea.Model) model {
+	t.Helper()
+	mm, ok := m.(model)
+	if !ok {
+		t.Fatalf("want model, got %T", m)
+	}
+	return mm
+}
+
+// press sends a key and returns the resulting concrete model, dropping the cmd.
+func press(t *testing.T, m model, k tea.KeyPressMsg) model {
+	t.Helper()
+	mm, _ := m.Update(k)
+	return asModel(t, mm)
+}
+
+func TestNewModel(t *testing.T) {
 	m := newModel("", "driftnode:test")
+	if m.activeTab != tabFeed {
+		t.Fatalf("activeTab: want %d, got %d", tabFeed, m.activeTab)
+	}
 	if cmd := m.Init(); cmd == nil {
-		t.Fatal("Init should return a refresh command")
+		t.Fatal("Init should return a command")
 	}
 }
 
-func TestModelQuit(t *testing.T) {
+func TestCtrlCQuits(t *testing.T) {
 	m := newModel("", "driftnode:test")
-	// q quits.
-	m2, cmd := m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
+	_, cmd := m.Update(tea.KeyPressMsg{Code: 'c', Mod: tea.ModCtrl, Text: ""})
 	if cmd == nil {
-		t.Fatal("q should produce a quit command")
-	}
-	_ = m2
-}
-
-func TestModelComposeAndPost(t *testing.T) {
-	m := newModel("", "driftnode:test")
-	// Tab focuses the compose widget.
-	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	m = m2.(model)
-	if m.focus != focusCompose {
-		t.Fatal("tab should focus compose")
-	}
-	// Type some text.
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m = m2.(model)
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'e', Text: "e"})
-	m = m2.(model)
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	m = m2.(model)
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'l', Text: "l"})
-	m = m2.(model)
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'o', Text: "o"})
-	m = m2.(model)
-	if m.composeBuf.String() != "hello" {
-		t.Fatalf("compose buf: want %q, got %q", "hello", m.composeBuf.String())
-	}
-	// Enter triggers a post command; compose exits, buffer clears.
-	m2, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
-	m = m2.(model)
-	if m.focus != focusFeed {
-		t.Fatal("enter should return focus to feed")
-	}
-	if m.composeBuf.Len() != 0 {
-		t.Fatal("compose buffer should be cleared after enter")
+		t.Fatal("ctrl+c should quit")
 	}
 }
 
-func TestModelEscExitsCompose(t *testing.T) {
+func TestQuitWithTextFallsThrough(t *testing.T) {
 	m := newModel("", "driftnode:test")
-	m2, _ := m.Update(tea.KeyPressMsg{Code: tea.KeyTab})
-	m = m2.(model)
-	if m.focus != focusCompose {
-		t.Fatal("tab should focus compose")
-	}
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m = m2.(model)
-	if m.composeBuf.String() != "h" {
-		t.Fatalf("compose buf: want %q, got %q", "h", m.composeBuf.String())
-	}
-	m2, _ = m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
-	m = m2.(model)
-	if m.focus != focusFeed {
-		t.Fatal("esc should return focus to feed")
-	}
-	if m.composeBuf.Len() != 0 {
-		t.Fatal("compose buffer should be cleared on esc")
+	// 'q' is a regular character now: it lands in compose, not quit.
+	m = press(t, m, tea.KeyPressMsg{Code: 'q', Text: "q"})
+	if m.compose.value() != "q" {
+		t.Fatalf("compose: want %q, got %q", "q", m.compose.value())
 	}
 }
 
-func TestModelHelp(t *testing.T) {
+func TestEscQuitsWhenEmpty(t *testing.T) {
 	m := newModel("", "driftnode:test")
-	m2, _ := m.Update(tea.KeyPressMsg{Code: 'h', Text: "h"})
-	m = m2.(model)
-	if !m.help {
-		t.Fatal("h should show help")
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("esc with empty compose should quit")
 	}
-	// Any key dismisses help.
-	m2, _ = m.Update(tea.KeyPressMsg{Code: 'q', Text: "q"})
-	m = m2.(model)
-	if m.help {
-		t.Fatal("any key should dismiss help")
+	_ = mm
+}
+
+func TestTabSwitching(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.activeTab != tabZens {
+		t.Fatalf("tab: want %d, got %d", tabZens, m.activeTab)
+	}
+	// shift+tab cycles back to Feed.
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.activeTab != tabFeed {
+		t.Fatalf("shift+tab: want %d, got %d", tabFeed, m.activeTab)
 	}
 }
 
-func TestModelViewRenders(t *testing.T) {
+func TestComposeAndPost(t *testing.T) {
 	m := newModel("", "driftnode:test")
-	m.width = 132
-	m.height = 40
-	m.feed = []feedItem{
-		{author: "alice", text: "gm", age: "1m"},
+	// Type "hi".
+	m = press(t, m, tea.KeyPressMsg{Code: 'h', Text: "h"})
+	m = press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
+	if m.compose.value() != "hi" {
+		t.Fatalf("compose: want %q, got %q", "hi", m.compose.value())
 	}
+	// Enter triggers a post; compose resets.
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("enter should produce a post command")
+	}
+	if asModel(t, mm).compose.value() != "" {
+		t.Fatal("compose should clear after enter")
+	}
+}
+
+func TestEscClearsCompose(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m = press(t, m, tea.KeyPressMsg{Code: 'h', Text: "h"})
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEsc})
+	if m.compose.value() != "" {
+		t.Fatal("esc should clear the compose line")
+	}
+}
+
+func TestViewRendersIdentity(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m.width, m.height = 80, 24
+	m.layout()
 	out := m.View().Content
 	if !strings.Contains(out, "driftnode:test") {
-		t.Fatal("view should contain identity")
+		t.Fatal("view should contain the identity")
 	}
+	// The active tab label should appear.
+	if !strings.Contains(out, "Feed") {
+		t.Fatal("view should render the active tab")
+	}
+}
+
+func TestViewRendersFeed(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m.width, m.height = 80, 24
+	m.layout()
+	m.posts = []feedPost{{name: "alice", author: "driftnode:alice", text: "gm", age: "1m"}}
+	m.feed.setPosts(m.posts, m.styles, 80)
+	out := m.View().Content
 	if !strings.Contains(out, "gm") {
-		t.Fatal("view should contain feed text")
+		t.Fatal("view should render feed text")
 	}
+}
+
+func TestStatusLine(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m.width, m.height = 80, 24
+	m.layout()
+	m.status = statusInfo{zens: 3, transport: true, unlocked: false}
+	out := m.View().Content
 	if !strings.Contains(out, "locked") {
-		t.Fatal("view should render key status")
+		t.Fatal("status should render key state")
 	}
-	// The help hint key should not leak as a header hint line.
-	if strings.Contains(out, "[q] quit") {
-		t.Fatal("header should not contain inline keybinding hint")
+	if !strings.Contains(out, "up") {
+		t.Fatal("status should render transport up")
+	}
+}
+
+func TestZenMenu(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m.width, m.height = 80, 24
+	m.layout()
+	// Seed the zens list with one discovered zen.
+	m.zenList = []zen{{name: "alice", identity: "driftnode:alice", status: "connected"}}
+	items := make([]list.Item, 0, 1)
+	for _, z := range m.zenList {
+		items = append(items, zenItem{z})
+	}
+	_ = m.zens.SetItems(items)
+	// Switch to Zens tab and open the menu with enter.
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.activeTab != tabZens {
+		t.Fatal("should be on Zens tab")
+	}
+	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
+	if m.mode != modeMenu {
+		t.Fatal("enter on a zen should open the action menu")
+	}
+	// The menu should offer info, and follow (alice is not yet followed).
+	if len(m.menu) < 2 {
+		t.Fatalf("menu should have at least 2 entries, got %d", len(m.menu))
+	}
+	// Press 1 to run "info": closes the menu and sets a notice.
+	m = press(t, m, tea.KeyPressMsg{Code: '1', Text: "1"})
+	if m.mode != modeBrowse {
+		t.Fatal("info should close the menu")
+	}
+	if !strings.Contains(m.notice, "alice") {
+		t.Fatalf("info notice should mention alice, got %q", m.notice)
 	}
 }
