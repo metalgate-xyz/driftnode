@@ -27,8 +27,6 @@ type styles struct {
 	hint      lipgloss.Style
 	statusBar lipgloss.Style
 	notice    lipgloss.Style
-	menu      lipgloss.Style
-	menuKey   lipgloss.Style
 }
 
 var theme = newStyles()
@@ -62,11 +60,6 @@ func newStyles() styles {
 		notice: lipgloss.NewStyle().
 			Foreground(lipgloss.Color(warn)).
 			Padding(0, 1),
-		menu: lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(accent)).
-			Padding(1, 2),
-		menuKey: lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(warn)),
 	}
 }
 

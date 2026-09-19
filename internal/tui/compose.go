@@ -47,7 +47,9 @@ func (c compose) update(msg tea.Msg) (compose, tea.Cmd) {
 }
 
 // render returns the input styled to span the full width. The active/focused
-// prompt is accent-colored; the blurred prompt stays muted.
+// prompt is accent-colored; the blurred prompt stays muted. MaxHeight(1)
+// clips the single-line input to its row budget so it can never overflow the
+// fixed layout.
 func (c compose) render(w int) string {
-	return theme.statusBar.Width(w).Render(c.input.View())
+	return theme.statusBar.Width(w).MaxHeight(1).Render(c.input.View())
 }

@@ -7,42 +7,27 @@ import (
 )
 
 // handleKey routes a key press. Global keys (quit, tab switch, post) are
-// handled first; printable keys go to the compose input; navigation keys go
-// to the active panel.
+// handled first; zen action keys (i/f/u) act on the selected zen when the
+// Zens tab is active; printable keys go to the compose input; navigation
+// keys go to the active panel.
 func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "ctrl+c":
 		return m, tea.Quit
 	case "enter":
-		// Enter posts when the compose line has text; otherwise, on the
-		// Zens tab, it opens the action menu.
+		// Enter posts when the compose line has text.
 		if text := m.compose.value(); text != "" {
 			m.compose.reset()
 			return m, postCmd(m.socket, text)
 		}
-		if m.mode == modeMenu {
-			return m.handleMenuKey(msg)
-		}
-		if m.activeTab == tabZens {
-			if _, ok := m.zens.SelectedItem().(zenItem); ok {
-				m.mode = modeMenu
-				m.menu = m.buildMenu()
-			}
-		}
-		return m, nil
+		return m.routeToPanel(msg)
 	case "tab":
 		m.activeTab = (m.activeTab + 1) % len(tabs)
-		m.mode = modeBrowse
 		return m, nil
 	case "shift+tab":
 		m.activeTab = (m.activeTab - 1 + len(tabs)) % len(tabs)
-		m.mode = modeBrowse
 		return m, nil
 	case "esc":
-		if m.mode == modeMenu {
-			m.mode = modeBrowse
-			return m, nil
-		}
 		// esc clears a half-typed post, or quits when the line is empty.
 		if m.compose.value() != "" {
 			m.compose.reset()
@@ -51,9 +36,11 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 
-	// In the zen action menu, number keys run the chosen operation.
-	if m.mode == modeMenu {
-		return m.handleMenuKey(msg)
+	// On the Zens tab, i/f/u act on the selected zen.
+	if m.activeTab == tabZens {
+		if mm, cmd, handled := m.zenAction(msg); handled {
+			return mm, cmd
+		}
 	}
 
 	// Printable characters and editing keys go to the compose input.
@@ -65,6 +52,34 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 	// Navigation keys route to the active panel.
 	return m.routeToPanel(msg)
+}
+
+// zenAction handles i (info), f (follow), and u (unfollow) for the zen
+// selected in the Zens list. It returns handled=true only when it consumed
+// the key, so other keys fall through to compose/navigation.
+func (m model) zenAction(msg tea.KeyPressMsg) (model, tea.Cmd, bool) {
+	z, ok := m.zens.SelectedItem().(zenItem)
+	if !ok || z.identity == "" {
+		return m, nil, false
+	}
+	switch msg.String() {
+	case "i":
+		m.notice = fmt.Sprintf("%s  %s  %s  verified:%v", z.name, z.identity, z.status, z.verified)
+		return m, nil, true
+	case "f":
+		if m.isFollowing(z.identity) {
+			m.notice = "already following " + z.name
+			return m, nil, true
+		}
+		return m, actionCmd("follow", m.socket, z.identity, followZen), true
+	case "u":
+		if !m.isFollowing(z.identity) {
+			m.notice = "not following " + z.name
+			return m, nil, true
+		}
+		return m, actionCmd("unfollow", m.socket, z.identity, unfollowZen), true
+	}
+	return m, nil, false
 }
 
 // isPrintable reports whether a key represents text input for the compose box.
@@ -102,69 +117,7 @@ func (m model) routeToPanel(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleMenuKey interprets a key while the zen action menu is open.
-func (m model) handleMenuKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc", "ctrl+c":
-		m.mode = modeBrowse
-		return m, nil
-	}
-	// 1..9 selects a menu entry.
-	if len(msg.Text) == 1 && msg.Text[0] >= '1' && msg.Text[0] <= '9' {
-		idx := int(msg.Text[0] - '1')
-		if idx < len(m.menu) {
-			return m.menu[idx].run(m)
-		}
-	}
-	return m, nil
-}
-
-// buildMenu assembles the follow/unfollow/info operations for the selected zen.
-func (m model) buildMenu() []menuItem {
-	z, ok := m.zens.SelectedItem().(zenItem)
-	if !ok {
-		return nil
-	}
-	target := z.identity
-	if target == "" {
-		return []menuItem{{label: "no identity to act on"}}
-	}
-	items := []menuItem{
-		{
-			label: "info",
-			run: func(mod model) (tea.Model, tea.Cmd) {
-				return mod.info(z.zen), nil
-			},
-		},
-	}
-	if m.isFollowing(target) {
-		items = append(items, menuItem{
-			label: "unfollow",
-			run: func(mod model) (tea.Model, tea.Cmd) {
-				mod.mode = modeBrowse
-				return mod, actionCmd("unfollow", mod.socket, target, unfollowZen)
-			},
-		})
-	} else {
-		items = append(items, menuItem{
-			label: "follow",
-			run: func(mod model) (tea.Model, tea.Cmd) {
-				mod.mode = modeBrowse
-				return mod, actionCmd("follow", mod.socket, target, followZen)
-			},
-		})
-	}
-	return items
-}
-
-// info sets a notice describing the selected zen and closes the menu.
-func (m model) info(z zen) tea.Model {
-	m.mode = modeBrowse
-	m.notice = fmt.Sprintf("%s  %s  %s  verified:%v", z.name, z.identity, z.status, z.verified)
-	return m
-}
-
-// isFollowing reports whether the selected zen is in the follow graph.
+// isFollowing reports whether the given identity is in the follow graph.
 func (m model) isFollowing(identity string) bool {
 	for _, it := range m.follows.Items() {
 		if f, ok := it.(followItem); ok && f.identity == identity {

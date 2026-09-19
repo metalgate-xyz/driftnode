@@ -5,20 +5,6 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// mode tracks whether we are browsing a tab or acting on a selected zen.
-type mode int
-
-const (
-	modeBrowse mode = iota
-	modeMenu
-)
-
-// menuItem is one operation offered for a selected zen.
-type menuItem struct {
-	label string
-	run   func(model) (tea.Model, tea.Cmd)
-}
-
 // model is the Bubble Tea model. It holds the daemon socket, the active tab,
 // the panels, and the shared refresh state.
 type model struct {
@@ -29,8 +15,6 @@ type model struct {
 	styles   styles
 
 	activeTab int
-	mode      mode
-	menu      []menuItem
 	notice    string
 
 	feed      feedPanel
@@ -52,7 +36,6 @@ func newModel(socket, identity string) model {
 		identity:  identity,
 		styles:    newStyles(),
 		activeTab: tabFeed,
-		mode:      modeBrowse,
 	}
 	m.compose = newCompose()
 	// The compose input is always focused: typing lands in the post box

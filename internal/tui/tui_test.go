@@ -141,7 +141,7 @@ func TestStatusLine(t *testing.T) {
 	}
 }
 
-func TestZenMenu(t *testing.T) {
+func TestZenActions(t *testing.T) {
 	m := newModel("", "driftnode:test")
 	m.width, m.height = 80, 24
 	m.layout()
@@ -152,25 +152,30 @@ func TestZenMenu(t *testing.T) {
 		items = append(items, zenItem{z})
 	}
 	_ = m.zens.SetItems(items)
-	// Switch to Zens tab and open the menu with enter.
+	// Switch to Zens tab.
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.activeTab != tabZens {
 		t.Fatal("should be on Zens tab")
 	}
-	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyEnter})
-	if m.mode != modeMenu {
-		t.Fatal("enter on a zen should open the action menu")
-	}
-	// The menu should offer info, and follow (alice is not yet followed).
-	if len(m.menu) < 2 {
-		t.Fatalf("menu should have at least 2 entries, got %d", len(m.menu))
-	}
-	// Press 1 to run "info": closes the menu and sets a notice.
-	m = press(t, m, tea.KeyPressMsg{Code: '1', Text: "1"})
-	if m.mode != modeBrowse {
-		t.Fatal("info should close the menu")
-	}
+	// 'i' shows info as a notice, without opening any menu.
+	m = press(t, m, tea.KeyPressMsg{Code: 'i', Text: "i"})
 	if !strings.Contains(m.notice, "alice") {
 		t.Fatalf("info notice should mention alice, got %q", m.notice)
+	}
+	// 'f' on an unfollowed zen issues a follow command.
+	mm, cmd := m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if cmd == nil {
+		t.Fatal("follow should produce a command")
+	}
+	m = asModel(t, mm)
+	// 'f' again on an already-followed zen does not issue a command.
+	m.followList = []identityEntry{{identity: "driftnode:alice", name: "alice"}}
+	setFollowItems(&m.follows, m.followList)
+	mm, cmd = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
+	if cmd != nil {
+		t.Fatal("follow on an already-followed zen should not produce a command")
+	}
+	if !strings.Contains(asModel(t, mm).notice, "already following") {
+		t.Fatal("should report already following")
 	}
 }

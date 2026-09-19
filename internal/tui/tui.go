@@ -11,14 +11,19 @@ import (
 // View composes the title bar, tab bar, the active panel, the compose line,
 // and the status line. Only the active tab's panel is rendered, so each tab
 // owns the full window and shows exactly one thing.
+//
+// Each region is clipped to a fixed row budget with MaxHeight so the five
+// regions always sum to the window height: an over-tall panel scrolls inside
+// its own box instead of pushing the compose and status lines off-screen.
 func (m model) View() tea.View {
 	if m.width == 0 {
 		return tea.NewView("Loading...")
 	}
 
-	title := theme.titleBar.Width(m.width).Render(
-		"driftnode " + theme.identity.Render(shortID(m.identity)),
-	)
+	title := theme.titleBar.
+		Width(m.width).
+		MaxHeight(1).
+		Render("driftnode " + theme.identity.Render(shortID(m.identity)))
 
 	tabs := m.renderTabs()
 	panel := m.renderActivePanel()
@@ -28,10 +33,6 @@ func (m model) View() tea.View {
 	body := lipgloss.JoinVertical(lipgloss.Top,
 		title, tabs, panel, compose, status,
 	)
-
-	if m.mode == modeMenu {
-		body = m.renderMenu(body)
-	}
 
 	v := tea.NewView(body)
 	v.AltScreen = true
@@ -50,11 +51,13 @@ func (m model) renderTabs() string {
 		}
 	}
 	row := strings.Join(labels, theme.tabBar.Render("  "))
-	return theme.tabBar.Width(m.width).Render(row)
+	return theme.tabBar.Width(m.width).MaxHeight(1).Render(row)
 }
 
 // renderActivePanel returns the panel for the current tab, bordered and sized
-// to fill the window.
+// to fill the window. MaxHeight clips the inner content to the panel's row
+// budget so a panel that renders taller than its allotment scrolls inside
+// its own box instead of overflowing the layout.
 func (m model) renderActivePanel() string {
 	var content string
 	switch m.activeTab {
@@ -67,7 +70,10 @@ func (m model) renderActivePanel() string {
 	case tabFollowers:
 		content = m.followers.View()
 	}
-	return theme.panel.Width(m.width).Height(panelHeight(m.height)).Render(content)
+	return theme.panel.
+		Width(m.width).
+		MaxHeight(panelHeight(m.height)).
+		Render(content)
 }
 
 // renderStatus draws the one-line status: transport, key, zens, and notice.
@@ -83,24 +89,11 @@ func (m model) renderStatus() string {
 	left := fmt.Sprintf("transport %s  key %s  zens %d", transport, key, m.status.zens)
 	right := m.notice
 	if right == "" {
-		right = theme.hint.Render("tab: switch  enter: post/act  esc: quit")
+		right = theme.hint.Render("tab: switch  enter: post  i/f/u: zen  esc: quit")
 	} else {
 		right = theme.notice.Render(right)
 	}
-	return theme.statusBar.Width(m.width).Render(left + "  " + right)
-}
-
-// renderMenu overlays the zen action menu on the body, centered.
-func (m model) renderMenu(body string) string {
-	rows := make([]string, 0, len(m.menu)+1)
-	rows = append(rows, theme.identity.Render("zen actions"))
-	for i, item := range m.menu {
-		rows = append(rows, fmt.Sprintf("%s  %s",
-			theme.menuKey.Render(fmt.Sprintf("%d", i+1)), item.label))
-	}
-	menu := theme.menu.Render(strings.Join(rows, "\n"))
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, menu,
-		lipgloss.WithWhitespaceStyle(lipgloss.NewStyle().Background(lipgloss.Color("#1a1b26"))))
+	return theme.statusBar.Width(m.width).MaxHeight(1).Render(left + "  " + right)
 }
 
 // Run starts the TUI as a client of the daemon control socket. The daemon must
