@@ -466,6 +466,103 @@ func (s *Store) FollowGraph() ([]core.Identity, error) {
 	return out, nil
 }
 
+// ReceivedFollowers returns the authors of Follow events targeting the local
+// identity that this zen has received (section 9.3). A follower's Follow
+// event lives in the follower's own Profile log and arrives at the followed
+// zen during a normal bidirectional sync, so the followed zen derives its
+// follower set from events it has personally received rather than from a
+// crawl of the network. The result is this zen's own observed follower set,
+// not a global truth (the same caveat as Like counts, section 7.2).
+func (s *Store) ReceivedFollowers() ([]core.Identity, error) {
+	ownID, ok, err := s.Identity()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("no local identity set")
+	}
+	ownPub, err := ownID.PubkeyBytes()
+	if err != nil {
+		return nil, fmt.Errorf("own identity: %w", err)
+	}
+	var ownArr [32]byte
+	copy(ownArr[:], ownPub)
+	seen := make(map[core.Identity]bool)
+	err = s.db.View(func(tx *bolt.Tx) error {
+		fb := tx.Bucket(bucketFollows)
+		return fb.ForEach(func(authorKey, _ []byte) error {
+			authorBucket := fb.Bucket(authorKey)
+			if authorBucket == nil {
+				return nil
+			}
+			return authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return nil
+				}
+				if se.Event.Kind != core.KindFollow || se.Event.Follow == nil {
+					return nil
+				}
+				if se.Event.Follow.TargetPubkey == ownArr {
+					seen[se.Author] = true
+				}
+				return nil
+			})
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.Identity, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+// ReceivedFollowEvents returns the Follow events targeting the local
+// identity that this zen has received, keyed by event ID for the wire
+// response. Each event is self-certifying: the follower's signature is
+// verifiable by the receiver without trusting this zen, so a relay cannot
+// forge a follower.
+func (s *Store) ReceivedFollowEvents() ([]core.SignedEvent, error) {
+	ownID, ok, err := s.Identity()
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, errors.New("no local identity set")
+	}
+	ownPub, err := ownID.PubkeyBytes()
+	if err != nil {
+		return nil, fmt.Errorf("own identity: %w", err)
+	}
+	var ownArr [32]byte
+	copy(ownArr[:], ownPub)
+	var out []core.SignedEvent
+	err = s.db.View(func(tx *bolt.Tx) error {
+		fb := tx.Bucket(bucketFollows)
+		return fb.ForEach(func(authorKey, _ []byte) error {
+			authorBucket := fb.Bucket(authorKey)
+			if authorBucket == nil {
+				return nil
+			}
+			return authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return nil
+				}
+				if se.Event.Kind == core.KindFollow && se.Event.Follow != nil &&
+					se.Event.Follow.TargetPubkey == ownArr {
+					out = append(out, se)
+				}
+				return nil
+			})
+		})
+	})
+	return out, err
+}
+
 // PutRouting records the tailcat token used to reach a followed identity.
 // The binding is updated whenever a session with that identity completes.
 func (s *Store) PutRouting(id core.Identity, token string) error {

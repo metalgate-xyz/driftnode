@@ -40,6 +40,13 @@ const (
 	// MsgAuth carries the Ed25519 signature of the zen's nonce, proving
 	// possession of the private key for the identity announced in Hello.
 	MsgAuth MsgKind = 7
+	// MsgFollowers requests the set of identities following the receiving
+	// zen. The response reuses Events to carry the Follow{target: me}
+	// events the followed zen has received, each self-certifying so the
+	// requester can verify the follower's signature without trusting the
+	// relaying zen. This is how the crawler walks the in-edge of the
+	// follow graph (section 9.3) by asking the followed zen directly.
+	MsgFollowers MsgKind = 8
 )
 
 // Message is the wire envelope. The Kind field determines which payload
@@ -194,4 +201,11 @@ func NewHello(id core.Identity, nonce [32]byte) *Message {
 // NewAuth builds an Auth message carrying a signature over the zen's nonce.
 func NewAuth(sig []byte) *Message {
 	return &Message{Kind: MsgAuth, Auth: &Auth{Signature: sig}}
+}
+
+// NewFollowers builds a Followers request: ask the receiving zen for its
+// own follower set. The response is a sequence of MsgEvents carrying signed
+// Follow events, terminated by MsgDone.
+func NewFollowers() *Message {
+	return &Message{Kind: MsgFollowers}
 }

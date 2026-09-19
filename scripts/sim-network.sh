@@ -72,14 +72,27 @@ teardown() {
 print_status() {
   printf "\n===== Network status =====\n"
   for c in $NODES; do
-    local id token zens
+    local id token zens follows followers
     id=$(dn "$c" whoami 2>/dev/null | head -1)
     token=$(dn "$c" zens token 2>/dev/null | head -1)
     zens=$(dn "$c" zens list 2>/dev/null | grep -vc 'no zens connected')
+    follows=$(dn "$c" follows 2>/dev/null | grep -c '^driftnode:')
+    followers=$(dn "$c" followers 2>/dev/null | grep -c '^driftnode:')
     printf "  %s\n" "$c"
-    printf "    id:    %s\n" "${id:-none}"
-    printf "    token: %s\n" "${token:-none}"
-    printf "    zens: %s connected\n" "$zens"
+    printf "    id:       %s\n" "${id:-none}"
+    printf "    token:    %s\n" "${token:-none}"
+    printf "    zens:     %s connected\n" "$zens"
+    printf "    follows:  %s\n" "${follows:-0}"
+    printf "    followers: %s\n" "${followers:-0}"
+  done
+
+  printf "\n----- follow graph -----\n"
+  for c in $NODES; do
+    local names
+    # Each follows line is "driftnode:<id>\t<name>" or "driftnode:<id>".
+    # Show the name when known, else the 8-char pubkey prefix.
+    names=$(dn "$c" follows 2>/dev/null | sed -E 's/^driftnode:[0-9a-z]{8}[0-9a-z]*\t(.*)$/\1/; s/^driftnode:([0-9a-z]{8})[0-9a-z]*$/\1/' | paste -sd ', ' -)
+    printf "  %-8s follows: %s\n" "$c" "${names:-(none)}"
   done
 
   printf "\n----- carol's feed (first 10) -----\n"

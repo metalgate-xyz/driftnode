@@ -294,6 +294,109 @@ func TestFollowGraph(t *testing.T) {
 	}
 }
 
+func makeFollowEventFor(t *testing.T, follower *core.KeyPair, seq uint64, target core.Identity) *core.SignedEvent {
+	t.Helper()
+	pub, err := target.PubkeyBytes()
+	if err != nil {
+		t.Fatalf("target pubkey: %v", err)
+	}
+	se, err := follower.Sign(core.Event{
+		Kind:      core.KindFollow,
+		Log:       core.ProfileLog,
+		Timestamp: core.Now64(),
+		Sequence:  seq,
+		Follow:    &core.Follow{TargetPubkey: [32]byte(pub)},
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return se
+}
+
+// TestReceivedFollowers verifies a zen derives its own follower set from
+// Follow{target: me} events it has received via sync. Carol is the local
+// identity; Alice and Bob follow her, Dave does not. Carol's followers are
+// {Alice, Bob}.
+func TestReceivedFollowers(t *testing.T) {
+	s := newTestStore(t)
+	carol, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("carol: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(carol.Private, []byte("pw"))
+	if err := s.InitIdentity(carol, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	alice, _ := core.NewKeyPair()
+	bob, _ := core.NewKeyPair()
+	dave, _ := core.NewKeyPair()
+
+	// Alice and Bob follow Carol (the local identity). Dave follows Bob.
+	for _, follower := range []*core.KeyPair{alice, bob} {
+		se := makeFollowEventFor(t, follower, 1, carol.Identity())
+		if _, err := s.PutFollowedEvent(se, 1); err != nil {
+			t.Fatalf("PutFollowedEvent: %v", err)
+		}
+	}
+	daveFollow := makeFollowEventFor(t, dave, 1, bob.Identity())
+	_, _ = s.PutFollowedEvent(daveFollow, 1)
+
+	got, err := s.ReceivedFollowers()
+	if err != nil {
+		t.Fatalf("ReceivedFollowers: %v", err)
+	}
+	want := map[core.Identity]bool{alice.Identity(): true, bob.Identity(): true}
+	gotSet := make(map[core.Identity]bool, len(got))
+	for _, id := range got {
+		gotSet[id] = true
+	}
+	if len(gotSet) != len(want) {
+		t.Fatalf("followers: want %d, got %d (%v)", len(want), len(gotSet), got)
+	}
+	for w := range want {
+		if !gotSet[w] {
+			t.Fatalf("missing follower %s in %v", w, got)
+		}
+	}
+}
+
+// TestReceivedFollowEvents verifies the wire-side query returns the signed
+// Follow events targeting the local identity, so the receiver can verify
+// each follower's signature rather than trusting the relaying zen.
+func TestReceivedFollowEvents(t *testing.T) {
+	s := newTestStore(t)
+	carol, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("carol: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(carol.Private, []byte("pw"))
+	if err := s.InitIdentity(carol, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	alice, _ := core.NewKeyPair()
+
+	se := makeFollowEventFor(t, alice, 1, carol.Identity())
+	if _, err := s.PutFollowedEvent(se, 1); err != nil {
+		t.Fatalf("PutFollowedEvent: %v", err)
+	}
+
+	events, err := s.ReceivedFollowEvents()
+	if err != nil {
+		t.Fatalf("ReceivedFollowEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 follow event, got %d", len(events))
+	}
+	if events[0].Author != alice.Identity() {
+		t.Fatalf("author: want %s, got %s", alice.Identity(), events[0].Author)
+	}
+	if err := events[0].Verify(); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+}
+
 func TestDisplayNameOwnIdentity(t *testing.T) {
 	s := newTestStore(t)
 	kp, err := core.NewKeyPair()

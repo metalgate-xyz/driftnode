@@ -237,5 +237,33 @@ sleep 10
 DAVE_FEED4=$(dn dave feed)
 contains "$DAVE_FEED4" "carol late post" && ok "P8.1 dave sees carol's late post" || bad "P8.1 dave sees late post" "$DAVE_FEED4"
 
+printf "\n===== Phase 9: Follow graph =====\n"
+# Followings are deterministic: each is a signed ProfileLog event the node
+# authored, so the count is exact. Followers are observational (depend on
+# sync propagation), so we assert the mutual relationships that were
+# established via explicit bidirectional syncs are present.
+
+expect_count() { # <node> <subcmd> <want>
+  local got
+  got=$(dn "$1" "$2" | grep -c '^driftnode:')
+  [[ "$got" -eq "$3" ]] && ok "$1 $2 = $3" || bad "$1 $2 = $3" "got $got"
+}
+expect_has() { # <node> <subcmd> <identity>
+  dn "$1" "$2" | grep -qF "$3" \
+    && ok "$1 $2 has $3" \
+    || bad "$1 $2 has $3" "missing"
+}
+
+expect_count seed-eu follows 1
+expect_count seed-us follows 1
+expect_count carol   follows 4
+expect_count dave    follows 3
+expect_count eve     follows 2
+
+expect_has dave  followers "$CAROL_ID"
+expect_has carol followers "$DAVE_ID"
+expect_has carol followers "$EVE_ID"
+expect_has eve   followers "$CAROL_ID"
+
 printf "\n===== TOTAL: %d passed, %d failed =====\n" "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]] && exit 0 || exit 1

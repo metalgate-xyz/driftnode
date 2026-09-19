@@ -151,6 +151,66 @@ func TestSyncAfterTimestamp(t *testing.T) {
 	}
 }
 
+func TestSyncFollowers(t *testing.T) {
+	serverStore := newTestStore(t)
+	clientStore := newTestStore(t)
+
+	// Server is the followed zen.
+	serverKP := makeKey(t)
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(serverKP.Private, []byte("pass"))
+	serverStore.InitIdentity(serverKP, ek)
+
+	// Two followers follow the server. Their Follow events live in their
+	// own logs and arrive at the server via sync (PutFollowedEvent).
+	followerA := makeKey(t)
+	followerB := makeKey(t)
+	for _, fkp := range []*core.KeyPair{followerA, followerB} {
+		se, err := fkp.Sign(core.Event{
+			Kind:      core.KindFollow,
+			Log:       core.ProfileLog,
+			Timestamp: 100,
+			Sequence:  1,
+			Follow:    &core.Follow{TargetPubkey: [32]byte(serverKP.Public)},
+		})
+		if err != nil {
+			t.Fatalf("Sign: %v", err)
+		}
+		if _, err := serverStore.PutFollowedEvent(se, 1); err != nil {
+			t.Fatalf("PutFollowedEvent: %v", err)
+		}
+	}
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	srv := NewServer(serverStore, nil)
+	go func() {
+		defer serverW.Close()
+		srv.Serve(serverR, serverW)
+	}()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	cl := NewClient(clientStore, nil)
+	events, err := cl.FetchFollowers(clientR, clientW)
+	if err != nil {
+		t.Fatalf("FetchFollowers: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("followers: want 2 events, got %d", len(events))
+	}
+	got := map[core.Identity]bool{}
+	for _, se := range events {
+		if se.Event.Kind != core.KindFollow || se.Event.Follow == nil {
+			t.Fatalf("non-follow event in followers response: %+v", se.Event)
+		}
+		got[se.Author] = true
+	}
+	if !got[followerA.Identity()] || !got[followerB.Identity()] {
+		t.Fatalf("missing follower; got %v", got)
+	}
+}
+
 func TestSyncRejectsForgedEvent(t *testing.T) {
 	serverStore := newTestStore(t)
 	clientStore := newTestStore(t)

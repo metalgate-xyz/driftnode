@@ -161,6 +161,75 @@ func TestFollowUnfollow(t *testing.T) {
 	}
 }
 
+func TestFollowsAndFollowersOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	_, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	targetKP, _ := core.NewKeyPair()
+	targetID := string(targetKP.Identity())
+
+	if _, err := runCLI(t, dbPath, []string{"follow", targetID, "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+
+	// follows lists the identity we just followed.
+	out, err := runCLI(t, dbPath, []string{"follows"})
+	if err != nil {
+		t.Fatalf("follows: %v", err)
+	}
+	if !strings.Contains(out, targetID) {
+		t.Fatalf("follows output: want %q, got %q", targetID, out)
+	}
+
+	// followers is empty: nobody has synced a Follow targeting us yet.
+	out, err = runCLI(t, dbPath, []string{"followers"})
+	if err != nil {
+		t.Fatalf("followers: %v", err)
+	}
+	if strings.TrimSpace(out) != "" {
+		t.Fatalf("followers output: want empty, got %q", out)
+	}
+
+	// Simulate a follower: store a Follow event targeting us via the sync
+	// receive path, then confirm followers lists it.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	ownID, _, err := s.Identity()
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	followerKP, _ := core.NewKeyPair()
+	ownPub, _ := ownID.PubkeyBytes()
+	followEvent, err := followerKP.Sign(core.Event{
+		Kind:      core.KindFollow,
+		Log:       core.ProfileLog,
+		Timestamp: 100,
+		Sequence:  1,
+		Follow:    &core.Follow{TargetPubkey: [32]byte(ownPub)},
+	})
+	if err != nil {
+		t.Fatalf("sign follow: %v", err)
+	}
+	if _, err := s.PutFollowedEvent(followEvent, 1); err != nil {
+		t.Fatalf("put followed event: %v", err)
+	}
+	s.Close()
+
+	out, err = runCLI(t, dbPath, []string{"followers"})
+	if err != nil {
+		t.Fatalf("followers after sync: %v", err)
+	}
+	followerID := string(followerKP.Identity())
+	if !strings.Contains(out, followerID) {
+		t.Fatalf("followers output: want %q, got %q", followerID, out)
+	}
+}
+
 func TestBackupExportImport(t *testing.T) {
 	home := t.TempDir()
 	dbPath := filepath.Join(home, "node.db")

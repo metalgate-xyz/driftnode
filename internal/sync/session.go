@@ -43,6 +43,10 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err := s.handleRequest(msg.Request, w); err != nil {
 				return err
 			}
+		case MsgFollowers:
+			if err := s.handleFollowers(w); err != nil {
+				return err
+			}
 		case MsgDone:
 			return nil
 		default:
@@ -69,6 +73,28 @@ func (s *Server) handleRequest(req *Request, w io.Writer) error {
 		}
 		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
 			return fmt.Errorf("write events: %w", err)
+		}
+	}
+	return WriteMsg(w, NewDone())
+}
+
+// handleFollowers responds to a MsgFollowers request by sending the signed
+// Follow events the local identity has received targeting itself, followed
+// by Done. Each event is self-certifying: the requester verifies the
+// follower's signature, so the relaying zen cannot fabricate followers.
+func (s *Server) handleFollowers(w io.Writer) error {
+	events, err := s.store.ReceivedFollowEvents()
+	if err != nil {
+		return fmt.Errorf("fetch followers: %w", err)
+	}
+	const batchSize = 64
+	for i := 0; i < len(events); i += batchSize {
+		end := i + batchSize
+		if end > len(events) {
+			end = len(events)
+		}
+		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
+			return fmt.Errorf("write followers: %w", err)
 		}
 	}
 	return WriteMsg(w, NewDone())
@@ -210,8 +236,43 @@ func (c *Client) SyncLogRaw(r io.Reader, w io.Writer, log core.LogName, after in
 	}
 }
 
-// mergeEvent stores a received event. Own-author events go into the own
-// logs (dedup by event ID); followed-author events go into the follows
+// FetchFollowers requests the receiving zen's own follower set and returns
+// the signed Follow events it has received targeting itself. Each event is
+// verified, so the requester can trust the follower's identity without
+// trusting the relaying zen. Used by the crawler to walk the in-edge of the
+// follow graph by asking the followed zen directly (section 9.3).
+func (c *Client) FetchFollowers(r io.Reader, w io.Writer) ([]core.SignedEvent, error) {
+	if err := WriteMsg(w, NewFollowers()); err != nil {
+		return nil, fmt.Errorf("write followers request: %w", err)
+	}
+	var out []core.SignedEvent
+	for {
+		msg, err := ReadMsg(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return out, nil
+			}
+			return out, fmt.Errorf("read msg: %w", err)
+		}
+		switch msg.Kind {
+		case MsgEvents:
+			if msg.Events == nil {
+				continue
+			}
+			for _, se := range msg.Events.Items {
+				if err := se.Verify(); err != nil {
+					c.log.Warn("followers: rejected unverified event", "err", err)
+					continue
+				}
+				out = append(out, se)
+			}
+		case MsgDone:
+			return out, nil
+		default:
+			c.log.Warn("followers: unexpected message kind", "kind", msg.Kind)
+		}
+	}
+}
 // cache. Returns true if the event was newly stored.
 func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 	ownID, _, err := c.store.Identity()
@@ -468,6 +529,11 @@ func (s *Session) serve(r io.Reader, w io.Writer) (int, error) {
 				return served, err
 			}
 			served++
+		case MsgFollowers:
+			if err := srv.handleFollowers(w); err != nil {
+				return served, err
+			}
+			served++
 		case MsgReverse, MsgDone:
 			return served, nil
 		default:
@@ -493,6 +559,11 @@ func (s *Session) serveWithZens(r io.Reader, w io.Writer) (int, error) {
 		switch msg.Kind {
 		case MsgRequest:
 			if err := srv.handleRequest(msg.Request, w); err != nil {
+				return served, err
+			}
+			served++
+		case MsgFollowers:
+			if err := srv.handleFollowers(w); err != nil {
 				return served, err
 			}
 			served++

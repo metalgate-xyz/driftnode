@@ -47,11 +47,16 @@ func (c *Crawler) SetMaxDepth(d int) { c.maxDepth = d }
 // SetMaxCache sets the maximum number of cached profiles.
 func (c *Crawler) SetMaxCache(n int) { c.maxCache = n }
 
-// Fetcher is the interface for fetching a remote identity's Profile log.
-// The real implementation uses the sync protocol over a tailcat tunnel; the
-// crawler is tested with an in-memory fake.
+// Fetcher is the interface for fetching a remote identity's Profile log
+// and follower set. The real implementation uses the sync protocol over a
+// tailcat tunnel; the crawler is tested with an in-memory fake.
 type Fetcher interface {
 	FetchProfileLog(ctx context.Context, id core.Identity) ([]core.SignedEvent, error)
+	// FetchFollowers asks the followed zen directly for its own follower
+	// set, returned as the signed Follow events it has received. Each
+	// event is self-certifying; the crawler extracts the author as a
+	// follower.
+	FetchFollowers(ctx context.Context, id core.Identity) ([]core.SignedEvent, error)
 }
 
 // Seed adds starting identities for the crawl.
@@ -127,10 +132,16 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 				}
 			}
 
-			// Extract follow targets for the next depth level.
+			// Build the next frontier from both directions of the
+			// follow graph (section 9.3). Follows are the out-edges:
+			// targets in this identity's Profile log. Followers are the
+			// in-edges: the Follow events the followed zen has received
+			// targeting itself. The follower direction asks the
+			// followed zen directly via FetchFollowers, rather than
+			// scanning the local cache, because a zen knows its own
+			// followers as first-class state derived from received events.
 			log := core.NewLog(events)
-			fs := log.FollowSet()
-			fs.Each(func(target [32]byte) {
+			log.FollowSet().Each(func(target [32]byte) {
 				nextID := core.IdentityFromPubkey(target[:])
 				c.mu.Lock()
 				if !c.visited[nextID] {
@@ -138,6 +149,18 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 				}
 				c.mu.Unlock()
 			})
+			followEvents, err := f.FetchFollowers(ctx, id)
+			if err != nil {
+				c.logger.Warn("crawl: fetch followers failed", "identity", id, "err", err)
+			}
+			for _, se := range followEvents {
+				if se.Verify() != nil {
+					continue
+				}
+				if !c.visited[se.Author] {
+					nextBatch = append(nextBatch, se.Author)
+				}
+			}
 		}
 
 		c.mu.Lock()

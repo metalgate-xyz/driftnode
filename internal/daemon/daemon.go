@@ -353,6 +353,10 @@ func (d *Daemon) dispatch(req Request) Response {
 			return Response{Error: "no identity"}
 		}
 		return d.handleWhoami(id)
+	case "follows":
+		return d.handleFollows()
+	case "followers":
+		return d.handleFollowers()
 	case "feed":
 		var p struct {
 			Limit int `json:"limit"`
@@ -761,6 +765,43 @@ func (d *Daemon) handleWhoami(id core.Identity) Response {
 		}
 	}
 	return Response{Result: out}
+}
+
+// handleFollows returns the identities this zen currently follows, derived
+// by replaying its own ProfileLog Follow/Unfollow events (section 7.1).
+func (d *Daemon) handleFollows() Response {
+	ids, err := d.store.FollowGraph()
+	if err != nil {
+		return Response{Error: err.Error()}
+	}
+	out := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]string{"identity": id.String()}
+		if name, err := d.store.DisplayName(id); err == nil && name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	return Response{Result: map[string]any{"follows": out}}
+}
+
+// handleFollowers returns the identities that follow this zen, derived from
+// Follow events it has received targeting itself (section 9.3). This is the
+// zen's own observed follower set, not a global truth.
+func (d *Daemon) handleFollowers() Response {
+	ids, err := d.store.ReceivedFollowers()
+	if err != nil {
+		return Response{Error: err.Error()}
+	}
+	out := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]string{"identity": id.String()}
+		if name, err := d.store.DisplayName(id); err == nil && name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	return Response{Result: map[string]any{"followers": out}}
 }
 
 // handleProfile signs a Profile event (public: zen name) and appends it to
@@ -1200,6 +1241,10 @@ func (f *crawlFetcher) FetchProfileLog(ctx context.Context, id core.Identity) ([
 	return f.d.crawlFetch(ctx, id)
 }
 
+func (f *crawlFetcher) FetchFollowers(ctx context.Context, id core.Identity) ([]core.SignedEvent, error) {
+	return f.d.crawlFetchFollowers(ctx, id)
+}
+
 // syncAllZens runs a sync round against every followed identity whose
 // routing token is known. The follow graph is the auto-dial set: a zen is
 // dialed while it is followed and its token is bound. Unfollowing removes
@@ -1340,6 +1385,76 @@ func (d *Daemon) crawlFetch(ctx context.Context, id core.Identity) ([]core.Signe
 		}
 	}
 	return nil, nil
+}
+
+// crawlFetchFollowers fetches the follower set of the target identity's zen
+// by dialing it and issuing MsgFollowers. Unlike crawlFetch, which can ask
+// any zen that has replicated a log, the follower set is the followed zen's
+// own state, so the request must reach that specific zen. The target's
+// bound token is used if known; otherwise known tokens are probed until a
+// handshake reveals the target identity.
+func (d *Daemon) crawlFetchFollowers(ctx context.Context, id core.Identity) ([]core.SignedEvent, error) {
+	d.mu.Lock()
+	kp := d.unlocked
+	transport := d.transport
+	d.mu.Unlock()
+	if kp == nil {
+		return nil, errors.New("key is locked; cannot authenticate crawl session")
+	}
+	// Prefer the bound token if one exists.
+	if tok, ok, _ := d.store.Routing(id); ok {
+		conn, err := transport.Dial(ctx, tok)
+		if err == nil {
+			events, err := d.fetchFollowersOverConn(ctx, conn, kp)
+			if err == nil {
+				return events, nil
+			}
+		}
+	}
+	// Probe known tokens until a handshake reveals the target identity.
+	for _, ref := range d.knownRefsList() {
+		tok := ref.Token
+		conn, err := transport.Dial(ctx, tok)
+		if err != nil {
+			continue
+		}
+		sess := syncproto.NewSession(d.store, d.logger)
+		sess.SetKey(kp)
+		var zenID core.Identity
+		sess.SetAuthed(func(got core.Identity) { zenID = got })
+		if _, err := sess.Handshake(conn, conn); err != nil {
+			conn.Close()
+			continue
+		}
+		if zenID != id {
+			conn.Close()
+			continue
+		}
+		events, err := syncproto.NewClient(d.store, d.logger).FetchFollowers(conn, conn)
+		conn.Close()
+		if err != nil {
+			continue
+		}
+		return events, nil
+	}
+	return nil, nil
+}
+
+// fetchFollowersOverConn runs a handshake and a FetchFollowers request over
+// an already-dialed connection.
+func (d *Daemon) fetchFollowersOverConn(ctx context.Context, conn net.Conn, kp *core.KeyPair) ([]core.SignedEvent, error) {
+	sess := syncproto.NewSession(d.store, d.logger)
+	sess.SetKey(kp)
+	if _, err := sess.Handshake(conn, conn); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	events, err := syncproto.NewClient(d.store, d.logger).FetchFollowers(conn, conn)
+	conn.Close()
+	if err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 // runSession runs a bidirectional sync session over conn. When initiator is

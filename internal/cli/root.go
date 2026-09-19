@@ -78,6 +78,8 @@ func Root() *cobra.Command {
 		feedCmd(),
 		followCmd(),
 		unfollowCmd(),
+		followsCmd(),
+		followersCmd(),
 		profileCmd(),
 		detailCmd(),
 		keyCmd(),
@@ -499,6 +501,107 @@ func unfollowCmd() *cobra.Command {
 	addDBFlag(c)
 	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
 	return c
+}
+
+// followsCmd lists the identities this zen currently follows. It tries the
+// daemon first (which holds the store lock); if no daemon is running it
+// falls back to a direct read of the local bbolt store (section 12.1).
+func followsCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "follows",
+		Short: "List the identities this zen follows",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if sock, err := daemonSocketPath(); err == nil {
+				if resp, err := daemon.SendRequest(sock, "follows", nil); err == nil {
+					printIdentityList(cmd, resp.Result, "follows")
+					return nil
+				}
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			ids, err := s.FollowGraph()
+			if err != nil {
+				return err
+			}
+			printIdentityList(cmd, followsResult("follows", ids, s), "follows")
+			return nil
+		},
+	}
+	addDBFlag(c)
+	return c
+}
+
+// followersCmd lists the identities that follow this zen. It tries the
+// daemon first; if no daemon is running it falls back to a direct read of
+// the local bbolt store (section 12.1).
+func followersCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "followers",
+		Short: "List the identities that follow this zen",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if sock, err := daemonSocketPath(); err == nil {
+				if resp, err := daemon.SendRequest(sock, "followers", nil); err == nil {
+					printIdentityList(cmd, resp.Result, "followers")
+					return nil
+				}
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			ids, err := s.ReceivedFollowers()
+			if err != nil {
+				return err
+			}
+			printIdentityList(cmd, followsResult("followers", ids, s), "followers")
+			return nil
+		},
+	}
+	addDBFlag(c)
+	return c
+}
+
+// followsResult builds a result map shaped like the daemon response from a
+// slice of identities, resolving display names from the store.
+func followsResult(key string, ids []core.Identity, s *store.Store) map[string]any {
+	out := make([]any, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]any{"identity": id.String()}
+		if name, err := s.DisplayName(id); err == nil && name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	return map[string]any{key: out}
+}
+
+// printIdentityList renders the follows/followers response: one line per
+// identity, with the zen name shown if known. An empty list prints nothing.
+func printIdentityList(cmd *cobra.Command, result any, key string) {
+	m, ok := result.(map[string]any)
+	if !ok {
+		return
+	}
+	items, _ := m[key].([]any)
+	for _, it := range items {
+		entry, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, _ := entry["identity"].(string)
+		name, _ := entry["name"].(string)
+		if name != "" {
+			cmd.Printf("%s\t%s\n", id, name)
+		} else {
+			cmd.Println(id)
+		}
+	}
 }
 
 func keyCmd() *cobra.Command {

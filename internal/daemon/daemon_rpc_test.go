@@ -390,3 +390,71 @@ func TestProfileDetailRPC(t *testing.T) {
 	}
 	_ = kp
 }
+
+func TestFollowsAndFollowersRPC(t *testing.T) {
+	s := newTestStore(t)
+	ownKP := initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	// Follow two identities.
+	targetA, _ := core.NewKeyPair()
+	targetB, _ := core.NewKeyPair()
+	for _, target := range []core.Identity{targetA.Identity(), targetB.Identity()} {
+		if _, err := SendRequest(sock, "follow", map[string]any{"target": string(target)}); err != nil {
+			t.Fatalf("follow %s: %v", target, err)
+		}
+	}
+
+	// follows RPC returns both.
+	resp, err := SendRequest(sock, "follows", nil)
+	if err != nil {
+		t.Fatalf("follows: %v", err)
+	}
+	m, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("follows result: %v", resp.Result)
+	}
+	items, _ := m["follows"].([]any)
+	if len(items) != 2 {
+		t.Fatalf("follows: want 2, got %d (%v)", len(items), items)
+	}
+
+	// A follower follows us: store their Follow event via the sync path.
+	followerKP, _ := core.NewKeyPair()
+	followEvent, err := followerKP.Sign(core.Event{
+		Kind:      core.KindFollow,
+		Log:       core.ProfileLog,
+		Timestamp: 100,
+		Sequence:  1,
+		Follow:    &core.Follow{TargetPubkey: [32]byte(ownKP.Public)},
+	})
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if _, err := s.PutFollowedEvent(followEvent, 1); err != nil {
+		t.Fatalf("PutFollowedEvent: %v", err)
+	}
+
+	// followers RPC returns the follower.
+	resp, err = SendRequest(sock, "followers", nil)
+	if err != nil {
+		t.Fatalf("followers: %v", err)
+	}
+	m, ok = resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("followers result: %v", resp.Result)
+	}
+	items, _ = m["followers"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("followers: want 1, got %d (%v)", len(items), items)
+	}
+}
