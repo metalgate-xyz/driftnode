@@ -197,6 +197,51 @@ func TestExportImportBackup(t *testing.T) {
 	}
 }
 
+func TestBackupIncludesDetailLog(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	se, _ := kp.Sign(core.Event{
+		Kind: core.KindDetail, Log: core.DetailLog, Timestamp: 1, Sequence: 1,
+		Detail: &core.Detail{Bio: "backup me"},
+	})
+	if err := s.AppendOwnEvent(core.DetailLog, se); err != nil {
+		t.Fatalf("Append detail: %v", err)
+	}
+
+	bd, err := s.ExportBackup()
+	if err != nil {
+		t.Fatalf("ExportBackup: %v", err)
+	}
+	var hasDetail bool
+	for _, e := range bd.OwnLogs {
+		if e.Event.Kind == core.KindDetail {
+			hasDetail = true
+			break
+		}
+	}
+	if !hasDetail {
+		t.Fatal("backup does not include DetailLog events")
+	}
+
+	// Import into a fresh store and verify the detail event is there.
+	s2 := newTestStore(t)
+	if err := s2.ImportBackup(bd); err != nil {
+		t.Fatalf("ImportBackup: %v", err)
+	}
+	events, _ := s2.OwnEvents(core.DetailLog)
+	if len(events) != 1 {
+		t.Fatalf("after import: want 1 detail event, got %d", len(events))
+	}
+	if events[0].Event.Detail == nil || events[0].Event.Detail.Bio != "backup me" {
+		t.Fatalf("imported detail event mismatch: %+v", events[0].Event.Detail)
+	}
+}
+
 func TestFollowGraph(t *testing.T) {
 	s := newTestStore(t)
 	kp, err := core.NewKeyPair()
@@ -246,5 +291,133 @@ func TestFollowGraph(t *testing.T) {
 	want := core.IdentityFromPubkey(ed25519.PublicKey(target2))
 	if ids[0] != want {
 		t.Fatalf("after unfollow: want %s, got %s", want, ids[0])
+	}
+}
+
+func TestDisplayNameOwnIdentity(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	// No profile event yet: empty name.
+	name, err := s.DisplayName(kp.Identity())
+	if err != nil {
+		t.Fatalf("DisplayName before profile: %v", err)
+	}
+	if name != "" {
+		t.Fatalf("want empty name, got %q", name)
+	}
+	// Append a profile event.
+	se, _ := kp.Sign(core.Event{
+		Kind: core.KindProfile, Log: core.ProfileLog, Timestamp: 1, Sequence: 1,
+		Profile: &core.Profile{DisplayName: "alice"},
+	})
+	if err := s.AppendOwnEvent(core.ProfileLog, se); err != nil {
+		t.Fatalf("append profile: %v", err)
+	}
+	name, err = s.DisplayName(kp.Identity())
+	if err != nil {
+		t.Fatalf("DisplayName after profile: %v", err)
+	}
+	if name != "alice" {
+		t.Fatalf("want alice, got %q", name)
+	}
+	// A newer profile event wins (last-write-wins).
+	se2, _ := kp.Sign(core.Event{
+		Kind: core.KindProfile, Log: core.ProfileLog, Timestamp: 2, Sequence: 2,
+		Profile: &core.Profile{DisplayName: "alicia"},
+	})
+	if err := s.AppendOwnEvent(core.ProfileLog, se2); err != nil {
+		t.Fatalf("append profile2: %v", err)
+	}
+	name, _ = s.DisplayName(kp.Identity())
+	if name != "alicia" {
+		t.Fatalf("want alicia (last-write-wins), got %q", name)
+	}
+}
+
+func TestVerifyIdentity(t *testing.T) {
+	s := newTestStore(t)
+	a, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unverified by default.
+	if v, _ := s.IsVerified(a.Identity()); v {
+		t.Fatal("a should start unverified")
+	}
+	// Verify a, leave b unverified.
+	if err := s.VerifyIdentity(a.Identity()); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if v, _ := s.IsVerified(a.Identity()); !v {
+		t.Fatal("a should be verified")
+	}
+	if v, _ := s.IsVerified(b.Identity()); v {
+		t.Fatal("b should remain unverified")
+	}
+	// List reflects only a.
+	ids, err := s.VerifiedIdentities()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != a.Identity() {
+		t.Fatalf("want [a], got %v", ids)
+	}
+	// Unverify a.
+	if err := s.UnverifyIdentity(a.Identity()); err != nil {
+		t.Fatalf("unverify: %v", err)
+	}
+	if v, _ := s.IsVerified(a.Identity()); v {
+		t.Fatal("a should be unverified after unverify")
+	}
+	ids, _ = s.VerifiedIdentities()
+	if len(ids) != 0 {
+		t.Fatalf("want empty, got %v", ids)
+	}
+}
+
+func TestBackupIncludesVerifiedIdentities(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	peer, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.VerifyIdentity(peer.Identity()); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	bd, err := s.ExportBackup()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(bd.Verified) != 1 || bd.Verified[0] != peer.Identity() {
+		t.Fatalf("backup verified: want [peer], got %v", bd.Verified)
+	}
+	// Restore into a fresh store.
+	s2 := newTestStore(t)
+	if err := s2.ImportBackup(bd); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if v, _ := s2.IsVerified(peer.Identity()); !v {
+		t.Fatal("peer should be verified after restore")
 	}
 }

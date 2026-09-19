@@ -42,7 +42,7 @@ func TestCanonicalEncodingOmitsEmptyFields(t *testing.T) {
 		Log:       PostLog,
 		Timestamp: 1,
 		Sequence:  1,
-		Post:      &Post{Text: "x"},
+		Post:      &Post{Text: "hello"},
 	}
 	b, err := CanonicalEncode(ev)
 	if err != nil {
@@ -53,8 +53,9 @@ func TestCanonicalEncodingOmitsEmptyFields(t *testing.T) {
 		t.Fatalf("diagnose: %v", err)
 	}
 	// A Post event must carry the post field ("P") but not the profile ("p"),
-	// follow ("f"), reply ("R"), like ("L"), or delete ("D") fields.
-	for _, absent := range []string{`"p"`, `"f"`, `"R"`, `"L"`, `"D"`} {
+	// follow ("f"), reply ("R"), like ("L"), delete ("D"), or detail ("x")
+	// fields.
+	for _, absent := range []string{`"p"`, `"f"`, `"R"`, `"L"`, `"D"`, `"x"`} {
 		if strings.Contains(diag, absent) {
 			t.Fatalf("diagnostic %q contains absent field %s", diag, absent)
 		}
@@ -70,7 +71,7 @@ func TestCanonicalEncodingRoundTrip(t *testing.T) {
 		Log:       ProfileLog,
 		Timestamp: 42,
 		Sequence:  1,
-		Profile:   &Profile{DisplayName: "alice", Bio: "field tester"},
+		Profile:   &Profile{DisplayName: "alice"},
 	}
 	b, err := CanonicalEncode(ev)
 	if err != nil {
@@ -85,6 +86,28 @@ func TestCanonicalEncodingRoundTrip(t *testing.T) {
 	}
 	if got.Profile == nil || got.Profile.DisplayName != "alice" {
 		t.Fatalf("profile not round-tripped: %+v", got.Profile)
+	}
+}
+
+func TestCanonicalEncodingDetailRoundTrip(t *testing.T) {
+	ev := Event{
+		Kind:      KindDetail,
+		Log:       DetailLog,
+		Timestamp: 42,
+		Sequence:  1,
+		Detail:    &Detail{Bio: "field tester", FirstName: "Alice", LastName: "Liddell", Location: "Oxford"},
+	}
+	b, err := CanonicalEncode(ev)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	var got Event
+	if err := CanonicalDecode(b, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Detail == nil || got.Detail.Bio != "field tester" || got.Detail.FirstName != "Alice" ||
+		got.Detail.LastName != "Liddell" || got.Detail.Location != "Oxford" {
+		t.Fatalf("detail not round-tripped: %+v", got.Detail)
 	}
 }
 

@@ -7,15 +7,22 @@ import (
 	"time"
 )
 
-// LogName identifies which of an identity's two logs an event belongs to
-// (§7.1). The two logs are independently requestable so that discovering
-// someone never requires downloading their content history.
+// LogName identifies which of an identity's three logs an event belongs to.
+// Each log is independently requestable so that discovering someone never
+// requires downloading their content history or personal details.
 type LogName string
 
 const (
 	// ProfileLog holds Profile (last-write-wins by timestamp), Follow and
-	// Unfollow events: small, low-churn, and what the crawler fetches.
+	// Unfollow events: small, low-churn, and what the crawler fetches and
+	// caches durably. It carries the public-facing zen name and avatar only.
 	ProfileLog LogName = "profile"
+	// DetailLog holds Detail events (last-write-wins by timestamp): bio,
+	// first name, last name, location. It is never crawled and never cached
+	// durably by peers. A peer that wants to view someone's details fetches
+	// their DetailLog on demand and discards it after display. The owner's
+	// own DetailLog is backup-critical like the other own logs.
+	DetailLog LogName = "detail"
 	// PostLog holds Post, Reply, Like and Delete events: the content stream,
 	// potentially large and long-lived, synced only by followers.
 	PostLog LogName = "post"
@@ -33,6 +40,7 @@ const (
 	KindReply    Kind = 5
 	KindLike     Kind = 6
 	KindDelete   Kind = 7
+	KindDetail   Kind = 8
 )
 
 // Event is an unsigned event. Its canonical CBOR encoding is what the signature
@@ -49,14 +57,29 @@ type Event struct {
 	Reply     *Reply   `cbor:"R,omitempty"`
 	Like      *Like    `cbor:"L,omitempty"`
 	Delete    *Delete  `cbor:"D,omitempty"`
+	Detail    *Detail  `cbor:"x,omitempty"`
 }
 
-// Profile is an upsert into the author's current profile (last-write-wins by
-// timestamp).
+// Profile is an upsert into the author's public profile (last-write-wins by
+// timestamp). It lives in the ProfileLog, which the crawler fetches and
+// caches durably, so it must contain only fields a peer would see in a
+// directory listing: the zen name and avatar.
 type Profile struct {
 	DisplayName string       `cbor:"d,omitempty"`
-	Bio         string       `cbor:"b,omitempty"`
 	AvatarHash  *ContentHash `cbor:"a,omitempty"`
+}
+
+// Detail is an upsert into the author's personal metadata (last-write-wins
+// by timestamp). It lives in the DetailLog, which is never crawled and never
+// cached durably by peers: a peer fetches it on demand to display someone's
+// full profile and discards it afterwards. The fields here are the ones a
+// user is comfortable sharing with a direct caller but not with the crawl
+// cache.
+type Detail struct {
+	Bio       string `cbor:"b,omitempty"`
+	FirstName string `cbor:"f,omitempty"`
+	LastName  string `cbor:"l,omitempty"`
+	Location  string `cbor:"o,omitempty"`
 }
 
 // Follow adds an edge to target; Unfollow removes it. Both live in the
@@ -168,6 +191,11 @@ func validateEvent(ev Event) error {
 	case ProfileLog:
 		switch ev.Kind {
 		case KindProfile, KindFollow, KindUnfollow, KindDelete:
+			return nil
+		}
+	case DetailLog:
+		switch ev.Kind {
+		case KindDetail, KindDelete:
 			return nil
 		}
 	case PostLog:

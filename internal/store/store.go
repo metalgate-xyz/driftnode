@@ -21,14 +21,17 @@ import (
 // signed bytes) within per-log buckets, so backup import merges as a set
 // union of immutable events. Followed events are keyed by event ID within
 // per-author buckets for the same dedup property. Routing maps a followed
-// identity to the tailcat token currently used to reach it.
+// identity to the tailcat token currently used to reach it. Verified holds
+// identities the user has confirmed out-of-band (§7), so a later connection
+// under a different identity can be flagged as a possible MITM.
 var (
-	bucketMeta    = []byte("meta")
-	bucketKey     = []byte("key")     // single EncryptedKey value under key "key"
-	bucketOwn     = []byte("own")     // own logs: sub-buckets per log name
-	bucketFollows = []byte("follows") // synced PostLogs, keyed by author+eventID
-	bucketMedia   = []byte("media")   // content-addressed blobs
-	bucketRouting = []byte("routing") // identity -> tailcat token
+	bucketMeta     = []byte("meta")
+	bucketKey      = []byte("key")      // single EncryptedKey value under key "key"
+	bucketOwn      = []byte("own")      // own logs: sub-buckets per log name
+	bucketFollows  = []byte("follows")  // synced PostLogs, keyed by author+eventID
+	bucketMedia    = []byte("media")    // content-addressed blobs
+	bucketRouting  = []byte("routing")  // identity -> tailcat token
+	bucketVerified = []byte("verified") // identity -> presence (out-of-band confirmed)
 )
 
 // meta keys
@@ -66,7 +69,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketFollows, bucketMedia, bucketRouting} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketFollows, bucketMedia, bucketRouting, bucketVerified} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -191,9 +194,15 @@ func (s *Store) OwnEvents(log core.LogName) ([]core.SignedEvent, error) {
 	return out, err
 }
 
-// AllOwnEvents returns all signed events from both own logs.
+// AllOwnEvents returns all signed events from all own logs (Profile, Detail,
+// Post), in that order. The DetailLog is included because it is the user's
+// own personal metadata and is backup-critical.
 func (s *Store) AllOwnEvents() ([]core.SignedEvent, error) {
 	prof, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := s.OwnEvents(core.DetailLog)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +210,7 @@ func (s *Store) AllOwnEvents() ([]core.SignedEvent, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append(prof, posts...), err
+	return append(append(prof, detail...), posts...), err
 }
 
 // PutFollowedEvent stores an event from a followed identity's PostLog,
@@ -289,13 +298,18 @@ func (s *Store) ExportBackup() (*core.BackupData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &core.BackupData{Key: ek, OwnLogs: events}, nil
+	verified, err := s.VerifiedIdentities()
+	if err != nil {
+		return nil, err
+	}
+	return &core.BackupData{Key: ek, OwnLogs: events, Verified: verified}, nil
 }
 
 // ImportBackup merges a backup into the store: replaces the keypair (via the
 // CLI's separate PutKey call after decryption) and merges own logs as a set
 // union of signed events (§8). AppendOwnEvent dedups by event ID, so this is
-// idempotent.
+// idempotent. Verified identities replace the local set: they are trust
+// decisions, not derived data, so the backup's view wins.
 func (s *Store) ImportBackup(bd *core.BackupData) error {
 	if bd.Key == nil {
 		return errors.New("backup missing key")
@@ -303,6 +317,11 @@ func (s *Store) ImportBackup(bd *core.BackupData) error {
 	for _, se := range bd.OwnLogs {
 		if err := s.AppendOwnEvent(se.Event.Log, &se); err != nil {
 			return err
+		}
+	}
+	if bd.Verified != nil {
+		if err := s.PutVerifiedIdentities(bd.Verified); err != nil {
+			return fmt.Errorf("restore verified: %w", err)
 		}
 	}
 	return nil
@@ -392,6 +411,30 @@ func (s *Store) CrawledProfiles(author core.Identity) ([]core.SignedEvent, error
 	return out, err
 }
 
+// DisplayName resolves the zen name (Profile.DisplayName) for an identity,
+// projected last-write-wins over its Profile-log events. For the local
+// identity it reads the own ProfileLog; for others it reads the crawl cache.
+// Returns an empty string if no Profile event is known.
+func (s *Store) DisplayName(id core.Identity) (string, error) {
+	ownID, ok, err := s.Identity()
+	if err != nil {
+		return "", err
+	}
+	var events []core.SignedEvent
+	if ok && id == ownID {
+		events, err = s.OwnEvents(core.ProfileLog)
+	} else {
+		events, err = s.CrawledProfiles(id)
+	}
+	if err != nil {
+		return "", err
+	}
+	if prof := core.NewLog(events).Profile(); prof != nil {
+		return prof.DisplayName, nil
+	}
+	return "", nil
+}
+
 // FollowedIdentities returns the set of identities whose events are cached in
 // the follows bucket. This is the set of zens we have synced with, not the
 // declared follow graph; use FollowGraph for the latter.
@@ -455,6 +498,23 @@ func (s *Store) DeleteRouting(id core.Identity) error {
 	})
 }
 
+// RoutingByToken returns the identity bound to the given token, by scanning
+// the routing table. The routing table holds only followed identities, so
+// this is a small scan. Used to enrich zen display with the connected
+// identity's name once a session has bound its token.
+func (s *Store) RoutingByToken(token string) (core.Identity, bool, error) {
+	var found core.Identity
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRouting).ForEach(func(k, v []byte) error {
+			if string(v) == token {
+				found = core.Identity(k)
+			}
+			return nil
+		})
+	})
+	return found, found != "", err
+}
+
 // AllPosts returns own PostLog events plus all synced PostLog events from
 // followed identities, for merged timeline construction (section 9.1).
 func (s *Store) AllPosts() ([]core.SignedEvent, error) {
@@ -478,4 +538,60 @@ func (s *Store) AllPosts() ([]core.SignedEvent, error) {
 		}
 	}
 	return own, nil
+}
+
+// VerifyIdentity records that the user has confirmed an identity
+// out-of-band (compared the full driftnode:<pubkey> string through a trusted
+// channel). Verified identities are backup-critical trust state: losing them
+// would silently downgrade a confirmed peer to unverified on restore.
+func (s *Store) VerifyIdentity(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketVerified).Put([]byte(id), []byte{1})
+	})
+}
+
+// UnverifyIdentity removes an out-of-band confirmation.
+func (s *Store) UnverifyIdentity(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketVerified).Delete([]byte(id))
+	})
+}
+
+// IsVerified reports whether an identity was confirmed out-of-band.
+func (s *Store) IsVerified(id core.Identity) (bool, error) {
+	var present bool
+	err := s.db.View(func(tx *bolt.Tx) error {
+		present = tx.Bucket(bucketVerified).Get([]byte(id)) != nil
+		return nil
+	})
+	return present, err
+}
+
+// VerifiedIdentities returns every identity the user has confirmed out-of-band,
+// used for backup export and for the zens view.
+func (s *Store) VerifiedIdentities() ([]core.Identity, error) {
+	var out []core.Identity
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketVerified).ForEach(func(k, v []byte) error {
+			out = append(out, core.Identity(k))
+			return nil
+		})
+	})
+	return out, err
+}
+
+// PutVerifiedIdentities replaces the verified set, used by backup import.
+func (s *Store) PutVerifiedIdentities(ids []core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketVerified)
+		if err := b.ForEach(func(k, v []byte) error { return b.Delete(k) }); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if err := b.Put([]byte(id), []byte{1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }

@@ -307,3 +307,65 @@ func TestSessionHandshakeSkipsWhenNoKey(t *testing.T) {
 		t.Fatalf("Handshake with nil key should skip, got: %v", err)
 	}
 }
+
+// TestZensMessageRoundTrip proves a Zens message built with NewZens round-trips
+// through WriteMsg/ReadMsg preserving the refs' tokens, identities, and name
+// hints, and that the backward-compat Tokens list is still populated for peers
+// that predate the Items field.
+func TestZensMessageRoundTrip(t *testing.T) {
+	refs := []ZenRef{
+		{Token: "tok-a", Name: "alice"},
+		{Token: "tok-b", Identity: core.Identity("id-b"), Name: "bob"},
+		{Token: "tok-c"},
+	}
+	var buf bytes.Buffer
+	if err := WriteMsg(&buf, NewZens(refs)); err != nil {
+		t.Fatalf("WriteMsg: %v", err)
+	}
+	got, err := ReadMsg(&buf)
+	if err != nil {
+		t.Fatalf("ReadMsg: %v", err)
+	}
+	if got.Kind != MsgZens {
+		t.Fatalf("kind: want %d, got %d", MsgZens, got.Kind)
+	}
+	// Items must round-trip exactly.
+	if len(got.Zens.Items) != len(refs) {
+		t.Fatalf("items: want %d, got %d", len(refs), len(got.Zens.Items))
+	}
+	for i, want := range refs {
+		g := got.Zens.Items[i]
+		if g.Token != want.Token || g.Identity != want.Identity || g.Name != want.Name {
+			t.Fatalf("item %d: want %+v, got %+v", i, want, g)
+		}
+	}
+	// Tokens is the backward-compat list, one per ref.
+	if len(got.Zens.Tokens) != len(refs) {
+		t.Fatalf("tokens: want %d, got %d", len(refs), len(got.Zens.Tokens))
+	}
+	for i, want := range refs {
+		if got.Zens.Tokens[i] != want.Token {
+			t.Fatalf("token %d: want %q, got %q", i, want.Token, got.Zens.Tokens[i])
+		}
+	}
+}
+
+// TestZensFromMsgBackwardCompat proves zensFromMsg recovers refs from a legacy
+// Zens message that carries only Tokens (no Items), for peers that predate the
+// Items field.
+func TestZensFromMsgBackwardCompat(t *testing.T) {
+	// Hand-build a legacy message: Tokens only, no Items.
+	msg := &Message{Kind: MsgZens, Zens: &Zens{Tokens: []string{"old-tok-1", "old-tok-2"}}}
+	refs := zensFromMsg(msg)
+	if len(refs) != 2 {
+		t.Fatalf("refs: want 2, got %d", len(refs))
+	}
+	for i, want := range []string{"old-tok-1", "old-tok-2"} {
+		if refs[i].Token != want {
+			t.Fatalf("ref %d token: want %q, got %q", i, want, refs[i].Token)
+		}
+		if refs[i].Identity != "" || refs[i].Name != "" {
+			t.Fatalf("ref %d: legacy ref should have empty identity/name, got %+v", i, refs[i])
+		}
+	}
+}

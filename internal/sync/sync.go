@@ -73,8 +73,23 @@ type Events struct {
 type Done struct{}
 
 // Zens carries known zen tokens for zen exchange (section 6.1).
+// Items carries the richer form with identity and name hints, so the
+// receiver can display a discovered zen by name without dialing it. Tokens
+// is retained for backward compatibility with peers that predate Items.
 type Zens struct {
 	Tokens []string `cbor:"t"`
+	Items  []ZenRef `cbor:"i,omitempty"`
+}
+
+// ZenRef is a zen's routing token together with optional identity and name
+// hints, exchanged during zen discovery so a receiver can show who a
+// discovered zen is without connecting to it. The hints are unverified:
+// the name is only authoritative once the crawler fetches that identity's
+// signed ProfileLog.
+type ZenRef struct {
+	Token    string          `cbor:"t"`
+	Identity core.Identity   `cbor:"i,omitempty"`
+	Name     string          `cbor:"n,omitempty"`
 }
 
 // Hello is the first handshake message: the sender's driftnode identity and a
@@ -160,9 +175,14 @@ func NewReverse() *Message {
 	return &Message{Kind: MsgReverse}
 }
 
-// NewZens builds a Zens message carrying known zen tokens.
-func NewZens(tokens []string) *Message {
-	return &Message{Kind: MsgZens, Zens: &Zens{Tokens: tokens}}
+// NewZens builds a Zens message carrying known zen refs. Tokens is populated
+// for backward compatibility with peers that do not understand Items.
+func NewZens(refs []ZenRef) *Message {
+	tokens := make([]string, 0, len(refs))
+	for _, r := range refs {
+		tokens = append(tokens, r.Token)
+	}
+	return &Message{Kind: MsgZens, Zens: &Zens{Tokens: tokens, Items: refs}}
 }
 
 // NewHello builds a Hello message announcing an identity and a nonce for the

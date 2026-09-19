@@ -95,9 +95,12 @@ type Daemon struct {
 
 // ZenInfo describes a known zen and its connection state.
 type ZenInfo struct {
-	ID     string `json:"id"`     // tailcat token of the zen
-	Kind   string `json:"kind"`   // native_zen or browser
-	Status string `json:"status"` // connecting, connected, error
+	ID       string `json:"id"`       // tailcat token of the zen
+	Identity string `json:"identity"` // driftnode:<pubkey> once learned, else empty
+	Name     string `json:"name"`     // zen name once known, else empty
+	Kind     string `json:"kind"`     // native_zen or browser
+	Status   string `json:"status"`   // connecting, connected, discovered, error
+	Verified bool   `json:"verified"` // identity confirmed out-of-band (§7)
 }
 
 // New creates a Daemon backed by the given store.
@@ -349,7 +352,7 @@ func (d *Daemon) dispatch(req Request) Response {
 		if !ok {
 			return Response{Error: "no identity"}
 		}
-		return Response{Result: map[string]string{"identity": id.String()}}
+		return d.handleWhoami(id)
 	case "feed":
 		var p struct {
 			Limit int `json:"limit"`
@@ -378,6 +381,45 @@ func (d *Daemon) dispatch(req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		return d.handlePost(p.Text, kp)
+	case "profile":
+		var p struct {
+			Name       string `json:"name"`
+			Passphrase string `json:"passphrase"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return Response{Error: fmt.Sprintf("parse params: %s", err)}
+			}
+		}
+		if p.Name == "" {
+			return Response{Error: "name required"}
+		}
+		kp, err := d.signingKey(p.Passphrase)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return d.handleProfile(p.Name, kp)
+	case "detail":
+		var p struct {
+			Bio       string `json:"bio"`
+			FirstName string `json:"first_name"`
+			LastName  string `json:"last_name"`
+			Location  string `json:"location"`
+			Passphrase string `json:"passphrase"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return Response{Error: fmt.Sprintf("parse params: %s", err)}
+			}
+		}
+		if p.Bio == "" && p.FirstName == "" && p.LastName == "" && p.Location == "" {
+			return Response{Error: "at least one detail field required"}
+		}
+		kp, err := d.signingKey(p.Passphrase)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return d.handleDetail(p.Bio, p.FirstName, p.LastName, p.Location, kp)
 	case "token":
 		d.mu.Lock()
 		var addr tailcat.Addr
@@ -393,7 +435,65 @@ func (d *Daemon) dispatch(req Request) Response {
 			zens = append(zens, p)
 		}
 		d.mu.Unlock()
+		// Enrich each zen with the connected identity's name when a
+		// routing binding exists. After a sync binds the token to an
+		// identity, the crawl cache holds the authoritative name; that
+		// overrides any unverified hint set during discovery. Zens
+		// discovered only via exchange keep their hint name/identity.
+		for _, z := range zens {
+			z.Verified = false
+			if id, ok, _ := d.store.RoutingByToken(z.ID); ok {
+				z.Identity = string(id)
+				if name, _ := d.store.DisplayName(id); name != "" {
+					z.Name = name
+				}
+				if v, _ := d.store.IsVerified(id); v {
+					z.Verified = true
+				}
+			}
+		}
 		return Response{Result: zens}
+	case "verify":
+		var p struct {
+			Identity string `json:"identity"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return Response{Error: fmt.Sprintf("parse params: %s", err)}
+			}
+		}
+		if p.Identity == "" {
+			return Response{Error: "identity required"}
+		}
+		id, err := core.ParseIdentity(p.Identity)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		if err := d.store.VerifyIdentity(id); err != nil {
+			return Response{Error: err.Error()}
+		}
+		d.logger.Info("identity verified out-of-band", "identity", id)
+		return Response{Result: map[string]string{"verified": string(id)}}
+	case "unverify":
+		var p struct {
+			Identity string `json:"identity"`
+		}
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params, &p); err != nil {
+				return Response{Error: fmt.Sprintf("parse params: %s", err)}
+			}
+		}
+		if p.Identity == "" {
+			return Response{Error: "identity required"}
+		}
+		id, err := core.ParseIdentity(p.Identity)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		if err := d.store.UnverifyIdentity(id); err != nil {
+			return Response{Error: err.Error()}
+		}
+		return Response{Result: map[string]string{"unverified": string(id)}}
 	case "follow":
 		var p struct {
 			Target     string `json:"target"`
@@ -498,9 +598,10 @@ func (d *Daemon) dispatch(req Request) Response {
 
 // FeedItem is one post in the merged feed, serialized to the CLI.
 type FeedItem struct {
-	Timestamp int64  `json:"timestamp"`
-	Author    string `json:"author"`
-	Text      string `json:"text"`
+	Timestamp  int64  `json:"timestamp"`
+	Author     string `json:"author"`
+	Name       string `json:"name"`
+	Text       string `json:"text"`
 }
 
 // handleFeed returns the merged timeline (own PostLog plus synced PostLogs
@@ -521,9 +622,11 @@ func (d *Daemon) handleFeed(limit int) Response {
 		if p.Event.Reply != nil {
 			text = "(reply) " + text
 		}
+		name, _ := d.store.DisplayName(p.Author)
 		items = append(items, FeedItem{
 			Timestamp: p.Event.Timestamp,
 			Author:    p.Author.String(),
+			Name:      name,
 			Text:      text,
 		})
 	}
@@ -624,19 +727,106 @@ func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
+// handleWhoami returns the local identity plus the current profile and
+// detail projected from the own logs, so a user can see what they've filled
+// in without a separate command.
+func (d *Daemon) handleWhoami(id core.Identity) Response {
+	out := map[string]any{"identity": id.String()}
+	profEvents, err := d.store.OwnEvents(core.ProfileLog)
+	if err == nil {
+		if prof := core.NewLog(profEvents).Profile(); prof != nil {
+			if prof.DisplayName != "" {
+				out["display_name"] = prof.DisplayName
+			}
+			if prof.AvatarHash != nil && !prof.AvatarHash.IsZero() {
+				out["has_avatar"] = true
+			}
+		}
+	}
+	detEvents, err := d.store.OwnEvents(core.DetailLog)
+	if err == nil {
+		if det := core.NewLog(detEvents).Detail(); det != nil {
+			if det.Bio != "" {
+				out["bio"] = det.Bio
+			}
+			if det.FirstName != "" {
+				out["first_name"] = det.FirstName
+			}
+			if det.LastName != "" {
+				out["last_name"] = det.LastName
+			}
+			if det.Location != "" {
+				out["location"] = det.Location
+			}
+		}
+	}
+	return Response{Result: out}
+}
+
+// handleProfile signs a Profile event (public: zen name) and appends it to
+// the local ProfileLog. The ProfileLog is what the crawler fetches and caches
+// durably, so only public-facing fields belong here.
+func (d *Daemon) handleProfile(name string, kp *core.KeyPair) Response {
+	prof := &core.Profile{DisplayName: name}
+	seq, err := d.store.OwnEventCount(core.ProfileLog)
+	if err != nil {
+		return Response{Error: fmt.Sprintf("sequence: %s", err)}
+	}
+	se, err := kp.Sign(core.Event{
+		Kind:      core.KindProfile,
+		Log:       core.ProfileLog,
+		Timestamp: core.Now64(),
+		Sequence:  seq + 1,
+		Profile:   prof,
+	})
+	if err != nil {
+		return Response{Error: fmt.Sprintf("sign: %s", err)}
+	}
+	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
+		return Response{Error: fmt.Sprintf("append: %s", err)}
+	}
+	d.touchSignAt()
+	id, _ := se.ID()
+	return Response{Result: map[string]string{"event_id": id.String()}}
+}
+
+// handleDetail signs a Detail event (bio, first/last name, location) and
+// appends it to the local DetailLog. The DetailLog is never crawled and never
+// cached durably by peers; it is fetched on demand for display and
+// discarded. The owner's own DetailLog is backup-critical.
+func (d *Daemon) handleDetail(bio, firstName, lastName, location string, kp *core.KeyPair) Response {
+	seq, err := d.store.OwnEventCount(core.DetailLog)
+	if err != nil {
+		return Response{Error: fmt.Sprintf("sequence: %s", err)}
+	}
+	se, err := kp.Sign(core.Event{
+		Kind:      core.KindDetail,
+		Log:       core.DetailLog,
+		Timestamp: core.Now64(),
+		Sequence:  seq + 1,
+		Detail:    &core.Detail{Bio: bio, FirstName: firstName, LastName: lastName, Location: location},
+	})
+	if err != nil {
+		return Response{Error: fmt.Sprintf("sign: %s", err)}
+	}
+	if err := d.store.AppendOwnEvent(core.DetailLog, se); err != nil {
+		return Response{Error: fmt.Sprintf("append: %s", err)}
+	}
+	d.touchSignAt()
+	id, _ := se.ID()
+	return Response{Result: map[string]string{"event_id": id.String()}}
+}
+
 // handleFollow is the single "add a zen" gesture: it records a Follow event
 // for the target identity. The target may be a driftnode identity/pubkey or a
 // tailcat token. When given a token, it dials the zen, learns the identity
 // from the session handshake, writes the Follow event, and binds the token
-// to that identity in the routing table so future sync rounds can dial it.
-// When given a pubkey (the offline path), it writes the Follow event only;
-// the routing binding is filled in later when the identity is contacted.
+// to that identity in the routing table. When given a pubkey (the offline
+// path), it writes the Follow event only; the routing binding is filled in
+// later when the identity is contacted.
 func (d *Daemon) handleFollow(targetStr string, kp *core.KeyPair) Response {
-	// The target is either a driftnode identity/pubkey (offline path:
-	// write a Follow only) or a tailcat token (dial path: dial, learn
-	// identity from the handshake, write Follow, bind routing). Identities
-	// and raw base32 pubkeys can be parsed unambiguously, so try that
-	// first; anything else is treated as a token.
+	// Identities and raw base32 pubkeys can be parsed unambiguously, so
+	// try that first; anything else is treated as a token.
 	if target, err := resolvePubkey(targetStr); err == nil {
 		return d.writeFollow(target, kp)
 	}
@@ -870,44 +1060,94 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 	d.mu.Unlock()
 }
 
-// knownTokensList returns the current set of known zen tokens for zen
-// exchange, including this node's own listener address so zens can dial
-// it back and discover it through the exchange.
-func (d *Daemon) knownTokensList() []string {
+// knownRefsList returns this node's known zen refs for zen exchange. It
+// includes this node's own listener address (with identity and name) so
+// zens can dial it back and discover it through the exchange. Each ref
+// carries the identity and name when they are known, so the receiver can
+// display a discovered zen by name without dialing it.
+func (d *Daemon) knownRefsList() []syncproto.ZenRef {
 	d.mu.Lock()
-	defer d.mu.Unlock()
-	out := make([]string, 0, len(d.knownTokens)+1)
+	ownID, _, _ := d.store.Identity()
+	d.mu.Unlock()
+	out := make([]syncproto.ZenRef, 0, len(d.knownTokens)+1)
 	if d.tcListener != nil {
-		out = append(out, string(d.tcListener.Addr()))
+		ref := syncproto.ZenRef{Token: string(d.tcListener.Addr())}
+		if ownID != "" {
+			ref.Identity = ownID
+			if name, _ := d.store.DisplayName(ownID); name != "" {
+				ref.Name = name
+			}
+		}
+		out = append(out, ref)
 	}
 	for tok := range d.knownTokens {
 		if d.tcListener != nil && tok == string(d.tcListener.Addr()) {
 			continue
 		}
-		out = append(out, tok)
+		ref := syncproto.ZenRef{Token: tok}
+		// Prefer the routing binding (authoritative): a followed zen's
+		// identity is bound and its name comes from the crawl cache.
+		if id, ok, _ := d.store.RoutingByToken(tok); ok {
+			ref.Identity = id
+			if name, _ := d.store.DisplayName(id); name != "" {
+				ref.Name = name
+			}
+		} else if p, ok := d.zens[tok]; ok {
+			// Discovered zen: no routing binding, but the exchange that
+			// learned this token may have carried identity/name hints
+			// that learnZenRef stored on the zen entry. Forward them so
+			// names propagate transitively beyond followed zens.
+			ref.Identity = core.Identity(p.Identity)
+			ref.Name = p.Name
+		}
+		out = append(out, ref)
 	}
 	return out
 }
 
-// learnZenToken records a zen token learned through zen exchange. The
-// token is added to knownTokens (for zen-exchange offers and dedup) and the
-// zens map (for display), but NOT to seedZens, so it is not auto-dialed.
-// Dialing a discovered zen requires explicit intent: a follow by token or a
-// follow-resolved dial.
-func (d *Daemon) learnZenToken(token string) {
-	if token == "" {
+// learnZenRef records a zen ref learned through zen exchange. The token is
+// added to knownTokens (for zen-exchange offers and dedup) and the zens map
+// (for display), but NOT to seedZens, so it is not auto-dialed. When the ref
+// carries an identity, it seeds the crawler so the ProfileLog is fetched
+// authoritatively on the next crawl, and the name hint is stored for display
+// until the crawl confirms it. Dialing a discovered zen requires explicit
+// intent: a follow by token or a follow-resolved dial.
+func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
+	if ref.Token == "" {
 		return
 	}
 	d.mu.Lock()
-	if d.knownTokens[token] {
-		d.mu.Unlock()
-		return
+	already := d.knownTokens[ref.Token]
+	if !already {
+		d.knownTokens[ref.Token] = true
 	}
-	d.knownTokens[token] = true
-	_, exists := d.zens[token]
+	_, exists := d.zens[ref.Token]
 	d.mu.Unlock()
 	if !exists {
-		d.addZen(token, "native_zen", "discovered")
+		d.addZen(ref.Token, "native_zen", "discovered")
+	}
+	if ref.Identity != "" {
+		// Seed the crawler so the signed ProfileLog is fetched on the
+		// next crawl, confirming the name hint authoritatively.
+		d.mu.Lock()
+		if d.crawler != nil {
+			if id, err := core.ParseIdentity(string(ref.Identity)); err == nil {
+				d.crawler.Seed(id)
+			}
+		}
+		d.mu.Unlock()
+		// Record the name hint on the zen entry for immediate display.
+		// A token can arrive first as a bare token and later pick up an
+		// identity/name hint from another exchange, so update even when
+		// the token was already known.
+		if ref.Name != "" {
+			d.mu.Lock()
+			if p, ok := d.zens[ref.Token]; ok {
+				p.Identity = string(ref.Identity)
+				p.Name = ref.Name
+			}
+			d.mu.Unlock()
+		}
 	}
 }
 
@@ -1010,7 +1250,8 @@ func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
 	for _, id := range pending {
 		pendingSet[id] = true
 	}
-	for _, tok := range d.knownTokensList() {
+	for _, ref := range d.knownRefsList() {
+		tok := ref.Token
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		conn, err := d.transport.Dial(ctx, tok)
 		if err != nil {
@@ -1075,8 +1316,9 @@ func (d *Daemon) crawlFetch(ctx context.Context, id core.Identity) ([]core.Signe
 	if kp == nil {
 		return nil, errors.New("key is locked; cannot authenticate crawl session")
 	}
-	tokens := d.knownTokensList()
-	for _, tok := range tokens {
+	tokens := d.knownRefsList()
+	for _, ref := range tokens {
+		tok := ref.Token
 		conn, err := transport.Dial(ctx, tok)
 		if err != nil {
 			continue
@@ -1109,8 +1351,8 @@ func (d *Daemon) crawlFetch(ctx context.Context, id core.Identity) ([]core.Signe
 // daemon rejects inbound sessions.
 func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity) (int, error) {
 	sess := syncproto.NewSession(d.store, d.logger)
-	sess.SetZenSource(d.knownTokensList)
-	sess.SetZenSink(d.learnZenToken)
+	sess.SetZenSource(d.knownRefsList)
+	sess.SetZenSink(d.learnZenRef)
 	d.mu.Lock()
 	kp := d.unlocked
 	d.mu.Unlock()

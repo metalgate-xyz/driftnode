@@ -48,6 +48,25 @@ func (l *Log) Profile() *Profile {
 	return latest
 }
 
+// Detail is the current personal metadata for an identity, computed as the
+// last-write-wins projection over Detail-log events. Unlike Profile, the
+// DetailLog is never crawled or durably cached by peers, so this projection
+// is run against events fetched on demand for display.
+func (l *Log) Detail() *Detail {
+	var latest *Detail
+	var latestTS int64
+	for _, se := range l.Events {
+		if se.Event.Kind != KindDetail || se.Event.Detail == nil {
+			continue
+		}
+		if se.Event.Timestamp >= latestTS {
+			latest = se.Event.Detail
+			latestTS = se.Event.Timestamp
+		}
+	}
+	return latest
+}
+
 // FollowSet is the set of pubkeys currently followed, computed by replaying
 // Follow and Unfollow events in timestamp order (§7.1).
 type FollowSet struct {

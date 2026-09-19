@@ -107,6 +107,7 @@ func main() {
 			n := 0
 			profN := 0
 			postN := 0
+			detailN := 0
 			authorBucket.ForEach(func(ek, ev []byte) error {
 				n++
 				var se core.SignedEvent
@@ -115,11 +116,13 @@ func main() {
 						postN++
 					} else if se.Event.Log == core.ProfileLog {
 						profN++
+					} else if se.Event.Log == core.DetailLog {
+						detailN++
 					}
 				}
 				return nil
 			})
-			fmt.Printf("  %q  total=%d  profile=%d  post=%d\n", string(k), n, profN, postN)
+			fmt.Printf("  %q  total=%d  profile=%d  post=%d  detail=%d\n", string(k), n, profN, postN, detailN)
 			return nil
 		})
 		return nil

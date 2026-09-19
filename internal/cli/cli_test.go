@@ -78,6 +78,26 @@ func TestPostAndFeed(t *testing.T) {
 	}
 }
 
+func TestFeedShowsZenName(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"profile", "--name", "alice", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"post", "gm", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	out, err := runCLI(t, dbPath, []string{"feed"})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if !strings.Contains(out, "alice> gm") {
+		t.Fatalf("feed should show zen name as author: %q", out)
+	}
+}
+
 func TestFeedLimit(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "node.db")
 	_, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"})
@@ -296,5 +316,128 @@ func TestBootstrapKeygenSignVerify(t *testing.T) {
 	derivedPubB64 = strings.TrimSpace(derivedPubB64)
 	if derivedPubB64 != pubB64 {
 		t.Fatalf("keygen --key derived %q, want %q", derivedPubB64, pubB64)
+	}
+}
+
+func TestProfileCommand(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"profile", "--name", "alice", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("read profile log: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 profile event, got %d", len(events))
+	}
+	if events[0].Event.Profile == nil || events[0].Event.Profile.DisplayName != "alice" {
+		t.Fatalf("profile event missing zen name: %+v", events[0].Event.Profile)
+	}
+}
+
+func TestDetailCommand(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"detail", "--bio", "field tester", "--first-name", "Alice", "--last-name", "Liddell", "--location", "Oxford", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer s.Close()
+	events, err := s.OwnEvents(core.DetailLog)
+	if err != nil {
+		t.Fatalf("read detail log: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 detail event, got %d", len(events))
+	}
+	d := events[0].Event.Detail
+	if d == nil {
+		t.Fatal("detail event missing Detail payload")
+	}
+	if d.Bio != "field tester" || d.FirstName != "Alice" || d.LastName != "Liddell" || d.Location != "Oxford" {
+		t.Fatalf("detail fields mismatch: %+v", d)
+	}
+}
+
+func TestWhoamiShowsProfileAndDetail(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"profile", "--name", "alice", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"detail", "--bio", "wanderer", "--location", "Wonderland", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("detail: %v", err)
+	}
+	out, err := runCLI(t, dbPath, []string{"whoami"})
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	if !strings.Contains(out, "zen name: alice") {
+		t.Fatalf("whoami missing zen name: %q", out)
+	}
+	if !strings.Contains(out, "bio: wanderer") {
+		t.Fatalf("whoami missing bio: %q", out)
+	}
+	if !strings.Contains(out, "location: Wonderland") {
+		t.Fatalf("whoami missing location: %q", out)
+	}
+}
+
+func TestZensVerifyOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	peer, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	peerID := string(peer.Identity())
+
+	out, err := runCLI(t, dbPath, []string{"zens", "verify", peerID})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !strings.Contains(out, "verified") {
+		t.Fatalf("verify output: %q", out)
+	}
+	// Confirm it landed in the store, then close before the next CLI call
+	// (bbolt allows only one writer at a time).
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	verified, _ := s.IsVerified(peer.Identity())
+	s.Close()
+	if !verified {
+		t.Fatal("peer not verified in store")
+	}
+	// Unverify.
+	if _, err := runCLI(t, dbPath, []string{"zens", "unverify", peerID}); err != nil {
+		t.Fatalf("unverify: %v", err)
+	}
+	s, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer s.Close()
+	if v, _ := s.IsVerified(peer.Identity()); v {
+		t.Fatal("peer should be unverified after unverify")
 	}
 }

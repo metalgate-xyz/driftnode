@@ -238,8 +238,8 @@ func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 type Session struct {
 	store *store.Store
 	log   *slog.Logger
-	zens  func() []string // known zen tokens to offer; may be nil
-	onZen func(string)    // called for each learned zen token; may be nil
+	zens  func() []ZenRef // known zen refs to offer; may be nil
+	onZen func(ZenRef)    // called for each learned zen ref; may be nil
 
 	// key is this node's Ed25519 keypair, used to authenticate the session.
 	// Set with SetKey before RunInitiator/RunListener; a nil key means no
@@ -267,13 +267,13 @@ func (s *Session) SetKey(k *core.KeyPair) { s.key = k }
 // after a successful handshake.
 func (s *Session) SetAuthed(fn func(core.Identity)) { s.onAuthed = fn }
 
-// SetZenSource sets the function that returns this node's known zen tokens
-// to offer during zen exchange.
-func (s *Session) SetZenSource(fn func() []string) { s.zens = fn }
+// SetZenSource sets the function that returns this node's known zen refs to
+// offer during zen exchange.
+func (s *Session) SetZenSource(fn func() []ZenRef) { s.zens = fn }
 
-// SetZenSink sets the callback invoked for each zen token learned from the
+// SetZenSink sets the callback invoked for each zen ref learned from the
 // remote side.
-func (s *Session) SetZenSink(fn func(string)) { s.onZen = fn }
+func (s *Session) SetZenSink(fn func(ZenRef)) { s.onZen = fn }
 
 // Handshake authenticates both sides of the connection by proving possession
 // Handshake authenticates both sides' Ed25519 identities before sync traffic
@@ -497,20 +497,18 @@ func (s *Session) serveWithZens(r io.Reader, w io.Writer) (int, error) {
 			}
 			served++
 		case MsgZens:
-			if msg.Zens != nil {
-				for _, tok := range msg.Zens.Tokens {
-					if s.onZen != nil {
-						s.onZen(tok)
-					}
+			if s.onZen != nil {
+				for _, ref := range zensFromMsg(msg) {
+					s.onZen(ref)
 				}
 			}
 			// Reply with our zens once.
 			if !sentZens {
-				var tokens []string
+				var refs []ZenRef
 				if s.zens != nil {
-					tokens = s.zens()
+					refs = s.zens()
 				}
-				if err := WriteMsg(w, NewZens(tokens)); err != nil {
+				if err := WriteMsg(w, NewZens(refs)); err != nil {
 					return served, fmt.Errorf("write zens: %w", err)
 				}
 				sentZens = true
@@ -525,13 +523,13 @@ func (s *Session) serveWithZens(r io.Reader, w io.Writer) (int, error) {
 	}
 }
 
-// exchangeZens sends our known tokens and receives the remote side's tokens.
+// exchangeZens sends our known refs and receives the remote side's refs.
 func (s *Session) exchangeZens(r io.Reader, w io.Writer) error {
-	var tokens []string
+	var refs []ZenRef
 	if s.zens != nil {
-		tokens = s.zens()
+		refs = s.zens()
 	}
-	if err := WriteMsg(w, NewZens(tokens)); err != nil {
+	if err := WriteMsg(w, NewZens(refs)); err != nil {
 		return fmt.Errorf("write zens: %w", err)
 	}
 	for {
@@ -540,15 +538,32 @@ func (s *Session) exchangeZens(r io.Reader, w io.Writer) error {
 			return fmt.Errorf("read zens: %w", err)
 		}
 		if msg.Kind == MsgZens {
-			if msg.Zens != nil && s.onZen != nil {
-				for _, tok := range msg.Zens.Tokens {
-					s.onZen(tok)
+			if s.onZen != nil {
+				for _, ref := range zensFromMsg(msg) {
+					s.onZen(ref)
 				}
 			}
 			return nil
 		}
 		s.log.Warn("sync: unexpected message kind during zen exchange", "kind", msg.Kind)
 	}
+}
+
+// zensFromMsg extracts zen refs from a MsgZens, preferring the richer Items
+// form and falling back to bare Tokens for backward compatibility with
+// peers that predate Items.
+func zensFromMsg(msg *Message) []ZenRef {
+	if msg.Zens == nil {
+		return nil
+	}
+	if len(msg.Zens.Items) > 0 {
+		return msg.Zens.Items
+	}
+	out := make([]ZenRef, 0, len(msg.Zens.Tokens))
+	for _, tok := range msg.Zens.Tokens {
+		out = append(out, ZenRef{Token: tok})
+	}
+	return out
 }
 
 func (s *Session) mergeEvent(se *core.SignedEvent) (bool, error) {

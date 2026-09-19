@@ -84,10 +84,14 @@ func TestValidateEventLogConsistency(t *testing.T) {
 		{"follow in profilelog", Event{Kind: KindFollow, Log: ProfileLog, Timestamp: 1, Sequence: 1, Follow: &Follow{}}, false},
 		{"post in profilelog", Event{Kind: KindPost, Log: ProfileLog, Timestamp: 1, Sequence: 1, Post: &Post{}}, true},
 		{"profile in postlog", Event{Kind: KindProfile, Log: PostLog, Timestamp: 1, Sequence: 1, Profile: &Profile{}}, true},
+		{"detail in detaillog", Event{Kind: KindDetail, Log: DetailLog, Timestamp: 1, Sequence: 1, Detail: &Detail{}}, false},
+		{"detail in profilelog", Event{Kind: KindDetail, Log: ProfileLog, Timestamp: 1, Sequence: 1, Detail: &Detail{}}, true},
+		{"profile in detaillog", Event{Kind: KindProfile, Log: DetailLog, Timestamp: 1, Sequence: 1, Profile: &Profile{}}, true},
 		{"like in postlog", Event{Kind: KindLike, Log: PostLog, Timestamp: 1, Sequence: 1, Like: &Like{TargetID: EventID{1}}}, false},
 		{"like in profilelog", Event{Kind: KindLike, Log: ProfileLog, Timestamp: 1, Sequence: 1, Like: &Like{TargetID: EventID{1}}}, true},
 		{"delete in postlog", Event{Kind: KindDelete, Log: PostLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, false},
 		{"delete in profilelog", Event{Kind: KindDelete, Log: ProfileLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, false},
+		{"delete in detaillog", Event{Kind: KindDelete, Log: DetailLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

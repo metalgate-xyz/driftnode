@@ -5,6 +5,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"driftnode/internal/core"
 )
 
 func TestSendRequestWhoami(t *testing.T) {
@@ -50,6 +52,69 @@ func TestSendRequestZens(t *testing.T) {
 	}
 	if len(zens) != 2 {
 		t.Fatalf("want 2 zens, got %d", len(zens))
+	}
+}
+
+func TestSendRequestVerifyZens(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	d.Start(sock)
+	defer d.Stop()
+
+	// Add a zen and bind its token to a known identity via the routing table.
+	peerKP, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	peerID := peerKP.Identity()
+	d.AddZen("p1", "native", "connected")
+	if err := s.PutRouting(peerID, "p1"); err != nil {
+		t.Fatalf("PutRouting: %v", err)
+	}
+
+	// Before verify, the zen is not marked verified.
+	resp, err := SendRequest(sock, "zens", nil)
+	if err != nil {
+		t.Fatalf("zens: %v", err)
+	}
+	zens, ok := resp.Result.([]any)
+	if !ok || len(zens) != 1 {
+		t.Fatalf("want 1 zen, got %v", resp.Result)
+	}
+	if pm, _ := zens[0].(map[string]any); pm["verified"] == true {
+		t.Fatal("zen should not be verified before verify RPC")
+	}
+
+	// Verify the peer identity out-of-band.
+	if _, err := SendRequest(sock, "verify", map[string]any{"identity": string(peerID)}); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+
+	// After verify, the zen is marked verified.
+	resp, err = SendRequest(sock, "zens", nil)
+	if err != nil {
+		t.Fatalf("zens after verify: %v", err)
+	}
+	zens, _ = resp.Result.([]any)
+	pm, ok := zens[0].(map[string]any)
+	if !ok {
+		t.Fatalf("zen is not a map: %T", zens[0])
+	}
+	if pm["verified"] != true {
+		t.Fatalf("zen should be verified after verify RPC, got %v", pm["verified"])
+	}
+
+	// Unverify clears the flag.
+	if _, err := SendRequest(sock, "unverify", map[string]any{"identity": string(peerID)}); err != nil {
+		t.Fatalf("unverify: %v", err)
+	}
+	resp, _ = SendRequest(sock, "zens", nil)
+	zens, _ = resp.Result.([]any)
+	pm, _ = zens[0].(map[string]any)
+	if pm["verified"] == true {
+		t.Fatal("zen should not be verified after unverify")
 	}
 }
 
@@ -281,4 +346,47 @@ func TestIdleLockReapsKey(t *testing.T) {
 	if statusUnlocked(t, sock) {
 		t.Fatal("key should be reaped after idle-lock expiry")
 	}
+}
+
+func TestProfileDetailRPC(t *testing.T) {
+	s := newTestStore(t)
+	kp := initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+
+	if _, err := SendRequest(sock, "profile", map[string]any{"name": "alice"}); err != nil {
+		t.Fatalf("profile RPC: %v", err)
+	}
+	if _, err := SendRequest(sock, "detail", map[string]any{"bio": "wanderer", "location": "Wonderland"}); err != nil {
+		t.Fatalf("detail RPC: %v", err)
+	}
+
+	// Verify the events landed in the own logs.
+	profEvents, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("read profile log: %v", err)
+	}
+	if len(profEvents) != 1 || profEvents[0].Event.Profile == nil || profEvents[0].Event.Profile.DisplayName != "alice" {
+		t.Fatalf("profile event mismatch: %+v", profEvents)
+	}
+	detEvents, err := s.OwnEvents(core.DetailLog)
+	if err != nil {
+		t.Fatalf("read detail log: %v", err)
+	}
+	if len(detEvents) != 1 || detEvents[0].Event.Detail == nil {
+		t.Fatalf("detail event missing: %+v", detEvents)
+	}
+	det := detEvents[0].Event.Detail
+	if det.Bio != "wanderer" || det.Location != "Wonderland" {
+		t.Fatalf("detail fields mismatch: %+v", det)
+	}
+	_ = kp
 }

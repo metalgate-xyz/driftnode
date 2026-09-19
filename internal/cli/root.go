@@ -78,6 +78,8 @@ func Root() *cobra.Command {
 		feedCmd(),
 		followCmd(),
 		unfollowCmd(),
+		profileCmd(),
+		detailCmd(),
 		keyCmd(),
 		backupCmd(),
 		daemonCmd(),
@@ -130,17 +132,17 @@ func initCmd() *cobra.Command {
 func whoamiCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "whoami",
-		Short: "Print the identity's public key and fingerprint",
+		Short: "Print the identity's public key and current profile and detail",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// When the daemon is running, ask it for the full view; it
+			// holds the store lock and the same projection.
 			sock, err := daemonSocketPath()
 			if err == nil {
 				if resp, err := daemon.SendRequest(sock, "whoami", nil); err == nil {
 					if m, ok := resp.Result.(map[string]any); ok {
-						if id, ok := m["identity"].(string); ok {
-							cmd.Println(id)
-							return nil
-						}
+						printWhoami(cmd, m)
+						return nil
 					}
 				}
 			}
@@ -156,12 +158,61 @@ func whoamiCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no identity found; run 'driftnode init' first")
 			}
-			cmd.Println(id)
+			out := map[string]any{"identity": id.String()}
+			profEvents, _ := s.OwnEvents(core.ProfileLog)
+			if prof := core.NewLog(profEvents).Profile(); prof != nil {
+				if prof.DisplayName != "" {
+					out["display_name"] = prof.DisplayName
+				}
+				if prof.AvatarHash != nil && !prof.AvatarHash.IsZero() {
+					out["has_avatar"] = true
+				}
+			}
+			detEvents, _ := s.OwnEvents(core.DetailLog)
+			if det := core.NewLog(detEvents).Detail(); det != nil {
+				if det.Bio != "" {
+					out["bio"] = det.Bio
+				}
+				if det.FirstName != "" {
+					out["first_name"] = det.FirstName
+				}
+				if det.LastName != "" {
+					out["last_name"] = det.LastName
+				}
+				if det.Location != "" {
+					out["location"] = det.Location
+				}
+			}
+			printWhoami(cmd, out)
 			return nil
 		},
 	}
 	addDBFlag(c)
 	return c
+}
+
+// printWhoami renders the whoami map: identity, then profile fields, then
+// detail fields if set. Fields that are absent are omitted.
+func printWhoami(cmd *cobra.Command, m map[string]any) {
+	cmd.Println(m["identity"])
+	if name, ok := m["display_name"].(string); ok && name != "" {
+		cmd.Printf("zen name: %s\n", name)
+	}
+	if hasAvatar, _ := m["has_avatar"].(bool); hasAvatar {
+		cmd.Println("avatar: (present)")
+	}
+	if bio, ok := m["bio"].(string); ok && bio != "" {
+		cmd.Printf("bio: %s\n", bio)
+	}
+	if fn, ok := m["first_name"].(string); ok && fn != "" {
+		cmd.Printf("first name: %s\n", fn)
+	}
+	if ln, ok := m["last_name"].(string); ok && ln != "" {
+		cmd.Printf("last name: %s\n", ln)
+	}
+	if loc, ok := m["location"].(string); ok && loc != "" {
+		cmd.Printf("location: %s\n", loc)
+	}
 }
 
 func postCmd() *cobra.Command {
@@ -265,16 +316,19 @@ func feedCmd() *cobra.Command {
 			}
 			for _, p := range posts {
 				ts := core.FormatTime(p.Event.Timestamp)
-				author := p.Author.String()
-				short := author
-				if len(short) > 16 {
-					short = short[:16]
+				name, _ := s.DisplayName(p.Author)
+				author := name
+				if author == "" {
+					author = p.Author.String()
+					if len(author) > 16 {
+						author = author[:16]
+					}
 				}
 				text := p.Event.Post.Text
 				if p.Event.Reply != nil {
 					text = "(reply) " + text
 				}
-				cmd.Printf("%s  %s> %s\n", ts, short, text)
+				cmd.Printf("%s  %s> %s\n", ts, author, text)
 			}
 			return nil
 		},
@@ -296,13 +350,15 @@ func printFeedFromRPC(cmd *cobra.Command, resp *daemon.Response) error {
 			continue
 		}
 		ts := int64(m["timestamp"].(float64))
-		author := m["author"].(string)
-		short := author
-		if len(short) > 16 {
-			short = short[:16]
+		author, _ := m["name"].(string)
+		if author == "" {
+			author = m["author"].(string)
+			if len(author) > 16 {
+				author = author[:16]
+			}
 		}
 		text := m["text"].(string)
-		cmd.Printf("%s  %s> %s\n", core.FormatTime(ts), short, text)
+		cmd.Printf("%s  %s> %s\n", core.FormatTime(ts), author, text)
 	}
 	return nil
 }
@@ -907,7 +963,7 @@ func zensCmd() *cobra.Command {
 		Short: "Show your network: connected zens and your address token",
 	}
 	addDBFlagPersistent(c)
-	c.AddCommand(zensListCmd(), zensTokenCmd())
+	c.AddCommand(zensListCmd(), zensTokenCmd(), zensVerifyCmd(), zensUnverifyCmd())
 	return c
 }
 
@@ -964,8 +1020,75 @@ func zensListCmd() *cobra.Command {
 				if !ok {
 					continue
 				}
-				cmd.Printf("%s %s (%s)\n", pm["status"], pm["id"], pm["kind"])
+				mark := " "
+				if v, _ := pm["verified"].(bool); v {
+					mark = "✓"
+				}
+				cmd.Printf("%s %s %s (%s)\n", mark, pm["status"], pm["id"], pm["kind"])
 			}
+			return nil
+		},
+	}
+}
+
+func zensVerifyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "verify <identity>",
+		Short: "Mark an identity as confirmed out-of-band (e.g. compared via Signal)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := core.ParseIdentity(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid identity: %w", err)
+			}
+			sock, err := daemonSocketPath()
+			if err == nil {
+				if _, err := daemon.SendRequest(sock, "verify", map[string]any{"identity": string(id)}); err == nil {
+					cmd.Printf("verified %s\n", id)
+					return nil
+				}
+			}
+			// Offline: write directly to the store.
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if err := s.VerifyIdentity(id); err != nil {
+				return err
+			}
+			cmd.Printf("verified %s\n", id)
+			return nil
+		},
+	}
+}
+
+func zensUnverifyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unverify <identity>",
+		Short: "Remove an out-of-band confirmation from an identity",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := core.ParseIdentity(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid identity: %w", err)
+			}
+			sock, err := daemonSocketPath()
+			if err == nil {
+				if _, err := daemon.SendRequest(sock, "unverify", map[string]any{"identity": string(id)}); err == nil {
+					cmd.Printf("unverified %s\n", id)
+					return nil
+				}
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if err := s.UnverifyIdentity(id); err != nil {
+				return err
+			}
+			cmd.Printf("unverified %s\n", id)
 			return nil
 		},
 	}
@@ -1172,6 +1295,168 @@ func relayDisableCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// --- profile and detail commands ---
+
+func profileCmd() *cobra.Command {
+	var passphrase string
+	var name string
+	c := &cobra.Command{
+		Use:   "profile",
+		Short: "Set the public profile (zen name) shown in the crawl cache",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if name == "" {
+				return fmt.Errorf("--name is required")
+			}
+			sock, err := daemonSocketPath()
+			if err == nil {
+				params := map[string]any{"name": name}
+				if passphrase != "" {
+					params["passphrase"] = passphrase
+				}
+				resp, err := daemon.SendRequest(sock, "profile", params)
+				if err == nil {
+					if m, ok := resp.Result.(map[string]any); ok {
+						if id, ok := m["event_id"].(string); ok {
+							cmd.Println(id)
+							return nil
+						}
+					}
+					return fmt.Errorf("unexpected profile response: %v", resp.Result)
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required when the daemon is not running")
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			kp, err := loadKey(s, passphrase)
+			if err != nil {
+				return err
+			}
+			seq, err := s.OwnEventCount(core.ProfileLog)
+			if err != nil {
+				return fmt.Errorf("get sequence: %w", err)
+			}
+			se, err := kp.Sign(core.Event{
+				Kind:      core.KindProfile,
+				Log:       core.ProfileLog,
+				Timestamp: core.Now64(),
+				Sequence:  seq + 1,
+				Profile:   &core.Profile{DisplayName: name},
+			})
+			if err != nil {
+				return fmt.Errorf("sign: %w", err)
+			}
+			if err := s.AppendOwnEvent(core.ProfileLog, se); err != nil {
+				return fmt.Errorf("append: %w", err)
+			}
+			id, _ := se.ID()
+			cmd.Println(id)
+			return nil
+		},
+	}
+	addDBFlag(c)
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
+	c.Flags().StringVar(&name, "name", "", "zen name (public, crawled)")
+	return c
+}
+
+func detailCmd() *cobra.Command {
+	var passphrase string
+	var bio string
+	var firstName string
+	var lastName string
+	var location string
+	c := &cobra.Command{
+		Use:   "detail",
+		Short: "Set personal metadata (bio, first/last name, location) shown only on direct request",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if bio == "" && firstName == "" && lastName == "" && location == "" {
+				return fmt.Errorf("provide at least one of --bio, --first-name, --last-name, --location")
+			}
+			sock, err := daemonSocketPath()
+			if err == nil {
+				params := map[string]any{}
+				if bio != "" {
+					params["bio"] = bio
+				}
+				if firstName != "" {
+					params["first_name"] = firstName
+				}
+				if lastName != "" {
+					params["last_name"] = lastName
+				}
+				if location != "" {
+					params["location"] = location
+				}
+				if passphrase != "" {
+					params["passphrase"] = passphrase
+				}
+				resp, err := daemon.SendRequest(sock, "detail", params)
+				if err == nil {
+					if m, ok := resp.Result.(map[string]any); ok {
+						if id, ok := m["event_id"].(string); ok {
+							cmd.Println(id)
+							return nil
+						}
+					}
+					return fmt.Errorf("unexpected detail response: %v", resp.Result)
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required when the daemon is not running")
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			kp, err := loadKey(s, passphrase)
+			if err != nil {
+				return err
+			}
+			seq, err := s.OwnEventCount(core.DetailLog)
+			if err != nil {
+				return fmt.Errorf("get sequence: %w", err)
+			}
+			se, err := kp.Sign(core.Event{
+				Kind:      core.KindDetail,
+				Log:       core.DetailLog,
+				Timestamp: core.Now64(),
+				Sequence:  seq + 1,
+				Detail:    &core.Detail{Bio: bio, FirstName: firstName, LastName: lastName, Location: location},
+			})
+			if err != nil {
+				return fmt.Errorf("sign: %w", err)
+			}
+			if err := s.AppendOwnEvent(core.DetailLog, se); err != nil {
+				return fmt.Errorf("append: %w", err)
+			}
+			id, _ := se.ID()
+			cmd.Println(id)
+			return nil
+		},
+	}
+	addDBFlag(c)
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
+	c.Flags().StringVar(&bio, "bio", "", "bio (shown only on direct request)")
+	c.Flags().StringVar(&firstName, "first-name", "", "first name (shown only on direct request)")
+	c.Flags().StringVar(&lastName, "last-name", "", "last name (shown only on direct request)")
+	c.Flags().StringVar(&location, "location", "", "location (shown only on direct request)")
+	return c
 }
 
 // resolvePubkey accepts either a full driftnode:<pubkey> identity string or a

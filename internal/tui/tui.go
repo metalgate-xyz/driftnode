@@ -52,15 +52,19 @@ type model struct {
 }
 
 type feedItem struct {
+	name   string
 	author string
 	text   string
 	age    string
 }
 
 type zenInfo struct {
-	id     string
-	kind   string
-	status string
+	name     string
+	identity string
+	id       string
+	kind     string
+	status   string
+	verified bool
 }
 
 type statusInfo struct {
@@ -129,8 +133,14 @@ func parseFeed(resp *daemon.Response) ([]feedItem, error) {
 			continue
 		}
 		ts, _ := m["timestamp"].(float64)
+		name, _ := m["name"].(string)
+		author := name
+		if author == "" {
+			author = shortID(fmt.Sprintf("%v", m["author"]))
+		}
 		out = append(out, feedItem{
-			author: shortID(fmt.Sprintf("%v", m["author"])),
+			name:   name,
+			author: author,
 			text:   fmt.Sprintf("%v", m["text"]),
 			age:    ageOf(int64(ts)),
 		})
@@ -149,16 +159,28 @@ func parseZens(resp *daemon.Response) ([]zenInfo, error) {
 		if !ok {
 			continue
 		}
+		name, _ := pm["name"].(string)
+		identity, _ := pm["identity"].(string)
+		display := name
+		if display == "" && identity != "" {
+			display = shortID(identity)
+		}
+		if display == "" {
+			display = shortID(fmt.Sprintf("%v", pm["id"]))
+		}
 		out = append(out, zenInfo{
-			id:     shortID(fmt.Sprintf("%v", pm["id"])),
-			kind:   fmt.Sprintf("%v", pm["kind"]),
-			status: fmt.Sprintf("%v", pm["status"]),
+			name:     display,
+			identity: identity,
+			id:       fmt.Sprintf("%v", pm["id"]),
+			kind:     fmt.Sprintf("%v", pm["kind"]),
+			status:   fmt.Sprintf("%v", pm["status"]),
+			verified: pm["verified"] == true,
 		})
 	}
 	// The daemon builds the zen list from a map, so its order is
 	// non-deterministic across refreshes. Sort to keep the pane stable.
 	slices.SortFunc(out, func(a, b zenInfo) int {
-		return strings.Compare(a.id, b.id)
+		return strings.Compare(a.name, b.name)
 	})
 	return out, nil
 }
@@ -537,7 +559,7 @@ func renderZens(m model, s styles, w, maxH int) string {
 	if len(m.zens) == 0 {
 		lines = []string{s.dim.Render("(no zens)")}
 	}
-	// Content width for the id field: panel width minus borders, padding,
+	// Content width for the name field: panel width minus borders, padding,
 	// the status column, the kind column, and the two separating spaces.
 	const statusCol = 11
 	contentW := w - 2 - 2
@@ -547,14 +569,18 @@ func renderZens(m model, s styles, w, maxH int) string {
 			stStyle = s.dim
 		}
 		kindW := len(p.kind)
-		idW := contentW - statusCol - kindW - 2
-		if idW < 8 {
-			idW = 8
+		nameW := contentW - statusCol - kindW - 2
+		if nameW < 8 {
+			nameW = 8
 		}
 		st := stStyle.Render(padRight(p.status, statusCol))
 		kind := s.dim.Render(p.kind)
-		id := s.accent.Render(truncate(p.id, idW))
-		lines = append(lines, fmt.Sprintf("%s %s %s", st, kind, id))
+		name := s.accent.Render(truncate(p.name, nameW))
+		mark := ""
+		if p.verified {
+			mark = s.good.Render("✓ ") + " "
+		}
+		lines = append(lines, fmt.Sprintf("%s %s %s%s", st, kind, mark, name))
 	}
 	body := strings.Join(lines, "\n")
 	return s.panel.Width(w).MaxHeight(maxH).Render(head + "\n" + body)

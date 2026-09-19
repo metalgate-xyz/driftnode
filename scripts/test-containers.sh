@@ -144,6 +144,21 @@ contains "$DAVE_FEED" "hello from us" && ok "P1.2 dave sees seed-us post (bootst
 EVE_FEED=$(dn eve feed)
 contains "$EVE_FEED" "hello from eu" && ok "P1.3 eve sees seed-eu post (bootstrap auto-dial)" || bad "P1.3 eve sees seed-eu" "$EVE_FEED"
 
+printf "\n===== Phase 1.5: Out-of-band identity verification =====\n"
+# Each node confirms every other node's identity (§7): the operator is
+# assumed to have compared the full driftnode:<pubkey> strings out of band
+# (here, all nodes are in the same trust domain, so all are verified).
+NODES_V=(seed-eu seed-us carol dave eve)
+IDS_V=("$SEED_EU_ID" "$SEED_US_ID" "$CAROL_ID" "$DAVE_ID" "$EVE_ID")
+for i in "${!NODES_V[@]}"; do
+  for j in "${!IDS_V[@]}"; do
+    [[ "$i" -eq "$j" ]] && continue
+    dnq "${NODES_V[i]}" zens verify "${IDS_V[j]}" \
+      && ok "${NODES_V[i]} verifies ${NODES_V[j]}" \
+      || bad "${NODES_V[i]} verifies ${NODES_V[j]}" "failed"
+  done
+done
+
 printf "\n===== Phase 2: Cross-seed discovery (zen exchange + crawl) =====\n"
 # Carol bootstrapped only seed-eu. She discovers seed-us through zen exchange
 # (seed-eu relays seed-us's token during sync) and the crawler (walks seed-eu's

@@ -157,6 +157,9 @@ SEED_US_ID=$(dn seed-us init -p seedpass)
 [[ "$SEED_US_ID" == driftnode:* ]] || fatal "seed-us init failed: $SEED_US_ID"
 ok "seeds initialized"
 
+dnq seed-eu profile -p seedpass --name "Seed EU" && ok "seed-eu profile set" || warn "seed-eu profile" "failed"
+dnq seed-us profile -p seedpass --name "Seed US" && ok "seed-us profile set" || warn "seed-us profile" "failed"
+
 dnq seed-eu follow -p seedpass "$SEED_US_ID" && ok "seed-eu follows seed-us" || warn "seed-eu follow" "failed"
 dnq seed-us follow -p seedpass "$SEED_EU_ID" && ok "seed-us follows seed-eu" || warn "seed-us follow" "failed"
 
@@ -262,6 +265,10 @@ EVE_ID=$(dn eve init -p evepass)
 [[ "$EVE_ID" == driftnode:* ]] || fatal "eve init: $EVE_ID"
 ok "fresh nodes initialized"
 
+dnq carol profile -p carolpass --name "Carol" && ok "carol profile set" || warn "carol profile" "failed"
+dnq dave profile -p davepass --name "Dave" && ok "dave profile set" || warn "dave profile" "failed"
+dnq eve profile -p evepass --name "Eve" && ok "eve profile set" || warn "eve profile" "failed"
+
 # Copy the verify key file into each fresh node so the daemon can read it
 # via --bootstrap-key (which reads the base64 public key from a file).
 for c in carol dave eve; do
@@ -289,6 +296,21 @@ verify_boot() {
 verify_boot carol "hello from eu"
 verify_boot dave "hello from us"
 verify_boot eve "hello from eu"
+
+printf "\n===== Out-of-band identity verification =====\n"
+# Each node confirms every other node's identity (§7): the operator is
+# assumed to have compared the full driftnode:<pubkey> strings out of band
+# (here, all nodes are in the same trust domain, so all are verified).
+NODES_V=(seed-eu seed-us carol dave eve)
+IDS_V=("$SEED_EU_ID" "$SEED_US_ID" "$CAROL_ID" "$DAVE_ID" "$EVE_ID")
+for i in "${!NODES_V[@]}"; do
+  for j in "${!IDS_V[@]}"; do
+    [[ "$i" -eq "$j" ]] && continue
+    dnq "${NODES_V[i]}" zens verify "${IDS_V[j]}" \
+      && ok "${NODES_V[i]} verifies ${NODES_V[j]}" \
+      || warn "${NODES_V[i]} verifies ${NODES_V[j]}" "failed"
+  done
+done
 
 printf "\n===== Cross-seed discovery =====\n"
 # Discovery via zen exchange + crawl reveals the cross-seed identity and

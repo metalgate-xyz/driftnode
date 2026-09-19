@@ -244,23 +244,25 @@ Each identity maintains two independent event logs, so that discovering someone 
 
 | Log | Contents | Synced by |
 |---|---|---|
-| **Profile log** | `Profile` (display name, bio, avatar hash — last-write-wins by timestamp), `Follow`/`Unfollow` events — small, low-churn | Anyone; this is what the built-in crawler (§9.3) fetches |
+| **Profile log** | `Profile` (zen name, avatar hash — last-write-wins by timestamp), `Follow`/`Unfollow` events — small, low-churn | Anyone; this is what the built-in crawler (§9.3) fetches and caches durably |
+| **Detail log** | `Detail` (bio, first name, last name, location — last-write-wins by timestamp) | Anyone who asks, but **never crawled and never cached durably**: a peer fetches it on demand to display someone's full profile and discards the events afterwards. The owner's own Detail log is backup-critical like the other own logs. |
 | **PostLog** | `Post`, `Reply`, `Like`, `Delete` events — the content stream, potentially large and long-lived | Only zens who follow this identity (§9.1) |
 
-Because each log is just a named, independently-requestable stream of signed events, a zen can ask for "give me `driftnode:<pubkey>`'s Profile log" without ever touching their PostLog. This is what makes the crawler's low cost an architectural property rather than a policy: a crawl of thousands of accounts never requests, and therefore never receives, anyone's post history.
+Because each log is just a named, independently-requestable stream of signed events, a zen can ask for "give me `driftnode:<pubkey>`'s Profile log" without ever touching their PostLog or Detail log. This is what makes the crawler's low cost an architectural property rather than a policy: a crawl of thousands of accounts never requests, and therefore never receives, anyone's post history or personal details.
 
-**Current state is a deterministic projection over the log**, computed independently by every zen from whatever subset of events it has: the current profile is the latest `Profile` event by timestamp; the current follow set is the result of replaying `Follow`/`Unfollow` events in order; the current post list is every non-tombstoned `Post`/`Reply` event. Because projection is a pure function of the event set, two zens with different partial views only ever differ in *completeness*, never in *disagreement* about what a given event means.
+**Current state is a deterministic projection over the log**, computed independently by every zen from whatever subset of events it has: the current profile is the latest `Profile` event by timestamp; the current details are the latest `Detail` event by timestamp; the current follow set is the result of replaying `Follow`/`Unfollow` events in order; the current post list is every non-tombstoned `Post`/`Reply` event. Because projection is a pure function of the event set, two zens with different partial views only ever differ in *completeness*, never in *disagreement* about what a given event means.
 
 ### 7.2 Event Types & Post Addressing
 
 | Event | Lives in | Fields (indicative) |
 |---|---|---|
-| `Profile` (upsert) | Profile log | `display_name`, `bio`, `avatar_hash`, `timestamp` |
+| `Profile` (upsert) | Profile log | `display_name`, `avatar_hash`, `timestamp` |
+| `Detail` (upsert) | Detail log | `bio`, `first_name`, `last_name`, `location`, `timestamp` |
 | `Follow` / `Unfollow` | Profile log | `target_pubkey`, `timestamp` |
 | `Post` | PostLog | `text`, `media_hashes[]`, `timestamp` |
 | `Reply` | PostLog | same as `Post`, plus `parent_id` |
 | `Like` | PostLog of the **liker**, not the target | `target_id` |
-| `Delete` | Either log | `target_id` (tombstone) |
+| `Delete` | Any log | `target_id` (tombstone) |
 
 **Every event has a canonical serialized form** — a fixed field order, deterministic CBOR encoding — produced by the shared `fxamacker/cbor`-based encoding code in the core module (§3). Because both targets run this same code, there is no cross-implementation encoding drift to guard against; the canonical form is simply whatever the shared function produces. It is still worth a short written spec plus test vectors as living documentation and a regression guard, but not as a mechanism to keep two implementations in agreement.
 
@@ -282,6 +284,7 @@ Given the ~512MB RAM / cheap-VPS target (§5), storage growth is bounded explici
 |---|---|
 | PostLogs of followed accounts | Retained fully by default. Optional `postlog_retention_days` config caps local history for operators who want it — pruned locally only, never removed network-wide, since zens who still hold it can still serve it |
 | Profile logs from crawling (not followed) | Bounded LRU cache, capped by `crawl_cache_max_entries`, evicted oldest-touched-first |
+| Detail logs of others | Never stored durably. Fetched on demand for display and discarded immediately, so a seed following thousands of zens never accumulates their personal details on disk. |
 | Media blobs | Reference-counted against retained PostLogs; garbage-collected once unreferenced; hard cap `media_cache_max_bytes` as a backstop |
 | DHT routing table | Bounded by `go-libp2p`'s `kad-dht`'s own k-bucket limits; no additional policy needed |
 
@@ -301,9 +304,9 @@ These are `driftnode config` knobs (§12.2) rather than architectural exceptions
 
 ## 8. Local Storage & Backup
 
-- **Live storage:** an identity's Profile log, its own PostLog, and the media cache live in IndexedDB (browser, via the self-owned wrapper, §4) or `bbolt` (native, `driftnode`), persisting across restarts with no configuration. Followed accounts' synced PostLogs and any crawled Profile logs are re-fetchable cache, not backup-critical, and are excluded from the export below to keep it small. Both storage backends serialize events using the same shared canonical-encoding code (§7.2), so a backup produced on one platform is trivially readable by the other.
-- **Export:** serializes the account-critical state — the keypair (encrypted with the user's passphrase), the user's own Profile log, their own PostLog, and their local petname map (§9.4) — into a single CBOR file. In the browser this triggers a native download via the `Blob`/anchor-download APIs (`syscall/js`); on native, `driftnode backup export` writes it directly. Only the keypair is encrypted; the logs are already public, signed content, so re-encrypting them adds no protection while making the file harder to inspect for debugging.
-- **Import:** reads the CBOR file, decrypts the keypair with the user's passphrase, and merges both logs into local storage as a set union of signed events (§7). Because events are immutable and individually verifiable, importing an older backup and continuing to sync with zens holding newer state merges cleanly rather than overwriting or conflicting.
+- **Live storage:** an identity's Profile log, Detail log, own PostLog, and the media cache live in IndexedDB (browser, via the self-owned wrapper, §4) or `bbolt` (native, `driftnode`), persisting across restarts with no configuration. Followed accounts' synced PostLogs and any crawled Profile logs are re-fetchable cache, not backup-critical, and are excluded from the export below to keep it small. Others' Detail logs are never stored at all (§7.4). Both storage backends serialize events using the same shared canonical-encoding code (§7.2), so a backup produced on one platform is trivially readable by the other.
+- **Export:** serializes the account-critical state — the keypair (encrypted with the user's passphrase), the user's own Profile log, Detail log, own PostLog, and their local petname map (§9.4) — into a single CBOR file. In the browser this triggers a native download via the `Blob`/anchor-download APIs (`syscall/js`); on native, `driftnode backup export` writes it directly. Only the keypair is encrypted; the logs are already public, signed content, so re-encrypting them adds no protection while making the file harder to inspect for debugging.
+- **Import:** reads the CBOR file, decrypts the keypair with the user's passphrase, and merges all logs into local storage as a set union of signed events (§7). Because events are immutable and individually verifiable, importing an older backup and continuing to sync with zens holding newer state merges cleanly rather than overwriting or conflicting.
 - **This backup file is the account.** There is no password reset and no account recovery outside it — the same tradeoff as any self-sovereign identity system (SSH keys, cryptocurrency wallets). The UI states this loudly and repeatedly, not just once during onboarding.
 
 ---
@@ -395,11 +398,13 @@ driftnode tui                 # bubbletea client → same control socket, live u
 | Command | Purpose |
 |---|---|
 | `driftnode init` | Generate an Ed25519 keypair, passphrase-encrypt it at rest, create the local `bbolt` store |
-| `driftnode whoami` | Print the identity's public key and fingerprint |
+| `driftnode whoami` | Print the identity and its current profile and detail |
 | `driftnode daemon [--foreground]` | Start the long-running daemon and control socket (default detached; `--foreground` for field testing with logs on stdout) |
 | `driftnode post "<text>" [--media <path>]` | Append a signed `Post` event to the local PostLog |
 | `driftnode feed [--limit N] [--follow-only]` | Print the merged timeline from local state, no network call |
 | `driftnode follow <pubkey>` / `unfollow <pubkey>` | Add or remove a follow edge, a signed Profile-log event |
+| `driftnode profile --name <zen-name>` | Set the public profile (zen name) shown in the crawl cache (§7.1) |
+| `driftnode detail [--bio <text>] [--first-name <name>] [--last-name <name>] [--location <place>]` | Set personal metadata (Detail log, fetched on demand and not cached durably by peers, §7.1) |
 | `driftnode zens list` | Show currently connected zens, their kind (native/relay/browser), and latency |
 | `driftnode follow <token-or-pubkey>` | Follow an identity: dial and follow if given a token, or follow by pubkey offline |
 | `driftnode relay status` | Show the reachability check result and whether the relay role is enabled (§5.1, §5.2) |
