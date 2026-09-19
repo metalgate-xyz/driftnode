@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
 	"strings"
@@ -20,6 +21,7 @@ type feedPost struct {
 	name   string
 	text   string
 	age    string
+	ts     int64
 }
 
 // zen is a discovered/connected zen from the daemon.
@@ -121,8 +123,11 @@ func parseFeed(r *daemon.Response) ([]feedPost, error) {
 			author: fmt.Sprintf("%v", m["author"]),
 			text:   fmt.Sprintf("%v", m["text"]),
 			age:    ageOf(int64(ts)),
+			ts:     int64(ts),
 		})
 	}
+	// Newest posts first.
+	slices.SortFunc(out, func(a, b feedPost) int { return cmp.Compare(b.ts, a.ts) })
 	return out, nil
 }
 
@@ -179,6 +184,8 @@ func parseIdentities(r *daemon.Response, key string) ([]identityEntry, error) {
 		}
 		out = append(out, identityEntry{identity: id, name: name})
 	}
+	// Sort by display name so the list is stable and scannable.
+	slices.SortFunc(out, func(a, b identityEntry) int { return strings.Compare(a.name, b.name) })
 	return out, nil
 }
 

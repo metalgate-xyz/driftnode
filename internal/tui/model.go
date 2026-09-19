@@ -131,10 +131,11 @@ func (m *model) applyRefresh(msg refreshMsg) {
 // refreshPanels re-applies sizes after content changes so the viewport and
 // lists keep their geometry.
 func (m model) refreshPanels() tea.Cmd {
-	m.feed.resize(panelWidth(m.width), panelHeight(m.height))
-	m.zens.SetSize(panelWidth(m.width), panelHeight(m.height))
-	m.follows.SetSize(panelWidth(m.width), panelHeight(m.height))
-	m.followers.SetSize(panelWidth(m.width), panelHeight(m.height))
+	w, h := panelContentWidth(panelWidth(m.width)), panelContentHeight(panelHeight(m.height))
+	m.feed.resize(w, h)
+	m.zens.SetSize(w, h)
+	m.follows.SetSize(w, h)
+	m.followers.SetSize(w, h)
 	return nil
 }
 
@@ -143,7 +144,7 @@ func (m *model) layout() {
 	if m.width == 0 || m.height == 0 {
 		return
 	}
-	w, h := panelWidth(m.width), panelHeight(m.height)
+	w, h := panelContentWidth(panelWidth(m.width)), panelContentHeight(panelHeight(m.height))
 	if m.feed.vp.Width() == 0 {
 		m.feed = newFeedPanel(w, h)
 	} else {
@@ -181,7 +182,7 @@ func (m model) routeMouse(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 }
 
 // panelWidth and panelHeight reserve rows for the title, tab bar, compose
-// line, and status line.
+// line, and status line, returning the outer size allotted to the panel.
 func panelWidth(w int) int { return w }
 
 func panelHeight(h int) int {
@@ -191,4 +192,16 @@ func panelHeight(h int) int {
 		body = 4
 	}
 	return body
+}
+
+// panelContentWidth and panelContentHeight subtract the panel's border and
+// padding so the viewport/lists render at the inner box size. Without this
+// the inner content is wider/taller than the panel frame and wraps, pushing
+// the compose line and status bar off-screen.
+func panelContentWidth(w int) int {
+	return w - theme.panel.GetHorizontalFrameSize()
+}
+
+func panelContentHeight(h int) int {
+	return h - theme.panel.GetVerticalFrameSize()
 }
