@@ -328,37 +328,32 @@ done
 printf "\n===== Cross-seed discovery =====\n"
 # Discovery via zen exchange + crawl reveals the cross-seed identity and
 # token, but does not dial. Follow the discovered seed to enter it into the
-# follow graph, then sync to pull its posts.
-dnq carol sync --now
-dnq dave sync --now
+# follow graph; the follow auto-triggers a sync that resolves the pending
+# follow through a known token and pulls its posts.
+dnq carol sync
+dnq dave sync
 sleep 10
 dnq carol follow "$SEED_US_ID"
 dnq dave follow "$SEED_EU_ID"
-dnq carol sync --now
-dnq dave sync --now
 sleep 10
 
 printf "\n===== Building social graph =====\n"
 dnq dave follow "$CAROL_ID"
 dnq carol post "carol's first post"
-dnq dave sync --now
+dnq dave sync
 sleep 5
 
 dnq carol follow "$DAVE_ID"
 dnq dave post "dave posts here"
-dnq carol sync --now
 sleep 5
 
 dnq eve post "eve checking in"
 dnq eve follow "$CAROL_ID"
-dnq eve sync --now
 sleep 5
 dnq carol follow "$EVE_ID"
-dnq carol sync --now
 sleep 5
 
 dnq carol post "carol late post"
-dnq dave sync --now
 sleep 5
 ok "social graph established"
 

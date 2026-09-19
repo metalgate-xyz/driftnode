@@ -391,7 +391,7 @@ driftnode tui                 # bubbletea client → same control socket, live u
 ```
 
 - **Control socket:** a Unix domain socket (named pipe on Windows) at `$XDG_RUNTIME_DIR/driftnode/control.sock`, carrying a JSON-lines protocol distinct from the CBOR wire format used peer-to-peer. Local-machine only, never exposed to the network.
-- **Offline fallback:** commands that don't require live network state (`post`, `whoami`, `key export`, reading a cached `feed`) operate directly on the local `bbolt` store if no daemon is running, queuing anything that needs to propagate for the next sync. Commands that inherently need the network (`zens`, `sync --now`, `bootstrap fetch`) require the daemon and say so clearly if it isn't running.
+- **Offline fallback:** commands that don't require live network state (`post`, `whoami`, `key export`, reading a cached `feed`) operate directly on the local `bbolt` store if no daemon is running, queuing anything that needs to propagate for the next sync. Commands that inherently need the network (`zens`, `sync`, `bootstrap fetch`) require the daemon and say so clearly if it isn't running.
 
 ### 12.2 CLI Command Spec
 
@@ -409,7 +409,7 @@ driftnode tui                 # bubbletea client → same control socket, live u
 | `driftnode follow <token-or-pubkey>` | Follow an identity: dial and follow if given a token, or follow by pubkey offline |
 | `driftnode relay status` | Show the reachability check result and whether the relay role is enabled (§5.1, §5.2) |
 | `driftnode relay enable` / `relay disable` | Explicitly opt in or out of advertising this node as a relay/bootstrap candidate |
-| `driftnode sync [--now]` | Trigger an immediate sync round instead of waiting for the daemon's interval |
+| `driftnode sync` | Trigger an immediate sync round instead of waiting for the daemon's interval |
 | `driftnode bootstrap fetch [--url <mirror>]` | Fetch and verify `bootstrap.yaml`, merging it into the known-zens cache |
 | `driftnode bootstrap verify <file>` | Verify a local copy's signature without applying it |
 | `driftnode backup export <path>` | Write the single-file CBOR backup (§8) |

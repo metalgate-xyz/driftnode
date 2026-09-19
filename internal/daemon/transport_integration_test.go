@@ -116,7 +116,7 @@ func TestDaemonZenSyncOverTransport(t *testing.T) {
 	_ = aliceKP
 }
 
-// TestDaemonSyncNowOverTransport proves the sync --now control method dials
+// TestDaemonSyncNowOverTransport proves the sync control method dials
 // all known zens and runs the protocol.
 func TestDaemonSyncNowOverTransport(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -143,7 +143,7 @@ func TestDaemonSyncNowOverTransport(t *testing.T) {
 		t.Fatalf("unlock: %v", err)
 	}
 
-	// Follow bob (by token) first, then trigger an explicit sync --now
+	// Follow bob (by token) first, then trigger an explicit sync
 	// and confirm events still present.
 	_, _ = SendRequest(sock, "follow", map[string]any{
 		"target":     "tctest-token-bob",
@@ -160,10 +160,10 @@ func TestDaemonSyncNowOverTransport(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Trigger sync --now; should be idempotent (0 new events) but not error.
-	resp, err := SendRequest(sock, "sync", map[string]any{"now": true})
+	// Trigger sync; should be idempotent (0 new events) but not error.
+	resp, err := SendRequest(sock, "sync", nil)
 	if err != nil {
-		t.Fatalf("sync --now: %v", err)
+		t.Fatalf("sync: %v", err)
 	}
 	if resp.Result.(map[string]any)["status"] != "triggered" {
 		t.Fatalf("sync status: %v", resp.Result)
@@ -180,7 +180,7 @@ func TestDaemonSyncNowOverTransport(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Fatalf("bob's post not present after sync --now; posts=%d", len(posts))
+		t.Fatalf("bob's post not present after sync; posts=%d", len(posts))
 	}
 }
 

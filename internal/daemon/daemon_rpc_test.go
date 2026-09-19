@@ -145,7 +145,7 @@ func TestSendRequestSync(t *testing.T) {
 	d.Start(sock)
 	defer d.Stop()
 
-	resp, err := SendRequest(sock, "sync", map[string]any{"now": true})
+	resp, err := SendRequest(sock, "sync", nil)
 	if err != nil {
 		t.Fatalf("SendRequest: %v", err)
 	}

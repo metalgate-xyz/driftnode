@@ -165,15 +165,14 @@ printf "\n===== Phase 2: Cross-seed discovery (zen exchange + crawl) =====\n"
 # follow graph and fetches seed-us's ProfileLog). Discovery alone does not
 # dial: carol must follow seed-us to enter it into her follow graph, then
 # sync again to pull its posts.
-dnq carol sync --now
-dnq dave sync --now
+dnq carol sync
+dnq dave sync
 sleep 10
 # Now carol/dave have learned the cross-seed identity (via crawl) and token
-# (via zen exchange). Follow by identity, then sync to pull posts.
+# (via zen exchange). Follow by identity; the follow auto-triggers a sync
+# that resolves the pending follow through a known token and pulls posts.
 dnq carol follow "$SEED_US_ID"
 dnq dave follow "$SEED_EU_ID"
-dnq carol sync --now
-dnq dave sync --now
 sleep 10
 
 CAROL_FEED2=$(dn carol feed)
@@ -185,10 +184,12 @@ contains "$DAVE_FEED2" "hello from eu" && ok "P2.2 dave discovers seed-eu (not i
 printf "\n===== Phase 3: Zen exchange between fresh nodes =====\n"
 # Dave discovers carol through zen exchange (seed-us relays carol's token
 # during sync). Following carol by pubkey enters her into dave's follow
-# graph; the next sync resolves her token (seed-us knows it) and dials her.
+# graph; the follow auto-triggers a sync that resolves her token through a
+# known token and dials her. Carol posts after that resolving round, so an
+# explicit dave sync pulls her new post.
 dnq dave follow "$CAROL_ID"
 dnq carol post "carol's first post"
-dnq dave sync --now
+dnq dave sync
 sleep 10
 DAVE_FEED3=$(dn dave feed)
 contains "$DAVE_FEED3" "carol's first post" && ok "P3.1 dave sees carol's post (followed)" || bad "P3.1 dave sees carol" "$DAVE_FEED3"
@@ -196,7 +197,6 @@ contains "$DAVE_FEED3" "carol's first post" && ok "P3.1 dave sees carol's post (
 printf "\n===== Phase 4: Bidirectional follow =====\n"
 dnq carol follow "$DAVE_ID"
 dnq dave post "dave posts here"
-dnq carol sync --now
 sleep 10
 CAROL_FEED3=$(dn carol feed)
 contains "$CAROL_FEED3" "dave posts here" && ok "P4.1 carol sees dave's post (followed)" || bad "P4.1 carol sees dave" "$CAROL_FEED3"
@@ -204,10 +204,8 @@ contains "$CAROL_FEED3" "dave posts here" && ok "P4.1 carol sees dave's post (fo
 printf "\n===== Phase 5: Eve discovers the network =====\n"
 dnq eve post "eve checking in"
 dnq eve follow "$CAROL_ID"
-dnq eve sync --now
 sleep 10
 dnq carol follow "$EVE_ID"
-dnq carol sync --now
 sleep 10
 CAROL_FEED4=$(dn carol feed)
 contains "$CAROL_FEED4" "eve checking in" && ok "P5.1 carol sees eve's post" || bad "P5.1 carol sees eve" "$CAROL_FEED4"
@@ -225,14 +223,13 @@ SEED_EU_TOKEN_AFTER=$(dn seed-eu zens token)
 
 printf "\n===== Phase 7: Idempotency =====\n"
 CAROL_COUNT_BEFORE=$(dn carol feed | wc -l | tr -d ' ')
-dnq carol sync --now
+dnq carol sync
 sleep 5
 CAROL_COUNT_AFTER=$(dn carol feed | wc -l | tr -d ' ')
 [[ "$CAROL_COUNT_BEFORE" == "$CAROL_COUNT_AFTER" ]] && ok "P7.1 idempotent re-sync" || bad "P7.1 idempotent" "before: $CAROL_COUNT_BEFORE after: $CAROL_COUNT_AFTER"
 
 printf "\n===== Phase 8: Late post propagation =====\n"
 dnq carol post "carol late post"
-dnq dave sync --now
 sleep 10
 DAVE_FEED4=$(dn dave feed)
 contains "$DAVE_FEED4" "carol late post" && ok "P8.1 dave sees carol's late post" || bad "P8.1 dave sees late post" "$DAVE_FEED4"

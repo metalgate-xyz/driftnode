@@ -1198,7 +1198,6 @@ func zensUnverifyCmd() *cobra.Command {
 }
 
 func syncCmd() *cobra.Command {
-	var now bool
 	c := &cobra.Command{
 		Use:   "sync",
 		Short: "Trigger a sync round",
@@ -1208,7 +1207,7 @@ func syncCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = daemon.SendRequest(sock, "sync", map[string]any{"now": now})
+			_, err = daemon.SendRequest(sock, "sync", nil)
 			if err != nil {
 				return err
 			}
@@ -1217,7 +1216,6 @@ func syncCmd() *cobra.Command {
 		},
 	}
 	addDBFlag(c)
-	c.Flags().BoolVar(&now, "now", false, "trigger immediate sync instead of waiting for the interval")
 	return c
 }
 

@@ -61,7 +61,7 @@ driftnode --db ~/.driftnode/node.db follow -p "your-passphrase" driftnode:abc123
 # Start the daemon (background networking: sync, crawl, zen exchange)
 driftnode --db ~/.driftnode/node.db daemon
 # In another terminal:
-driftnode --db ~/.driftnode/node.db sync --now
+driftnode --db ~/.driftnode/node.db sync
 driftnode --db ~/.driftnode/node.db zens list
 ```
 
@@ -161,7 +161,7 @@ an inline compose box. Vim-style keybindings: `j`/`k` scroll, `i` to compose,
 | `daemon [--foreground]` | Start the networking daemon |
 | `daemon stop` | Stop the daemon |
 | `daemon status` | Check daemon status |
-| `sync [--now]` | Trigger a sync round |
+| `sync` | Trigger a sync round |
 | `zens list` | Show connected zens |
 | `zens token` | Print your node's address token |
 | `bootstrap keygen [--key-out <path> \| --key <path>]` | Generate a bootstrap signing keypair, or derive the public key from an existing private key |

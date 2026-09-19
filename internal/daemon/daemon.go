@@ -554,21 +554,8 @@ func (d *Daemon) dispatch(req Request) Response {
 		d.logger.Info("key locked")
 		return Response{Result: map[string]string{"status": "locked"}}
 	case "sync":
-		var p struct {
-			Now bool `json:"now"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Now {
-			select {
-			case d.syncNow <- struct{}{}:
-			default:
-			}
-		}
-		d.logger.Info("sync requested", "now", p.Now)
+		d.triggerSyncNow()
+		d.logger.Info("sync requested")
 		return Response{Result: map[string]string{"status": "triggered"}}
 	case "stop":
 		// Acknowledge first, then shut down asynchronously so the response
@@ -727,6 +714,7 @@ func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
 	d.touchSignAt()
+	d.triggerSyncNow()
 	id, _ := se.ID()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
@@ -827,6 +815,7 @@ func (d *Daemon) handleProfile(name string, kp *core.KeyPair) Response {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
 	d.touchSignAt()
+	d.triggerSyncNow()
 	id, _ := se.ID()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
@@ -854,6 +843,7 @@ func (d *Daemon) handleDetail(bio, firstName, lastName, location string, kp *cor
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
 	d.touchSignAt()
+	d.triggerSyncNow()
 	id, _ := se.ID()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
@@ -940,6 +930,7 @@ func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
 	d.touchSignAt()
+	d.triggerSyncNow()
 	return Response{Result: map[string]string{"followed": core.IdentityFromPubkey(ed25519.PublicKey(target[:])).String()}}
 }
 
@@ -980,6 +971,7 @@ func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 		d.RemoveZen(string(id))
 	}
 	d.touchSignAt()
+	d.triggerSyncNow()
 	return Response{Result: map[string]string{"unfollowed": id.String()}}
 }
 
@@ -1189,6 +1181,16 @@ func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
 			}
 			d.mu.Unlock()
 		}
+	}
+}
+
+// triggerSyncNow signals the background sync loop to run an immediate sync
+// round. It is non-blocking: the channel is buffered with capacity 1, so a
+// pending signal is simply dropped if one is already queued.
+func (d *Daemon) triggerSyncNow() {
+	select {
+	case d.syncNow <- struct{}{}:
+	default:
 	}
 }
 
