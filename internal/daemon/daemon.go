@@ -75,9 +75,11 @@ type Daemon struct {
 	// zens and recording discovered tokens for future intent.
 	knownTokens map[string]bool
 
-	// keyFile, if set, persists the tailcat private key so the node's
-	// address token stays stable across restarts (section 5.2).
-	keyFile string
+	// ephemeralKey, when set, disables key persistence: a fresh tailcat
+	// key is generated each run and never saved, so the address token
+	// changes on every restart. The default (false) is a store-persisted
+	// key with a stable token.
+	ephemeralKey bool
 
 	// bootstrapPath, if set, is loaded on start. Its seed_zens are
 	// auto-dialed after the listener is up (section 6.1).
@@ -118,11 +120,11 @@ func New(s *store.Store, logger *slog.Logger) *Daemon {
 	}
 }
 
-// SetKeyFile configures the daemon to persist its tailcat private key to the
-// given path, so the node's address token stays stable across restarts.
-func (d *Daemon) SetKeyFile(path string) {
+// SetEphemeralKey disables key persistence so the address token is fresh
+// each run and never saved.
+func (d *Daemon) SetEphemeralKey() {
 	d.mu.Lock()
-	d.keyFile = path
+	d.ephemeralKey = true
 	d.mu.Unlock()
 }
 
@@ -199,32 +201,8 @@ func (d *Daemon) Start(socketPath string) error {
 	if injected == nil {
 		d.transport = tailcatTransport{p2p.NewDialer(d.logger)}
 	}
-	d.mu.Lock()
-	keyFile := d.keyFile
-	d.mu.Unlock()
-	var keyCfg *p2p.KeyConfig
-	if keyFile != "" {
-		keyCfg = &p2p.KeyConfig{KeyFile: keyFile}
-	}
-	tcListener, err := p2p.NewListenerWithKey(func(conn net.Conn) {
-		defer conn.Close()
-		if _, err := d.runSession(conn, false, nil); err != nil {
-			d.logger.Warn("inbound sync ended", "err", err)
-		}
-	}, d.logger, keyCfg)
-	if err != nil {
+	if err := d.startTransport(); err != nil {
 		d.logger.Warn("tailcat listener unavailable; inbound zen sync disabled", "err", err)
-	} else {
-		d.mu.Lock()
-		d.tcListener = tcListener
-		d.mu.Unlock()
-		d.logger.Info("tailcat listener started", "addr", tcListener.Addr())
-		// Persist the key so the token stays stable across restarts.
-		if keyFile != "" {
-			if err := tcListener.SaveKeyFile(keyFile); err != nil {
-				d.logger.Warn("persist tailcat key", "err", err)
-			}
-		}
 	}
 
 	// Background sync loop: pull from known zens periodically and on demand.
@@ -250,6 +228,84 @@ func (d *Daemon) Start(socketPath string) error {
 	}
 
 	return nil
+}
+
+// startTransport opens the tailcat listener for inbound zen sync using the
+// key persisted in the local store (or a fresh key when no stored key exists
+// or ephemeral mode is set). A fresh key is persisted on first use so the
+// address token stays stable across restarts. Caller must hold no lock.
+func (d *Daemon) startTransport() error {
+	d.mu.Lock()
+	ephemeral := d.ephemeralKey
+	d.mu.Unlock()
+	var keyCfg *p2p.KeyConfig
+	if !ephemeral {
+		if stored, ok, _ := d.store.TransportKey(); ok {
+			keyCfg = &p2p.KeyConfig{KeyBytes: stored}
+		}
+	}
+	tcListener, err := p2p.NewListenerWithKey(func(conn net.Conn) {
+		defer conn.Close()
+		if _, err := d.runSession(conn, false, nil); err != nil {
+			d.logger.Warn("inbound sync ended", "err", err)
+		}
+	}, d.logger, keyCfg)
+	if err != nil {
+		return err
+	}
+	d.mu.Lock()
+	d.tcListener = tcListener
+	d.mu.Unlock()
+	d.logger.Info("tailcat listener started", "addr", tcListener.Addr())
+	// Persist a freshly generated key so the token stays stable across
+	// restarts. keyCfg is nil only when no stored key was found yet, in
+	// which case the listener generated a fresh one. Ephemeral mode
+	// skips the save.
+	if !ephemeral && keyCfg == nil {
+		if kb, err := tcListener.KeyBytes(); err == nil {
+			if err := d.store.PutTransportKey(kb); err != nil {
+				d.logger.Warn("persist tailcat key", "err", err)
+			}
+		} else {
+			d.logger.Warn("marshal tailcat key", "err", err)
+		}
+	}
+	return nil
+}
+
+// rotateKey replaces the tailcat transport key with a fresh one and
+// restarts the listener, changing the node's address token. The old key is
+// overwritten in the store. Requires the daemon to be running with a
+// transport that is not ephemeral. Returns the new token.
+func (d *Daemon) rotateKey() (string, error) {
+	d.mu.Lock()
+	ephemeral := d.ephemeralKey
+	old := d.tcListener
+	d.mu.Unlock()
+	if ephemeral {
+		return "", errors.New("cannot rotate an ephemeral key")
+	}
+	// Drop the old listener so its key is freed before the replacement
+	// binds a fresh one.
+	if old != nil {
+		old.Close()
+	}
+	// Clear any persisted key so startTransport generates and persists a
+	// fresh one.
+	if err := d.store.DeleteTransportKey(); err != nil {
+		return "", fmt.Errorf("delete old transport key: %w", err)
+	}
+	if err := d.startTransport(); err != nil {
+		return "", fmt.Errorf("restart transport: %w", err)
+	}
+	d.mu.Lock()
+	newAddr := ""
+	if d.tcListener != nil {
+		newAddr = string(d.tcListener.Addr())
+	}
+	d.mu.Unlock()
+	d.logger.Info("transport key rotated", "addr", newAddr)
+	return newAddr, nil
 }
 
 // Stop closes the control socket, the tailcat listener, and stops the
@@ -405,10 +461,10 @@ func (d *Daemon) dispatch(req Request) Response {
 		return d.handleProfile(p.Name, kp)
 	case "detail":
 		var p struct {
-			Bio       string `json:"bio"`
-			FirstName string `json:"first_name"`
-			LastName  string `json:"last_name"`
-			Location  string `json:"location"`
+			Bio        string `json:"bio"`
+			FirstName  string `json:"first_name"`
+			LastName   string `json:"last_name"`
+			Location   string `json:"location"`
 			Passphrase string `json:"passphrase"`
 		}
 		if len(req.Params) > 0 {
@@ -424,14 +480,6 @@ func (d *Daemon) dispatch(req Request) Response {
 			return Response{Error: err.Error()}
 		}
 		return d.handleDetail(p.Bio, p.FirstName, p.LastName, p.Location, kp)
-	case "token":
-		d.mu.Lock()
-		var addr tailcat.Addr
-		if d.tcListener != nil {
-			addr = d.tcListener.Addr()
-		}
-		d.mu.Unlock()
-		return Response{Result: map[string]string{"token": string(addr)}}
 	case "zens":
 		d.mu.Lock()
 		zens := make([]*ZenInfo, 0, len(d.zens))
@@ -568,20 +616,21 @@ func (d *Daemon) dispatch(req Request) Response {
 	case "status":
 		d.mu.Lock()
 		tcUp := d.tcListener != nil
-		var addr tailcat.Addr
-		if tcUp {
-			addr = d.tcListener.Addr()
-		}
 		unlocked := d.unlocked != nil
 		d.mu.Unlock()
 		return Response{Result: map[string]any{
-			"running":     true,
-			"zens":        len(d.zens),
-			"socket":      d.socket,
-			"transport":   tcUp,
-			"listen_addr": string(addr),
-			"unlocked":    unlocked,
+			"running":   true,
+			"zens":      len(d.zens),
+			"socket":    d.socket,
+			"transport": tcUp,
+			"unlocked":  unlocked,
 		}}
+	case "rotate-key":
+		newAddr, err := d.rotateKey()
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		return Response{Result: map[string]any{"token": newAddr}}
 	default:
 		return Response{Error: fmt.Sprintf("unknown method: %s", req.Method)}
 	}
@@ -589,10 +638,10 @@ func (d *Daemon) dispatch(req Request) Response {
 
 // FeedItem is one post in the merged feed, serialized to the CLI.
 type FeedItem struct {
-	Timestamp  int64  `json:"timestamp"`
-	Author     string `json:"author"`
-	Name       string `json:"name"`
-	Text       string `json:"text"`
+	Timestamp int64  `json:"timestamp"`
+	Author    string `json:"author"`
+	Name      string `json:"name"`
+	Text      string `json:"text"`
 }
 
 // handleFeed returns the merged timeline (own PostLog plus synced PostLogs
@@ -724,6 +773,12 @@ func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 // in without a separate command.
 func (d *Daemon) handleWhoami(id core.Identity) Response {
 	out := map[string]any{"identity": id.String()}
+	d.mu.Lock()
+	if d.tcListener != nil {
+		out["token"] = string(d.tcListener.Addr())
+	}
+	out["stable"] = !d.ephemeralKey
+	d.mu.Unlock()
 	profEvents, err := d.store.OwnEvents(core.ProfileLog)
 	if err == nil {
 		if prof := core.NewLog(profEvents).Profile(); prof != nil {
@@ -906,7 +961,7 @@ func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
 	if resp.Error != "" {
 		return resp
 	}
-	resp.Result = map[string]string{"followed": zenID.String(), "token": token}
+	resp.Result = map[string]string{"followed": zenID.String()}
 	return resp
 }
 

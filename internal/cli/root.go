@@ -20,6 +20,7 @@ import (
 	bootstrappkg "driftnode/internal/bootstrap"
 	"driftnode/internal/core"
 	"driftnode/internal/daemon"
+	p2p "driftnode/internal/net"
 	"driftnode/internal/store"
 	"driftnode/internal/tui"
 
@@ -88,6 +89,7 @@ func Root() *cobra.Command {
 		tuiCmd(),
 		zensCmd(),
 		syncCmd(),
+		rotateKeyCmd(),
 		bootstrapCmd(),
 		relayCmd(),
 	)
@@ -161,6 +163,12 @@ func whoamiCmd() *cobra.Command {
 				return fmt.Errorf("no identity found; run 'driftnode init' first")
 			}
 			out := map[string]any{"identity": id.String()}
+			if tk, ok, _ := s.TransportKey(); ok {
+				if addr, err := p2p.AddrFromKeyBytes(tk); err == nil && addr != "" {
+					out["token"] = addr
+					out["stable"] = true
+				}
+			}
 			profEvents, _ := s.OwnEvents(core.ProfileLog)
 			if prof := core.NewLog(profEvents).Profile(); prof != nil {
 				if prof.DisplayName != "" {
@@ -197,6 +205,13 @@ func whoamiCmd() *cobra.Command {
 // detail fields if set. Fields that are absent are omitted.
 func printWhoami(cmd *cobra.Command, m map[string]any) {
 	cmd.Println(m["identity"])
+	if token, ok := m["token"].(string); ok && token != "" {
+		if stable, _ := m["stable"].(bool); stable {
+			cmd.Printf("address: %s (stable)\n", token)
+		} else {
+			cmd.Printf("address: %s (ephemeral)\n", token)
+		}
+	}
 	if name, ok := m["display_name"].(string); ok && name != "" {
 		cmd.Printf("zen name: %s\n", name)
 	}
@@ -709,6 +724,7 @@ func backupCmd() *cobra.Command {
 
 func backupExportCmd() *cobra.Command {
 	var outPath string
+	var passphrase string
 	c := &cobra.Command{
 		Use:   "export",
 		Short: "Write the single-file CBOR backup (Section 8)",
@@ -722,6 +738,23 @@ func backupExportCmd() *cobra.Command {
 			bd, err := s.ExportBackup()
 			if err != nil {
 				return fmt.Errorf("export: %w", err)
+			}
+			// The tailcat transport key is stored raw in the local store; in
+			// the backup file it is sealed under the same passphrase as the
+			// identity key, so the address token survives a device restore.
+			tk, hasTK, err := s.TransportKey()
+			if err != nil {
+				return fmt.Errorf("read transport key: %w", err)
+			}
+			if hasTK {
+				if passphrase == "" {
+					return fmt.Errorf("--passphrase is required to encrypt the transport key into the backup")
+				}
+				enc, err := core.DefaultKeyEncryption().EncryptBytes(tk, []byte(passphrase))
+				if err != nil {
+					return fmt.Errorf("encrypt transport key: %w", err)
+				}
+				bd.TransportKey = enc
 			}
 			b, err := core.CanonicalEncode(bd)
 			if err != nil {
@@ -739,10 +772,12 @@ func backupExportCmd() *cobra.Command {
 	}
 	addDBFlag(c)
 	c.Flags().StringVarP(&outPath, "out", "o", "", "output path (default: driftnode-backup.cbor)")
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to encrypt the transport key into the backup")
 	return c
 }
 
 func backupImportCmd() *cobra.Command {
+	var passphrase string
 	c := &cobra.Command{
 		Use:   "import <path>",
 		Short: "Restore or merge from a backup file",
@@ -764,10 +799,26 @@ func backupImportCmd() *cobra.Command {
 			if err := s.ImportBackup(&bd); err != nil {
 				return fmt.Errorf("import: %w", err)
 			}
+			// Restore the transport key so the address token survives the
+			// restore; it is sealed under the same passphrase as the key.
+			if bd.TransportKey != nil {
+				if passphrase == "" {
+					return fmt.Errorf("--passphrase is required to decrypt the transport key")
+				}
+				tk, err := core.DefaultKeyEncryption().DecryptBytes(bd.TransportKey, []byte(passphrase))
+				if err != nil {
+					return fmt.Errorf("decrypt transport key: %w", err)
+				}
+				if err := s.PutTransportKey(tk); err != nil {
+					return fmt.Errorf("restore transport key: %w", err)
+				}
+			}
 			cmd.Println("imported backup")
 			return nil
 		},
 	}
+	addDBFlag(c)
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to decrypt the transport key")
 	return c
 }
 
@@ -802,7 +853,7 @@ func loadKey(s *store.Store, passphrase string) (*core.KeyPair, error) {
 
 func daemonCmd() *cobra.Command {
 	var foreground bool
-	var keyFile string
+	var ephemeral bool
 	var bootstrapFile string
 	var bootstrapKeyFile string
 	var idleLockStr string
@@ -822,8 +873,8 @@ func daemonCmd() *cobra.Command {
 				return err
 			}
 			d := daemon.New(s, nil)
-			if keyFile != "" {
-				d.SetKeyFile(keyFile)
+			if ephemeral {
+				d.SetEphemeralKey()
 			}
 			if bootstrapFile != "" {
 				verifyKey, err := decodeBootstrapKey(bootstrapKeyFile)
@@ -859,7 +910,7 @@ func daemonCmd() *cobra.Command {
 	addDBFlagPersistent(c)
 	c.AddCommand(daemonStopCmd(), daemonStatusCmd(), daemonUnlockCmd(), daemonLockCmd())
 	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run in foreground with logs on stdout")
-	c.Flags().StringVar(&keyFile, "key", "", "path to a persistent tailcat key file (stable address token across restarts)")
+	c.Flags().BoolVar(&ephemeral, "ephemeral", false, "generate a fresh address token each run (do not persist the transport key)")
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h); default keeps it unlocked until 'daemon lock' or stop")
@@ -1007,9 +1058,6 @@ func daemonStatusCmd() *cobra.Command {
 			cmd.Printf("zens: %v\n", result["zens"])
 			cmd.Printf("transport: %v\n", result["transport"])
 			cmd.Printf("unlocked: %v\n", result["unlocked"])
-			if addr, _ := result["listen_addr"].(string); addr != "" {
-				cmd.Printf("listen_addr: %v\n", addr)
-			}
 			return nil
 		},
 	}
@@ -1063,40 +1111,11 @@ func tuiCmd() *cobra.Command {
 func zensCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "zens",
-		Short: "Show your network: connected zens and your address token",
+		Short: "Show your network: connected zens",
 	}
 	addDBFlagPersistent(c)
-	c.AddCommand(zensListCmd(), zensTokenCmd(), zensVerifyCmd(), zensUnverifyCmd())
+	c.AddCommand(zensListCmd(), zensVerifyCmd(), zensUnverifyCmd())
 	return c
-}
-
-func zensTokenCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "token",
-		Short: "Print this node's address token for other zens to dial",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
-			if err != nil {
-				return err
-			}
-			resp, err := daemon.SendRequest(sock, "token", nil)
-			if err != nil {
-				return err
-			}
-			result, ok := resp.Result.(map[string]any)
-			if !ok {
-				return fmt.Errorf("unexpected token response")
-			}
-			token, _ := result["token"].(string)
-			if token == "" {
-				cmd.Println("(transport unavailable; run 'driftnode daemon')")
-				return nil
-			}
-			cmd.Println(token)
-			return nil
-		},
-	}
 }
 
 func zensListCmd() *cobra.Command {
@@ -1123,11 +1142,20 @@ func zensListCmd() *cobra.Command {
 				if !ok {
 					continue
 				}
+				identity, _ := pm["identity"].(string)
+				if identity == "" {
+					identity = "(unknown)"
+				}
 				mark := " "
 				if v, _ := pm["verified"].(bool); v {
 					mark = "✓"
 				}
-				cmd.Printf("%s %s %s (%s)\n", mark, pm["status"], pm["id"], pm["kind"])
+				name, _ := pm["name"].(string)
+				if name != "" {
+					cmd.Printf("%s %s  %s  %s (%s)\n", mark, pm["status"], name, identity, pm["kind"])
+				} else {
+					cmd.Printf("%s %s  %s (%s)\n", mark, pm["status"], identity, pm["kind"])
+				}
 			}
 			return nil
 		},
@@ -1212,6 +1240,35 @@ func syncCmd() *cobra.Command {
 				return err
 			}
 			cmd.Println("sync triggered")
+			return nil
+		},
+	}
+	addDBFlag(c)
+	return c
+}
+
+func rotateKeyCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "rotate-key",
+		Short: "Generate a fresh address token, persist it, and restart the listener",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sock, err := daemonSocketPath()
+			if err != nil {
+				return err
+			}
+			resp, err := daemon.SendRequest(sock, "rotate-key", nil)
+			if err != nil {
+				return err
+			}
+			m, ok := resp.Result.(map[string]any)
+			if !ok {
+				return fmt.Errorf("unexpected rotate-key response: %v", resp.Result)
+			}
+			token, _ := m["token"].(string)
+			cmd.Println("rotated address token:")
+			cmd.Println("address:", token, "(stable)")
+			cmd.Println("followers must re-discover your identity to use the new token")
 			return nil
 		},
 	}
@@ -1367,7 +1424,7 @@ func relayStatusCmd() *cobra.Command {
 		Short: "Show reachability check result and relay role status",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cmd.Println("relay role: ephemeral (default)")
+			cmd.Println("relay role: not advertised")
 			cmd.Println("(use 'relay enable' to advertise as a bootstrap candidate)")
 			return nil
 		},

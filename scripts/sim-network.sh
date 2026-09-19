@@ -74,7 +74,7 @@ print_status() {
   for c in $NODES; do
     local id token zens follows followers
     id=$(dn "$c" whoami 2>/dev/null | head -1)
-    token=$(dn "$c" zens token 2>/dev/null | head -1)
+    token=$(dn "$c" whoami 2>/dev/null | grep '^address:' | awk '{print $2}')
     zens=$(dn "$c" zens list 2>/dev/null | grep -vc 'no zens connected')
     follows=$(dn "$c" follows 2>/dev/null | grep -c '^driftnode:')
     followers=$(dn "$c" followers 2>/dev/null | grep -c '^driftnode:')
@@ -179,14 +179,14 @@ dnq seed-us follow -p seedpass "$SEED_EU_ID" && ok "seed-us follows seed-eu" || 
 dnq seed-eu post -p seedpass "hello from eu" && ok "seed-eu posts" || warn "seed-eu post" "failed"
 dnq seed-us post -p seedpass "hello from us" && ok "seed-us posts" || warn "seed-us post" "failed"
 
-start_daemon seed-eu --key /data/tc.key
-start_daemon seed-us --key /data/tc.key
+start_daemon seed-eu
+start_daemon seed-us
 sleep 5
 unlock_node seed-eu seedpass
 unlock_node seed-us seedpass
 
-SEED_EU_TOKEN=$(dn seed-eu zens token)
-SEED_US_TOKEN=$(dn seed-us zens token)
+SEED_EU_TOKEN=$(dn seed-eu whoami | grep '^address:' | awk '{print $2}')
+SEED_US_TOKEN=$(dn seed-us whoami | grep '^address:' | awk '{print $2}')
 [[ "$SEED_EU_TOKEN" == tc* ]] || fatal "seed-eu token: $SEED_EU_TOKEN"
 [[ "$SEED_US_TOKEN" == tc* ]] || fatal "seed-us token: $SEED_US_TOKEN"
 ok "seed tokens ready"

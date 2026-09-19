@@ -44,7 +44,6 @@ type identityEntry struct {
 type statusInfo struct {
 	zens      int
 	transport bool
-	listen    string
 	unlocked  bool
 }
 
@@ -199,7 +198,6 @@ func parseStatus(r *daemon.Response) (statusInfo, error) {
 		zens:      int(zens),
 		transport: m["transport"] == true,
 		unlocked:  m["unlocked"] == true,
-		listen:    fmt.Sprintf("%v", m["listen_addr"]),
 	}, nil
 }
 

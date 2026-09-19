@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,8 @@ import (
 
 	"driftnode/internal/core"
 	"driftnode/internal/store"
+
+	"github.com/tailscale/tailcat"
 )
 
 // runCLI runs the given args against a fresh temp store, returning captured
@@ -56,6 +59,53 @@ func TestInitAndWhoami(t *testing.T) {
 	}
 	if strings.TrimSpace(out) != idStr {
 		t.Fatalf("whoami: want %q, got %q", idStr, strings.TrimSpace(out))
+	}
+}
+
+func TestWhoamiShowsAddress(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	out, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	idStr := strings.TrimSpace(out)
+
+	// Without a persisted transport key, whoami shows no address.
+	out, err = runCLI(t, dbPath, []string{"whoami"})
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	if strings.Contains(out, "address:") {
+		t.Fatalf("whoami should not show address before key persisted: %q", out)
+	}
+
+	// Persist a transport key, then whoami shows it marked stable.
+	pk := tailcat.NewPrivateKey()
+	tk, err := json.Marshal(pk)
+	if err != nil {
+		t.Fatalf("marshal key: %v", err)
+	}
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.PutTransportKey(tk); err != nil {
+		t.Fatalf("put transport key: %v", err)
+	}
+	s.Close()
+
+	out, err = runCLI(t, dbPath, []string{"whoami"})
+	if err != nil {
+		t.Fatalf("whoami: %v", err)
+	}
+	if !strings.Contains(out, "address:") {
+		t.Fatalf("whoami should show address after key persisted: %q", out)
+	}
+	if !strings.Contains(out, "(stable)") {
+		t.Fatalf("whoami should mark the address stable: %q", out)
+	}
+	if !strings.HasPrefix(strings.TrimSpace(out), idStr) {
+		t.Fatalf("whoami should start with identity: %q", out)
 	}
 }
 
@@ -293,6 +343,72 @@ func TestBackupExportImport(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("imported store missing the post")
+	}
+}
+
+func TestBackupExportImportTransportKey(t *testing.T) {
+	home := t.TempDir()
+	dbPath := filepath.Join(home, "node.db")
+
+	_, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	_, err = runCLI(t, dbPath, []string{"post", "backup me", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+
+	// Seed a transport key into the store (the daemon does this on start).
+	tk := []byte(`{"tailcat":"private-key"}`)
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := s.PutTransportKey(tk); err != nil {
+		t.Fatalf("put transport key: %v", err)
+	}
+	s.Close()
+
+	backupPath := filepath.Join(home, "backup.cbor")
+
+	// Export without a passphrase must fail now that a transport key exists.
+	_, err = runCLI(t, dbPath, []string{"backup", "export", "--out", backupPath})
+	if err == nil {
+		t.Fatal("export without passphrase should fail when a transport key exists")
+	}
+
+	_, err = runCLI(t, dbPath, []string{"backup", "export", "--out", backupPath, "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("backup export: %v", err)
+	}
+
+	b, _ := os.ReadFile(backupPath)
+	var bd core.BackupData
+	if err := core.CanonicalDecode(b, &bd); err != nil {
+		t.Fatalf("decode backup: %v", err)
+	}
+	if bd.TransportKey == nil {
+		t.Fatal("backup missing encrypted transport key")
+	}
+
+	// Import into a fresh store and verify the transport key is restored.
+	dbPath2 := filepath.Join(t.TempDir(), "node.db")
+	_, err = runCLI(t, dbPath2, []string{"backup", "import", backupPath, "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("backup import: %v", err)
+	}
+	s2, err := store.Open(dbPath2)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s2.Close()
+	got, ok, _ := s2.TransportKey()
+	if !ok {
+		t.Fatal("transport key missing after import")
+	}
+	if string(got) != string(tk) {
+		t.Fatalf("transport key mismatch: want %q, got %q", tk, got)
 	}
 }
 

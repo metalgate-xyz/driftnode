@@ -458,3 +458,59 @@ func TestFollowsAndFollowersRPC(t *testing.T) {
 		t.Fatalf("followers: want 1, got %d (%v)", len(items), items)
 	}
 }
+
+// TestRotateKey verifies that rotate-key swaps the listener to a fresh
+// address token and persists the new key, so the token survives a restart.
+func TestRotateKey(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	d.mu.Lock()
+	oldListener := d.tcListener
+	d.mu.Unlock()
+	if oldListener == nil {
+		t.Skip("tailcat listener unavailable in this environment")
+	}
+	oldAddr := string(oldListener.Addr())
+
+	resp, err := SendRequest(sock, "rotate-key", nil)
+	if err != nil {
+		t.Fatalf("rotate-key: %v", err)
+	}
+	m, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("rotate-key result: %v", resp.Result)
+	}
+	newAddr, _ := m["token"].(string)
+	if newAddr == "" {
+		t.Fatal("rotate-key returned empty token")
+	}
+	if newAddr == oldAddr {
+		t.Fatal("rotate-key did not change the address token")
+	}
+
+	// The new key must be persisted so it survives a restart.
+	stored, ok, _ := s.TransportKey()
+	if !ok {
+		t.Fatal("transport key not persisted after rotate")
+	}
+	if string(stored) == "" {
+		t.Fatal("persisted transport key is empty")
+	}
+
+	// whoami must report the new token.
+	whoami, err := SendRequest(sock, "whoami", nil)
+	if err != nil {
+		t.Fatalf("whoami after rotate: %v", err)
+	}
+	wm, _ := whoami.Result.(map[string]any)
+	if got, _ := wm["token"].(string); got != newAddr {
+		t.Fatalf("whoami token after rotate: want %s, got %s", newAddr, got)
+	}
+}

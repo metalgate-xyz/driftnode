@@ -615,3 +615,55 @@ func TestBackupIncludesVerifiedIdentities(t *testing.T) {
 		t.Fatal("peer should be verified after restore")
 	}
 }
+
+func TestTransportKeyRoundTrip(t *testing.T) {
+	s := newTestStore(t)
+	// No key initially.
+	if _, ok, _ := s.TransportKey(); ok {
+		t.Fatal("transport key present before being set")
+	}
+	key := []byte(`{"some":"key bytes"}`)
+	if err := s.PutTransportKey(key); err != nil {
+		t.Fatalf("PutTransportKey: %v", err)
+	}
+	got, ok, _ := s.TransportKey()
+	if !ok {
+		t.Fatal("transport key missing after put")
+	}
+	if string(got) != string(key) {
+		t.Fatalf("transport key: want %q, got %q", key, got)
+	}
+	// TransportKey must return a copy: mutating it must not corrupt the store.
+	got[0] = 'X'
+	got2, _, _ := s.TransportKey()
+	if got2[0] == 'X' {
+		t.Fatal("TransportKey did not return a copy")
+	}
+}
+
+func TestBackupIncludesTransportKey(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	tk := []byte(`{"tailcat":"private"}`)
+	if err := s.PutTransportKey(tk); err != nil {
+		t.Fatalf("put transport key: %v", err)
+	}
+	// ExportBackup carries the raw key; the CLI encrypts it for the file.
+	bd, err := s.ExportBackup()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	// ExportBackup itself does not encrypt the transport key; the store has
+	// no passphrase. The CLI layer is responsible for sealing it.
+	if bd.TransportKey != nil {
+		t.Fatal("ExportBackup should not populate TransportKey (CLI encrypts)")
+	}
+}

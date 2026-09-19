@@ -176,3 +176,60 @@ func (k KeyEncryption) Decrypt(ek *EncryptedKey, passphrase []byte) (ed25519.Pri
 	}
 	return ed25519.PrivateKey(priv), nil
 }
+
+// EncryptBytes seals arbitrary secret bytes under the same argon2id + AES-GCM
+// scheme as Encrypt, for backup-critical secrets that are not ed25519 keys
+// (e.g. the tailcat transport key, §8).
+func (k KeyEncryption) EncryptBytes(plain, passphrase []byte) (*EncryptedKey, error) {
+	if len(passphrase) == 0 {
+		return nil, errors.New("passphrase required")
+	}
+	salt := make([]byte, 16)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, fmt.Errorf("salt: %w", err)
+	}
+	dk := argon2.IDKey(passphrase, salt, k.time, k.memory, k.threads, 32)
+	block, err := aes.NewCipher(dk)
+	if err != nil {
+		return nil, fmt.Errorf("aes: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, fmt.Errorf("nonce: %w", err)
+	}
+	cipherText := gcm.Seal(nil, nonce, plain, nil)
+	return &EncryptedKey{
+		Salt:    salt,
+		Nonce:   nonce,
+		Cipher:  cipherText,
+		Time:    k.time,
+		Memory:  k.memory,
+		Threads: k.threads,
+	}, nil
+}
+
+// DecryptBytes reverses EncryptBytes. A wrong passphrase produces a GCM
+// authentication error.
+func (k KeyEncryption) DecryptBytes(ek *EncryptedKey, passphrase []byte) ([]byte, error) {
+	dk := argon2.IDKey(passphrase, ek.Salt, ek.Time, ek.Memory, ek.Threads, 32)
+	block, err := aes.NewCipher(dk)
+	if err != nil {
+		return nil, fmt.Errorf("aes: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("gcm: %w", err)
+	}
+	if len(ek.Nonce) != gcm.NonceSize() {
+		return nil, errors.New("nonce size mismatch")
+	}
+	plain, err := gcm.Open(nil, ek.Nonce, ek.Cipher, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt (wrong passphrase?): %w", err)
+	}
+	return plain, nil
+}

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/wgengine/filter"
@@ -26,16 +25,15 @@ type Listener struct {
 	logger   *slog.Logger
 }
 
-// KeyConfig controls the tailcat private key used by a listener. A nil
-// KeyConfig generates an ephemeral key (the default for non-seed nodes). A
-// KeyConfig with KeyFile set loads a persistent key so the node's token stays
-// stable across restarts, which is what seed nodes listed in bootstrap.yaml
-// need (section 5.2).
+// KeyConfig supplies a pre-existing tailcat private key to a listener. A nil
+// KeyConfig generates a fresh ephemeral key. The daemon passes a KeyConfig
+// loaded from the local store so the address token stays stable across
+// restarts (section 5.2).
 type KeyConfig struct {
-	// KeyFile is the path to a tailcat *.private.json key file. If set,
-	// the listener loads its identity from this file instead of generating
-	// a fresh ephemeral key.
-	KeyFile string
+	// KeyBytes is a tailcat private key serialized as JSON. When set, the
+	// listener loads its identity from these bytes instead of generating a
+	// fresh key.
+	KeyBytes []byte
 }
 
 // NewListener creates a tailcat listener that accepts inbound connections and
@@ -46,25 +44,16 @@ func NewListener(handler func(net.Conn), logger *slog.Logger) (*Listener, error)
 	return NewListenerWithKey(handler, logger, nil)
 }
 
-// NewListenerWithKey is like NewListener but allows a persistent key to be
-// loaded from a file. If the key file does not exist, a new key is generated,
-// the listener starts with it, and the key is saved to the file for the next
-// run. If the file exists, the key is loaded so the node's address token
-// stays stable across restarts. A nil keyCfg generates an ephemeral key.
+// NewListenerWithKey is like NewListener but allows a pre-existing key to be
+// loaded via KeyConfig. A nil keyCfg generates a fresh ephemeral key.
 func NewListenerWithKey(handler func(net.Conn), logger *slog.Logger, keyCfg *KeyConfig) (*Listener, error) {
 	priv := tailcat.NewPrivateKey()
-	if keyCfg != nil && keyCfg.KeyFile != "" {
-		data, err := os.ReadFile(keyCfg.KeyFile)
-		if err == nil {
-			var loaded tailcat.PrivateKey
-			if err := json.Unmarshal(data, &loaded); err != nil {
-				return nil, fmt.Errorf("parse key file: %w", err)
-			}
-			priv = &loaded
-		} else if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("read key file: %w", err)
+	if keyCfg != nil && len(keyCfg.KeyBytes) > 0 {
+		var loaded tailcat.PrivateKey
+		if err := json.Unmarshal(keyCfg.KeyBytes, &loaded); err != nil {
+			return nil, fmt.Errorf("parse key: %w", err)
 		}
-		// If the file doesn't exist, priv stays as the freshly generated key.
+		priv = &loaded
 	}
 	s := &tailcat.Server{
 		Key:          priv.Private,
@@ -91,23 +80,30 @@ func NewListenerWithKey(handler func(net.Conn), logger *slog.Logger, keyCfg *Key
 	}, nil
 }
 
-// SaveKeyFile writes the listener's tailcat private key to path in the JSON
-// format tailcat uses, so it can be loaded by NewListenerWithKey on a future
-// run to preserve the node's token.
-func (l *Listener) SaveKeyFile(path string) error {
-	data, err := json.MarshalIndent(l.priv, "", "\t")
-	if err != nil {
-		return fmt.Errorf("marshal key: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write key file: %w", err)
-	}
-	return nil
+// KeyBytes returns the listener's tailcat private key serialized as JSON.
+// Used by the daemon to persist the key in the local store so the node's
+// token stays stable across restarts.
+func (l *Listener) KeyBytes() ([]byte, error) {
+	return json.MarshalIndent(l.priv, "", "\t")
 }
 
 // Addr returns the tailcat address (tc<base64>) that zens dial to reach this
 // listener.
 func (l *Listener) Addr() tailcat.Addr { return l.addr }
+
+// AddrFromKeyBytes derives the tailcat address from a persisted private key
+// (the JSON form KeyBytes produces), without starting a listener.
+// Returns empty if no key is set.
+func AddrFromKeyBytes(keyBytes []byte) (string, error) {
+	if len(keyBytes) == 0 {
+		return "", nil
+	}
+	var pk tailcat.PrivateKey
+	if err := json.Unmarshal(keyBytes, &pk); err != nil {
+		return "", fmt.Errorf("parse key: %w", err)
+	}
+	return string(pk.Public.Addr()), nil
+}
 
 // Close stops the listener.
 func (l *Listener) Close() error { return l.tcServer.Close() }

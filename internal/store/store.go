@@ -25,13 +25,14 @@ import (
 // identities the user has confirmed out-of-band (§7), so a later connection
 // under a different identity can be flagged as a possible MITM.
 var (
-	bucketMeta     = []byte("meta")
-	bucketKey      = []byte("key")      // single EncryptedKey value under key "key"
-	bucketOwn      = []byte("own")      // own logs: sub-buckets per log name
-	bucketCrawl    = []byte("crawl")    // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
-	bucketMedia    = []byte("media")    // content-addressed blobs
-	bucketRouting  = []byte("routing")  // identity -> tailcat token
-	bucketVerified = []byte("verified") // identity -> presence (out-of-band confirmed)
+	bucketMeta      = []byte("meta")
+	bucketKey       = []byte("key")       // single EncryptedKey value under key "key"
+	bucketOwn       = []byte("own")       // own logs: sub-buckets per log name
+	bucketCrawl     = []byte("crawl")     // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
+	bucketMedia     = []byte("media")     // content-addressed blobs
+	bucketRouting   = []byte("routing")   // identity -> tailcat token
+	bucketVerified  = []byte("verified")  // identity -> presence (out-of-band confirmed)
+	bucketTransport = []byte("transport") // tailcat private key, so the node's address token stays stable across restarts
 )
 
 // meta keys
@@ -69,7 +70,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketTransport} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -611,6 +612,39 @@ func (s *Store) RoutingByToken(token string) (core.Identity, bool, error) {
 		})
 	})
 	return found, found != "", err
+}
+
+// PutTransportKey stores the tailcat private key bytes, so the node's address
+// token stays stable across restarts (section 5.2). The bytes are the JSON
+// serialization of tailcat.PrivateKey.
+func (s *Store) PutTransportKey(keyBytes []byte) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketTransport).Put([]byte("tailcat"), keyBytes)
+	})
+}
+
+// TransportKey returns the stored tailcat private key bytes, or false if no
+// key has been persisted yet.
+func (s *Store) TransportKey() ([]byte, bool, error) {
+	var data []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		data = tx.Bucket(bucketTransport).Get([]byte("tailcat"))
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if data == nil {
+		return nil, false, nil
+	}
+	return append([]byte(nil), data...), true, nil
+}
+
+// DeleteTransportKey removes the stored tailcat private key.
+func (s *Store) DeleteTransportKey() error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketTransport).Delete([]byte("tailcat"))
+	})
 }
 
 // AllPosts returns own PostLog events plus all synced PostLog events from

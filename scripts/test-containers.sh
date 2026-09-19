@@ -77,16 +77,16 @@ dnq seed-us follow -p seedpass "$SEED_EU_ID" && ok "S2 seed-us follows seed-eu" 
 dnq seed-eu post -p seedpass "hello from eu" && ok "S3 seed-eu posts" || bad "S3 seed-eu posts" "failed"
 dnq seed-us post -p seedpass "hello from us" && ok "S3 seed-us posts" || bad "S3 seed-us posts" "failed"
 
-# Start seed daemons with persistent keys, then unlock so follow-by-token
-# can sign and inbound sessions can authenticate.
-start_daemon seed-eu --key /data/tc.key
-start_daemon seed-us --key /data/tc.key
+# Start the seed daemons, then unlock so follow-by-token can sign and
+# inbound sessions can authenticate.
+start_daemon seed-eu
+start_daemon seed-us
 sleep 5
 unlock_node seed-eu seedpass
 unlock_node seed-us seedpass
 
-SEED_EU_TOKEN=$(dn seed-eu zens token)
-SEED_US_TOKEN=$(dn seed-us zens token)
+SEED_EU_TOKEN=$(dn seed-eu whoami | grep '^address:' | awk '{print $2}')
+SEED_US_TOKEN=$(dn seed-us whoami | grep '^address:' | awk '{print $2}')
 [[ "$SEED_EU_TOKEN" == tc* ]] && ok "S4 seed-eu token" || bad "S4 seed-eu token" "$SEED_EU_TOKEN"
 [[ "$SEED_US_TOKEN" == tc* ]] && ok "S4 seed-us token" || bad "S4 seed-us token" "$SEED_US_TOKEN"
 
@@ -211,14 +211,14 @@ CAROL_FEED4=$(dn carol feed)
 contains "$CAROL_FEED4" "eve checking in" && ok "P5.1 carol sees eve's post" || bad "P5.1 carol sees eve" "$CAROL_FEED4"
 
 printf "\n===== Phase 6: Persistent key stability =====\n"
-SEED_EU_TOKEN_BEFORE=$(dn seed-eu zens token)
+SEED_EU_TOKEN_BEFORE=$(dn seed-eu whoami | grep '^address:' | awk '{print $2}')
 docker compose stop seed-eu 2>/dev/null
 sleep 2
 docker compose start seed-eu 2>/dev/null
 sleep 2
-start_daemon seed-eu --key /data/tc.key
+start_daemon seed-eu
 sleep 5
-SEED_EU_TOKEN_AFTER=$(dn seed-eu zens token)
+SEED_EU_TOKEN_AFTER=$(dn seed-eu whoami | grep '^address:' | awk '{print $2}')
 [[ "$SEED_EU_TOKEN_BEFORE" == "$SEED_EU_TOKEN_AFTER" ]] && ok "P6.1 seed-eu token stable across restart" || bad "P6.1 token stable" "before: $SEED_EU_TOKEN_BEFORE after: $SEED_EU_TOKEN_AFTER"
 
 printf "\n===== Phase 7: Idempotency =====\n"

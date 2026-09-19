@@ -49,21 +49,33 @@ docker build -t driftnode .
 driftnode --db ~/.driftnode/node.db init -p "your-passphrase"
 # -> driftnode:9f2a...c001
 
+# Set your public zen name (shown in the crawl cache)
+driftnode --db ~/.driftnode/node.db profile -p "your-passphrase" --name "marx"
+
+# Start the daemon (background networking: sync, crawl, zen exchange)
+driftnode --db ~/.driftnode/node.db daemon
+# In another terminal, unlock the signing key once so the commands below
+# don't need a passphrase on every call:
+driftnode --db ~/.driftnode/node.db daemon unlock
+# -> prompts for your passphrase, keeps the key in memory until lock/stop
+
 # Post something
-driftnode --db ~/.driftnode/node.db post -p "your-passphrase" "gm, the sun is out"
+driftnode --db ~/.driftnode/node.db post "gm, the sun is out"
 
 # Read your local timeline (posts from people you follow, merged by time)
 driftnode --db ~/.driftnode/node.db feed
 
 # Follow someone (paste their driftnode: identity string)
-driftnode --db ~/.driftnode/node.db follow -p "your-passphrase" driftnode:abc123...
+driftnode --db ~/.driftnode/node.db follow driftnode:abc123...
 
-# Start the daemon (background networking: sync, crawl, zen exchange)
-driftnode --db ~/.driftnode/node.db daemon
-# In another terminal:
+# Trigger a sync round and see who you're connected to
 driftnode --db ~/.driftnode/node.db sync
 driftnode --db ~/.driftnode/node.db zens list
 ```
+
+When the daemon isn't running, every signing command (`post`, `follow`,
+`unfollow`, `profile`, `detail`) falls back to opening the store directly and
+needs `-p <passphrase>`.
 
 ## How it works
 
@@ -83,24 +95,28 @@ hostname baked in. The private key signs every event you publish. Losing the
 key means losing the identity; there is no account recovery. Back it up:
 
 ```sh
-driftnode --db ~/.driftnode/node.db backup export -o my-account.cbor
+driftnode --db ~/.driftnode/node.db backup export -o my-account.cbor -p "your-passphrase"
 # Store this file safely. It is your account.
 ```
 
 Restore or migrate to a new device:
 
 ```sh
-driftnode --db ~/.driftnode/node.db backup import my-account.cbor
+driftnode --db ~/.driftnode/node.db backup import my-account.cbor -p "your-passphrase"
 ```
 
 ### Event logs
 
-Each identity has two append-only logs of signed events:
+Each identity has three append-only logs of signed events:
 
-- **Profile log**: display name, bio, follow/unfollow events. Small, public,
-  fetched by the crawler. Anyone can request it without touching your posts.
+- **Profile log**: your zen name, avatar, and follow/unfollow edges. Small,
+  public, fetched and durably cached by the crawler. Anyone can request it
+  without touching your posts.
 - **Post log**: posts, replies, likes, deletes. Only synced with zens who
   follow you.
+- **Detail log**: bio, first/last name, location. Never crawled or cached by
+  peers; a zen fetches it on demand to show your full profile and discards it
+  afterwards.
 
 Events are immutable and individually signed. Merging two zens' views is a
 set union, not a conflict resolution. This is the same model as Nostr and
@@ -118,9 +134,9 @@ synced with merges zero new events.
 
 Three mechanisms, in order of how much infrastructure they need:
 
-1. **Manual connection**: share your Tailcat token or `driftnode:` identity
-   string directly with someone. `driftnode follow <token-or-pubkey>` dials a
-   specific node and adds a follow edge in one gesture.
+1. **Manual connection**: share your `driftnode:` identity string directly
+   with someone. `driftnode follow <pubkey>` dials the node (resolving its
+   current address token automatically) and adds a follow edge in one gesture.
 2. **Bootstrap file**: a signed `bootstrap.yaml` lists seed zens and crawl
    seeds. A fresh node fetches it, verifies the signature, auto-dials the
    seeds, and starts crawling the follow graph from the crawl seeds.
@@ -135,16 +151,22 @@ of the network through this exchange, without any central directory.
 ### The daemon
 
 The daemon is a long-running process that holds network state: Tailcat
-tunnels, the crawl cache, active zen connections. CLI commands that need the
-network (`sync`, `zens`, `bootstrap`) talk to the daemon over a local control
-socket. Commands that don't (`post`, `whoami`, `feed`) work offline, directly
-on the local store, and queue for the next sync.
+tunnels, the crawl cache, active zen connections. Network commands (`sync`,
+`zens`, `bootstrap`) talk to it over a local control socket. Signing and read
+commands (`post`, `follow`, `whoami`, `feed`) prefer the daemon when it is
+running, and fall back to opening the store directly when it isn't (passing
+`-p` to unlock the key).
+
+The daemon keeps your signing key locked at rest. Unlock it once after
+starting so the commands above don't re-supply the passphrase on every call:
 
 ```sh
 driftnode --db ~/.driftnode/node.db daemon            # start in background
 driftnode --db ~/.driftnode/node.db daemon --foreground  # logs to stdout
+driftnode --db ~/.driftnode/node.db daemon unlock     # hold the key in memory
+driftnode --db ~/.driftnode/node.db daemon lock       # clear the in-memory key
 driftnode --db ~/.driftnode/node.db daemon stop       # stop via control socket
-driftnode --db ~/.driftnode/node.db daemon status     # check if running
+driftnode --db ~/.driftnode/node.db daemon status     # running, zens, transport, unlocked
 ```
 
 ### The TUI
@@ -153,43 +175,62 @@ driftnode --db ~/.driftnode/node.db daemon status     # check if running
 driftnode --db ~/.driftnode/node.db tui
 ```
 
-A terminal dashboard showing your live feed, connected zens, sync status, and
-an inline compose box. Vim-style keybindings: `j`/`k` scroll, `i` to compose,
-`Esc` to unfocus, `q` to quit.
+A tabbed terminal dashboard: **Feed** (your merged timeline), **Zens**
+(discovered and connected zens), **Follows** (who you follow), and
+**Followers** (who follows you), with a persistent compose line. The TUI is a
+thin client of the daemon's control socket (which must be running and
+unlocked), so it never opens the store itself. Keys: `Tab`/`Shift+Tab` switch
+tabs, `Enter` posts, `Esc` clears a half-typed post (or quits when the line is
+empty), `Ctrl+C` quits. On the Zens tab, `i`/`f`/`u` act on the selected zen
+(info, follow, unfollow).
 
 ## Command reference
 
 | Command | Purpose |
 |---|---|
 | `init -p <passphrase>` | Generate an Ed25519 identity |
-| `whoami` | Print your identity string |
-| `post -p <passphrase> "<text>"` | Append a signed post |
+| `whoami` | Print your identity, address token, zen name, and detail fields |
+| `post [-p <passphrase>] "<text>"` | Append a signed post |
 | `feed [--limit N]` | Print your merged timeline |
-| `follow -p <passphrase> <pubkey-or-token>` | Follow an identity (dial + follow if given a token) |
-| `unfollow -p <passphrase> <pubkey>` | Unfollow an identity |
+| `follow [-p <passphrase>] <pubkey>` | Follow an identity (dials and syncs) |
+| `unfollow [-p <passphrase>] <pubkey>` | Unfollow an identity |
+| `follows` | List the identities this zen follows |
+| `followers` | List the identities that follow this zen |
+| `profile [-p <passphrase>] --name <name>` | Set your public zen name |
+| `detail [-p <passphrase>] [--bio \| --first-name \| --last-name \| --location <v>]` | Set personal metadata shown only on direct request |
 | `daemon [--foreground]` | Start the networking daemon |
+| `daemon unlock [-p <passphrase>]` | Unlock the daemon's signing key |
+| `daemon lock` | Clear the daemon's in-memory signing key |
 | `daemon stop` | Stop the daemon |
-| `daemon status` | Check daemon status |
+| `daemon status` | Show running, zens, transport, and unlocked state |
 | `sync` | Trigger a sync round |
-| `zens list` | Show connected zens |
-| `zens token` | Print your node's address token |
+| `rotate-key` | Generate a fresh address token, persist it, and restart the listener |
+| `zens list` | Show connected zens (identity, name, verified status) |
+| `zens verify <identity>` | Mark an identity confirmed out-of-band |
+| `zens unverify <identity>` | Remove an out-of-band confirmation |
 | `bootstrap keygen [--key-out <path> \| --key <path>]` | Generate a bootstrap signing keypair, or derive the public key from an existing private key |
 | `bootstrap sign <file> --key <keyfile>` | Sign a bootstrap.yaml |
 | `bootstrap verify <file> [--key <pubkey-file>]` | Verify a bootstrap.yaml against a base64 public key file |
-| `backup export [-o <path>]` | Export your account to a single file |
-| `backup import <path>` | Restore from a backup file |
+| `backup export [-o <path>] [-p <passphrase>]` | Export your account (including the transport key) to a single file |
+| `backup import <path> [-p <passphrase>]` | Restore from a backup file |
 | `key export [-o <path>]` | Export your encrypted keypair |
 | `key import <path> -p <passphrase>` | Import an encrypted keypair |
 | `tui` | Launch the terminal UI |
 | `relay status` | Check relay/bootstrap role |
+| `relay enable` | Opt in to advertising as a relay candidate (not yet implemented) |
+| `relay disable` | Opt out of advertising as a relay candidate (not yet implemented) |
+
+For signing commands, `-p <passphrase>` is optional when the daemon is
+unlocked and required when it is not.
 
 Daemon flags:
 
 | Flag | Purpose |
 |---|---|
-| `--key <path>` | Persistent Tailcat key file (stable address token across restarts) |
+| `--ephemeral` | Generate a fresh address token each run (do not persist the transport key) |
 | `--bootstrap <path>` | Load a signed bootstrap.yaml and auto-dial its seed zens |
 | `--bootstrap-key <path>` | File containing the base64 Ed25519 public key that signed the bootstrap |
+| `--idle-lock <duration>` | Auto-lock the signing key after this idle period (e.g. `5m`, `1h`); default keeps it unlocked until `daemon lock` or stop |
 | `--foreground` | Run in foreground with logs on stdout |
 
 ## Data location
