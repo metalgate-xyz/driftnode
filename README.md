@@ -67,6 +67,15 @@ driftnode --db ~/.driftnode/node.db zens list
 
 ## How it works
 
+### Zen
+
+A driftnode user is a *zen*: a citizen without a city. The city is the
+central server, and driftnode has none, so nothing holds your account, your
+posts, or your social graph but you. Your node is your data, and because no
+server keeps a copy for you, you are responsible for it. Back it up, hold
+your own keys, and keep your node online to stay reachable. Lose the key and
+the identity is gone, with no recovery and no one to ask.
+
 ### Identity
 
 Your identity is `driftnode:<base32-pubkey>`. There is no username, no email, no
