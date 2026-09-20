@@ -892,6 +892,25 @@ func daemonCmd() *cobra.Command {
 				d.SetIdleLock(dur)
 			}
 			d.SetSyncConcurrency(syncConcurrency)
+			// When started interactively with a TTY, decrypt the signing
+			// key before Start so the daemon can sync, crawl, and run
+			// bootstrap auto-follow from the first moment. Non-interactive
+			// starts (no TTY, e.g. detached in a container) stay locked;
+			// the 'daemon unlock' RPC covers those.
+			if _, err := s.EncryptedKey(); err == nil && term.IsTerminal(int(os.Stdin.Fd())) {
+				passphrase, err := readPassphrase("passphrase: ")
+				if err != nil {
+					return err
+				}
+				if passphrase != "" {
+					kp, err := loadKey(s, passphrase)
+					if err != nil {
+						return err
+					}
+					d.SetUnlockedKey(kp)
+					cmd.Println("key unlocked")
+				}
+			}
 			if err := d.Start(sock); err != nil {
 				return err
 			}

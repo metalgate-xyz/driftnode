@@ -169,6 +169,16 @@ func (d *Daemon) SetSyncConcurrency(n int) {
 	d.mu.Unlock()
 }
 
+// SetUnlockedKey installs a decrypted keypair so the daemon can sign and run
+// bootstrap auto-follow from Start, without waiting for an unlock RPC. Used
+// by interactive daemon starts that prompt for the passphrase before Start.
+func (d *Daemon) SetUnlockedKey(kp *core.KeyPair) {
+	d.mu.Lock()
+	d.unlocked = kp
+	d.lastSignAt = time.Now()
+	d.mu.Unlock()
+}
+
 // ErrNotRunning is returned when a client dials a socket with no daemon
 // listening, so callers can distinguish a down daemon from an in-daemon
 // error.
@@ -224,6 +234,9 @@ func (d *Daemon) Start(socketPath string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	d.syncCancel = cancel
 	go d.syncLoop(ctx)
+	// Trigger an immediate first round so a reattached daemon pulls the
+	// logs it missed while down, instead of waiting up to syncInterval.
+	d.triggerSyncNow()
 
 	// Auto-dial bootstrap seed zens (section 6.1). A fresh node finds its
 	// first zens this way; the file is verified before any dial.
