@@ -40,8 +40,8 @@ func TestSendRequestZens(t *testing.T) {
 	d.Start(sock)
 	defer d.Stop()
 
-	d.AddZen("p1", "native", "connected")
-	d.AddZen("p2", "browser", "connected")
+	d.upsertZen("p1", "native", "connected")
+	d.upsertZen("p2", "browser", "connected")
 
 	resp, err := SendRequest(sock, "zens", nil)
 	if err != nil {
@@ -70,7 +70,7 @@ func TestSendRequestVerifyZens(t *testing.T) {
 		t.Fatalf("NewKeyPair: %v", err)
 	}
 	peerID := peerKP.Identity()
-	d.AddZen("p1", "native", "connected")
+	d.upsertZen("p1", "native", "connected")
 	if err := s.PutRouting(peerID, "p1"); err != nil {
 		t.Fatalf("PutRouting: %v", err)
 	}

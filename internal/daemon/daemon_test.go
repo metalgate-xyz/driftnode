@@ -118,8 +118,8 @@ func TestDaemonZens(t *testing.T) {
 	d.Start(sock)
 	defer d.Stop()
 
-	d.AddZen("zen1", "native", "connected")
-	d.AddZen("zen2", "browser", "connected")
+	d.upsertZen("zen1", "native", "connected")
+	d.upsertZen("zen2", "browser", "connected")
 
 	conn, _ := Dial(sock)
 	defer conn.Close()

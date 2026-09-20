@@ -73,8 +73,8 @@ type FollowSet struct {
 	set map[[32]byte]bool
 }
 
-// NewFollowSet constructs an empty follow set.
-func NewFollowSet() *FollowSet { return &FollowSet{set: make(map[[32]byte]bool)} }
+// newFollowSet constructs an empty follow set.
+func newFollowSet() *FollowSet { return &FollowSet{set: make(map[[32]byte]bool)} }
 
 // Contains reports whether target is currently followed.
 func (f *FollowSet) Contains(target [32]byte) bool { return f.set[target] }
@@ -107,7 +107,7 @@ func (f *FollowSet) Apply(se SignedEvent) {
 // FollowSet projects the full Profile log into the current follow set by
 // replaying events in timestamp order (§7.1).
 func (l *Log) FollowSet() *FollowSet {
-	fs := NewFollowSet()
+	fs := newFollowSet()
 	for _, se := range l.SortedByTime() {
 		fs.Apply(se)
 	}

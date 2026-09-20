@@ -46,7 +46,7 @@ type Daemon struct {
 	logger   *slog.Logger
 	mu       sync.Mutex
 	listener net.Listener
-	zens     map[string]*ZenInfo
+	zens     map[string]*zenInfo
 
 	// Network state. The tailcat listener accepts inbound sync connections;
 	// nil when the transport is unavailable (the daemon still serves the
@@ -95,8 +95,8 @@ type Daemon struct {
 	bootstrapDone bool
 }
 
-// ZenInfo describes a known zen and its connection state.
-type ZenInfo struct {
+// zenInfo describes a known zen and its connection state.
+type zenInfo struct {
 	ID       string `json:"id"`       // tailcat token of the zen
 	Identity string `json:"identity"` // driftnode:<pubkey> once learned, else empty
 	Name     string `json:"name"`     // zen name once known, else empty
@@ -113,7 +113,7 @@ func New(s *store.Store, logger *slog.Logger) *Daemon {
 	return &Daemon{
 		store:       s,
 		logger:      logger,
-		zens:        make(map[string]*ZenInfo),
+		zens:        make(map[string]*zenInfo),
 		knownTokens: make(map[string]bool),
 		syncNow:     make(chan struct{}, 1),
 		done:        make(chan struct{}),
@@ -482,7 +482,7 @@ func (d *Daemon) dispatch(req Request) Response {
 		return d.handleDetail(p.Bio, p.FirstName, p.LastName, p.Location, kp)
 	case "zens":
 		d.mu.Lock()
-		zens := make([]*ZenInfo, 0, len(d.zens))
+		zens := make([]*zenInfo, 0, len(d.zens))
 		for _, p := range d.zens {
 			zens = append(zens, p)
 		}
@@ -636,8 +636,8 @@ func (d *Daemon) dispatch(req Request) Response {
 	}
 }
 
-// FeedItem is one post in the merged feed, serialized to the CLI.
-type FeedItem struct {
+// feedItem is one post in the merged feed, serialized to the CLI.
+type feedItem struct {
 	Timestamp int64  `json:"timestamp"`
 	Author    string `json:"author"`
 	Name      string `json:"name"`
@@ -656,14 +656,14 @@ func (d *Daemon) handleFeed(limit int) Response {
 	if limit > 0 && len(posts) > limit {
 		posts = posts[:limit]
 	}
-	items := make([]FeedItem, 0, len(posts))
+	items := make([]feedItem, 0, len(posts))
 	for _, p := range posts {
 		text := p.Event.Post.Text
 		if p.Event.Reply != nil {
 			text = "(reply) " + text
 		}
 		name, _ := d.store.DisplayName(p.Author)
-		items = append(items, FeedItem{
+		items = append(items, feedItem{
 			Timestamp: p.Event.Timestamp,
 			Author:    p.Author.String(),
 			Name:      name,
@@ -958,7 +958,7 @@ func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
 		// Preserve identity/name learned via exchange; just update status.
 		p.Status = "connecting"
 	} else {
-		d.zens[token] = &ZenInfo{ID: token, Kind: "native_zen", Status: "connecting"}
+		d.zens[token] = &zenInfo{ID: token, Kind: "native_zen", Status: "connecting"}
 	}
 	transport := d.transport
 	d.mu.Unlock()
@@ -1058,9 +1058,9 @@ func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 		d.logger.Warn("unfollow: delete routing", "zen", id, "err", err)
 	}
 	if hadToken {
-		d.RemoveZen(token)
+		d.removeZen(token)
 	} else {
-		d.RemoveZen(string(id))
+		d.removeZen(string(id))
 	}
 	d.touchSignAt()
 	d.triggerSyncNow()
@@ -1167,7 +1167,7 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 		if already {
 			continue
 		}
-		d.addZen(sp.Token, sp.Kind, "connecting")
+		d.upsertZen(sp.Token, sp.Kind, "connecting")
 		// handleFollow -> followByToken dials, handshakes, writes the
 		// Follow event, binds routing, and marks the token known on
 		// success. On failure the token stays unmarked so a retry can
@@ -1249,7 +1249,7 @@ func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
 	_, exists := d.zens[ref.Token]
 	d.mu.Unlock()
 	if !exists {
-		d.addZen(ref.Token, "native_zen", "discovered")
+		d.upsertZen(ref.Token, "native_zen", "discovered")
 	}
 	if ref.Identity != "" {
 		// Seed the crawler so the signed ProfileLog is fetched on the
@@ -1435,20 +1435,15 @@ func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
 	}
 }
 
-// AddZen records a connected zen.
-func (d *Daemon) AddZen(id, kind, status string) {
+// upsertZen records a zen in the given state, overwriting any existing entry.
+func (d *Daemon) upsertZen(id, kind, status string) {
 	d.mu.Lock()
-	d.zens[id] = &ZenInfo{ID: id, Kind: kind, Status: status}
+	d.zens[id] = &zenInfo{ID: id, Kind: kind, Status: status}
 	d.mu.Unlock()
 }
 
-// addZen is the internal recorder for zen connection state.
-func (d *Daemon) addZen(id, kind, status string) {
-	d.AddZen(id, kind, status)
-}
-
-// RemoveZen removes a zen record.
-func (d *Daemon) RemoveZen(id string) {
+// removeZen removes a zen record.
+func (d *Daemon) removeZen(id string) {
 	d.mu.Lock()
 	delete(d.zens, id)
 	d.mu.Unlock()

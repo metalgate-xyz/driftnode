@@ -36,16 +36,11 @@ type KeyConfig struct {
 	KeyBytes []byte
 }
 
-// NewListener creates a tailcat listener that accepts inbound connections and
-// dispatches them to handler. The handler receives a duplex byte stream over
-// which the sync protocol runs. OnTCP returns a fresh handler per inbound
-// connection, so one listener handles many concurrent zens (section 5.1).
-func NewListener(handler func(net.Conn), logger *slog.Logger) (*Listener, error) {
-	return NewListenerWithKey(handler, logger, nil)
-}
-
-// NewListenerWithKey is like NewListener but allows a pre-existing key to be
-// loaded via KeyConfig. A nil keyCfg generates a fresh ephemeral key.
+// NewListenerWithKey creates a tailcat listener that accepts inbound
+// connections and dispatches them to handler. The handler receives a duplex
+// byte stream over which the sync protocol runs. OnTCP returns a fresh
+// handler per inbound connection, so one listener handles many concurrent
+// zens (section 5.1). A nil keyCfg generates a fresh ephemeral key.
 func NewListenerWithKey(handler func(net.Conn), logger *slog.Logger, keyCfg *KeyConfig) (*Listener, error) {
 	priv := tailcat.NewPrivateKey()
 	if keyCfg != nil && len(keyCfg.KeyBytes) > 0 {

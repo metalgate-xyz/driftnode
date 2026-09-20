@@ -14,7 +14,7 @@ import (
 func skipIfNoTailcat(t *testing.T) {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	l, err := NewListener(func(net.Conn) {}, logger)
+	l, err := NewListenerWithKey(func(net.Conn) {}, logger, nil)
 	if err != nil {
 		t.Skipf("tailcat not available in this environment: %v", err)
 	}
@@ -33,9 +33,9 @@ func TestTransportRoundTrip(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	listener, err := NewListener(handler, logger)
+	listener, err := NewListenerWithKey(handler, logger, nil)
 	if err != nil {
-		t.Fatalf("NewListener: %v", err)
+		t.Fatalf("NewListenerWithKey: %v", err)
 	}
 	defer listener.Close()
 
@@ -76,9 +76,9 @@ func TestTransportRoundTrip(t *testing.T) {
 func TestListenerAddr(t *testing.T) {
 	skipIfNoTailcat(t)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	listener, err := NewListener(func(net.Conn) {}, logger)
+	listener, err := NewListenerWithKey(func(net.Conn) {}, logger, nil)
 	if err != nil {
-		t.Fatalf("NewListener: %v", err)
+		t.Fatalf("NewListenerWithKey: %v", err)
 	}
 	defer listener.Close()
 

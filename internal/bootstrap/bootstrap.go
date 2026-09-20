@@ -60,16 +60,16 @@ func (f *File) content() signedContent {
 	}
 }
 
-// MarshalContent returns the canonical YAML of the file content (without the
+// marshalContent returns the canonical YAML of the file content (without the
 // signature), which is what the signature covers.
-func (f *File) MarshalContent() ([]byte, error) {
+func (f *File) marshalContent() ([]byte, error) {
 	return yaml.Marshal(f.content())
 }
 
 // Sign computes the Ed25519 signature over the canonical content and sets
 // the Signature field.
 func (f *File) Sign(priv ed25519.PrivateKey) error {
-	content, err := f.MarshalContent()
+	content, err := f.marshalContent()
 	if err != nil {
 		return fmt.Errorf("marshal content: %w", err)
 	}
@@ -85,7 +85,7 @@ func (f *File) Verify(pub ed25519.PublicKey) error {
 	if err != nil {
 		return err
 	}
-	content, err := f.MarshalContent()
+	content, err := f.marshalContent()
 	if err != nil {
 		return fmt.Errorf("marshal content: %w", err)
 	}
