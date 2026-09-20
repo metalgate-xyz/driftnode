@@ -34,10 +34,12 @@ dn()  { docker exec "$1" driftnode --db /data/node.db "${@:2}" 2>&1; }
 # Run a driftnode command inside a container, suppress output, return exit code.
 dnq() { docker exec "$1" driftnode --db /data/node.db "${@:2}" >/dev/null 2>&1; }
 
-# Start the daemon inside a container, logging to /data/daemon.log.
+# Start the daemon inside a container, detached so it survives the exec
+# shell and can be restarted remotely via 'daemon restart'. The child's
+# slog output goes to /data/daemon.log via --log.
 start_daemon() {
   local container="$1"; shift
-  docker exec -d "$container" sh -c "driftnode --db /data/node.db daemon --foreground $* > /data/daemon.log 2>&1"
+  docker exec -d "$container" sh -c "driftnode --db /data/node.db daemon --detached --log /data/daemon.log $*"
 }
 
 # Unlock a node's signing key so post/follow omit the passphrase. Run after

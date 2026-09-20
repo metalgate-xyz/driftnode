@@ -7,10 +7,14 @@ package cli
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -852,17 +856,30 @@ func loadKey(s *store.Store, passphrase string) (*core.KeyPair, error) {
 // --- daemon and network commands ---
 
 func daemonCmd() *cobra.Command {
-	var foreground bool
+	var detached bool
+	var detachedChild bool
+	var logFile string
 	var ephemeral bool
 	var bootstrapFile string
 	var bootstrapKeyFile string
 	var idleLockStr string
 	var syncConcurrency int
-	c := &cobra.Command{
+	var c *cobra.Command
+	c = &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the long-running daemon and control socket",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --detached forks a background child (in a new session) and
+			// returns immediately; the parent exits 0. The child re-runs
+			// this command with the internal --detached-child marker so it
+			// does not fork again, and runs in foreground (blocking) mode.
+			// The child's stdio is already pointed at the log file by the
+			// parent, so slog output is captured without further setup.
+			if detached && !detachedChild {
+				return spawnDetachedDaemon(cmd, c, logFile)
+			}
+
 			s, err := openStoreAt(dbPath)
 			if err != nil {
 				return err
@@ -915,7 +932,9 @@ func daemonCmd() *cobra.Command {
 				return err
 			}
 			cmd.Println("daemon started on", sock)
-			if !foreground {
+			if detachedChild {
+				cmd.Println("logs:", logFile)
+			} else {
 				cmd.Println("press Ctrl+C to stop")
 			}
 			sig := make(chan os.Signal, 1)
@@ -929,14 +948,92 @@ func daemonCmd() *cobra.Command {
 		},
 	}
 	addDBFlagPersistent(c)
-	c.AddCommand(daemonStopCmd(), daemonStatusCmd(), daemonUnlockCmd(), daemonLockCmd())
-	c.Flags().BoolVarP(&foreground, "foreground", "f", false, "run in foreground with logs on stdout")
+	c.AddCommand(daemonStopCmd(), daemonRestartCmd(), daemonStatusCmd(), daemonUnlockCmd(), daemonLockCmd())
+	c.Flags().BoolVarP(&detached, "detached", "d", false, "run in the background (default: foreground)")
+	c.Flags().BoolVar(&detachedChild, "detached-child", false, "internal: marks the background child forked by --detached")
+	_ = c.Flags().MarkHidden("detached-child")
+	c.Flags().StringVar(&logFile, "log", "", "log file path for --detached (default: a file next to the control socket)")
 	c.Flags().BoolVar(&ephemeral, "ephemeral", false, "generate a fresh address token each run (do not persist the transport key)")
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h); default keeps it unlocked until 'daemon lock' or stop")
 	c.Flags().IntVar(&syncConcurrency, "sync-concurrency", 8, "maximum number of zen dials to run in parallel during a sync round")
 	return c
+}
+
+// spawnDetachedDaemon re-executes the current binary as a background child in
+// a new session, with stdio redirected to a log file, then returns so the
+// parent exits. The child is marked with --detached-child so it runs in the
+// foreground (blocking) branch and does not fork again. parent holds the
+// start flags to forward (ephemeral, bootstrap, ...); logPath is the log file
+// to capture the child's stdout/stderr (empty resolves a default next to the
+// control socket). The child inherits the log file as its stdio, so the
+// daemon's slog output is captured without further setup.
+func spawnDetachedDaemon(cmd *cobra.Command, parent *cobra.Command, logPath string) error {
+	if logPath == "" {
+		logPath = defaultDaemonLogPath()
+	}
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return fmt.Errorf("create log dir: %w", err)
+	}
+
+	childArgs := []string{"--db", dbPath, "daemon", "--detached", "--detached-child", "--log", logPath}
+	for _, f := range []string{"ephemeral", "bootstrap", "bootstrap-key", "idle-lock", "sync-concurrency"} {
+		if parent.Flags().Changed(f) {
+			childArgs = append(childArgs, "--"+f, parent.Flags().Lookup(f).Value.String())
+		}
+	}
+
+	bin, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve executable: %w", err)
+	}
+	c := exec.Command(bin, childArgs...)
+	c.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err == nil {
+		c.Stdin = devnull
+	}
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("open log file: %w", err)
+	}
+	c.Stdout = logf
+	c.Stderr = logf
+	if err := c.Start(); err != nil {
+		return fmt.Errorf("start detached daemon: %w", err)
+	}
+	cmd.Printf("daemon started detached on %s\n", mustSocketPath())
+	cmd.Printf("logs: %s\n", logPath)
+	cmd.Println("use 'driftnode daemon stop' to stop it")
+	return nil
+}
+
+// mustSocketPath returns the control socket path, or "(unknown)" if the db
+// path is unset. Used after a successful fork to report the socket to the user.
+func mustSocketPath() string {
+	sock, err := daemonSocketPath()
+	if err != nil {
+		return "(unknown)"
+	}
+	return sock
+}
+
+// defaultDaemonLogPath returns a log file path next to the control socket,
+// so a detached daemon's logs stay per-store.
+func defaultDaemonLogPath() string {
+	sock, err := daemonSocketPath()
+	if err != nil || sock == "" {
+		return filepath.Join(os.TempDir(), "driftnode-daemon.log")
+	}
+	dir := filepath.Dir(sock)
+	h := sha256Of(dbPath)
+	return filepath.Join(dir, "daemon-"+h+".log")
+}
+
+func sha256Of(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:8])
 }
 
 func daemonUnlockCmd() *cobra.Command {
@@ -1054,6 +1151,63 @@ func daemonStopCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// daemonRestartCmd stops a running daemon, waits for its control socket to
+// disappear, then starts a fresh detached daemon with the same start flags.
+// It is the recovery path for a daemon whose tailcat connection has wedged:
+// a fresh process rebinds the transport key and re-dials the follow graph.
+func daemonRestartCmd() *cobra.Command {
+	var logFile string
+	var ephemeral bool
+	var bootstrapFile string
+	var bootstrapKeyFile string
+	var idleLockStr string
+	var syncConcurrency int
+	var c *cobra.Command
+	c = &cobra.Command{
+		Use:   "restart",
+		Short: "Stop the running daemon and start a fresh one",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sock, err := daemonSocketPath()
+			if err != nil {
+				return err
+			}
+			// Stop the running daemon. A not-running error is fine: restart
+			// can launch a fresh daemon even when none is up.
+			if _, err := daemon.SendRequest(sock, "stop", nil); err == nil {
+				cmd.Println("daemon stopping")
+				if err := waitForSocketGone(sock, 5*time.Second); err != nil {
+					return fmt.Errorf("old daemon did not shut down: %w", err)
+				}
+			}
+			return spawnDetachedDaemon(cmd, c, logFile)
+		},
+	}
+	addDBFlag(c)
+	c.Flags().StringVar(&logFile, "log", "", "log file path for the relaunched daemon (default: next to the control socket)")
+	c.Flags().BoolVar(&ephemeral, "ephemeral", false, "generate a fresh address token each run (do not persist the transport key)")
+	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
+	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
+	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h)")
+	c.Flags().IntVar(&syncConcurrency, "sync-concurrency", 8, "maximum number of zen dials to run in parallel during a sync round")
+	return c
+}
+
+// waitForSocketGone polls until the control socket no longer accepts
+// connections, or the timeout elapses.
+func waitForSocketGone(sock string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("unix", sock)
+		if err != nil {
+			return nil
+		}
+		conn.Close()
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("timeout")
 }
 
 func daemonStatusCmd() *cobra.Command {

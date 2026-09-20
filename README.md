@@ -161,9 +161,10 @@ The daemon keeps your signing key locked at rest. Unlock it once after
 starting so the commands above don't re-supply the passphrase on every call:
 
 ```sh
-driftnode --db ~/.driftnode/node.db daemon            # start in background
-driftnode --db ~/.driftnode/node.db daemon --foreground  # logs to stdout
-driftnode --db ~/.driftnode/node.db daemon unlock     # hold the key in memory
+driftnode --db ~/.driftnode/node.db daemon            # start in foreground (logs to stdout)
+driftnode --db ~/.driftnode/node.db daemon -d         # start in background (logs to a file)
+driftnode --db ~/.driftnode/node.db daemon restart    # stop and start a fresh daemon (detached)
+driftnode --db ~/.driftnode/node.db daemon unlock    # hold the key in memory
 driftnode --db ~/.driftnode/node.db daemon lock       # clear the in-memory key
 driftnode --db ~/.driftnode/node.db daemon stop       # stop via control socket
 driftnode --db ~/.driftnode/node.db daemon status     # running, zens, transport, unlocked
@@ -198,7 +199,8 @@ empty), `Ctrl+C` quits. On the Zens tab, `i`/`f`/`u` act on the selected zen
 | `followers` | List the identities that follow this zen |
 | `profile [-p <passphrase>] --name <name>` | Set your public zen name |
 | `detail [-p <passphrase>] [--bio \| --first-name \| --last-name \| --location <v>]` | Set personal metadata shown only on direct request |
-| `daemon [--foreground]` | Start the networking daemon |
+| `daemon [-d]` | Start the networking daemon (default foreground; `-d` to run in background) |
+| `daemon restart` | Stop the running daemon and start a fresh one (detached) |
 | `daemon unlock [-p <passphrase>]` | Unlock the daemon's signing key |
 | `daemon lock` | Clear the daemon's in-memory signing key |
 | `daemon stop` | Stop the daemon |
@@ -231,7 +233,7 @@ Daemon flags:
 | `--bootstrap <path>` | Load a signed bootstrap.yaml and auto-dial its seed zens |
 | `--bootstrap-key <path>` | File containing the base64 Ed25519 public key that signed the bootstrap |
 | `--idle-lock <duration>` | Auto-lock the signing key after this idle period (e.g. `5m`, `1h`); default keeps it unlocked until `daemon lock` or stop |
-| `--foreground` | Run in foreground with logs on stdout |
+| `-d`, `--detached` | Run in the background with logs to a file (default: foreground with logs on stdout) |
 
 ## Data location
 

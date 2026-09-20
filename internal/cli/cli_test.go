@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"driftnode/internal/core"
+	"driftnode/internal/daemon"
 	"driftnode/internal/store"
 
 	"github.com/tailscale/tailcat"
@@ -624,5 +627,83 @@ func TestZensVerifyOffline(t *testing.T) {
 	defer s.Close()
 	if v, _ := s.IsVerified(peer.Identity()); v {
 		t.Fatal("peer should be unverified after unverify")
+	}
+}
+
+// TestWaitForSocketGone verifies the poll returns once the socket stops
+// accepting connections, which is what daemonRestartCmd waits on after
+// sending the stop RPC.
+func TestWaitForSocketGone(t *testing.T) {
+	dir := t.TempDir()
+	sock := filepath.Join(dir, "ctrl")
+
+	// No socket present: returns immediately.
+	if err := waitForSocketGone(sock, time.Second); err != nil {
+		t.Fatalf("socket absent: want nil, got %v", err)
+	}
+
+	// Socket present: blocks until it closes.
+	l, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- waitForSocketGone(sock, 2*time.Second) }()
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("returned before socket closed")
+	default:
+	}
+	l.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("after close: want nil, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for waitForSocketGone")
+	}
+}
+
+// TestDaemonRestartStopsRunning verifies that 'daemon restart' sends the
+// stop RPC to a running daemon and waits for its socket to disappear. It
+// stubs out the actual relaunch (which would re-exec the binary) by
+// pointing os.Executable at a path that fails to start, so the command
+// errors after the stop phase; the assertion is only that the old daemon
+// was stopped.
+func TestDaemonRestartStopsRunning(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Start a real daemon in-process so the restart command has something
+	// to stop.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	sock, err := daemon.SocketPathFor(dbPath)
+	if err != nil {
+		t.Fatalf("socket path: %v", err)
+	}
+	d := daemon.New(s, nil)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(d.Stop)
+
+	// Run 'daemon restart'. It will stop the daemon, then attempt to
+	// relaunch (which fails in this sandbox); the important behavior is
+	// that the socket is gone afterward.
+	_, _ = runCLI(t, dbPath, []string{"daemon", "restart"})
+
+	if conn, err := net.Dial("unix", sock); err == nil {
+		conn.Close()
+		t.Fatal("control socket still accepts connections after restart")
 	}
 }

@@ -43,7 +43,7 @@ driftnode --db /var/lib/driftnode/node.db init -p "your-passphrase"
 Start the daemon with the `--key` flag to persist the Tailcat key:
 
 ```sh
-driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
+driftnode --db /var/lib/driftnode/node.db daemon --key /var/lib/driftnode/tc.key
 ```
 
 The key file is created on first run and reused on subsequent restarts. The
@@ -66,7 +66,7 @@ Restart the daemon and check the token again:
 
 ```sh
 driftnode --db /var/lib/driftnode/node.db daemon stop
-driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
+driftnode --db /var/lib/driftnode/node.db daemon --key /var/lib/driftnode/tc.key
 driftnode --db /var/lib/driftnode/node.db zens token
 ```
 
@@ -147,7 +147,7 @@ Description=driftnode bootstrap node
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/driftnode --db /var/lib/driftnode/node.db daemon --foreground --key /var/lib/driftnode/tc.key
+ExecStart=/usr/local/bin/driftnode --db /var/lib/driftnode/node.db daemon --key /var/lib/driftnode/tc.key
 Restart=always
 User=driftnode
 StateDirectory=driftnode
@@ -163,7 +163,7 @@ docker run -d \
   --name driftnode-seed \
   --cap-add=NET_ADMIN \
   -v driftnode-data:/data \
-  driftnode driftnode --db /data/node.db daemon --foreground --key /data/tc.key
+  driftnode driftnode --db /data/node.db daemon --key /data/tc.key
 ```
 
 The `--cap-add=NET_ADMIN` flag is required for Tailcat's network monitor.

@@ -400,7 +400,8 @@ driftnode tui                 # bubbletea client → same control socket, live u
 |---|---|
 | `driftnode init` | Generate an Ed25519 keypair, passphrase-encrypt it at rest, create the local `bbolt` store |
 | `driftnode whoami` | Print the identity and its current profile and detail |
-| `driftnode daemon [--foreground] [--ephemeral]` | Start the long-running daemon and control socket (default detached; `--foreground` for field testing with logs on stdout; `--ephemeral` uses a fresh tailcat key this run instead of the persisted one, so the address token changes on restart) |
+| `driftnode daemon [-d] [--ephemeral]` | Start the long-running daemon and control socket (default foreground with logs on stdout; `-d`/`--detached` to run in background with logs to a file; `--ephemeral` uses a fresh tailcat key this run instead of the persisted one, so the address token changes on restart) |
+| `driftnode daemon restart` | Stop the running daemon and start a fresh one (detached); the recovery path for a wedged tailcat connection |
 | `driftnode post "<text>" [--media <path>]` | Append a signed `Post` event to the local PostLog |
 | `driftnode feed [--limit N] [--follow-only]` | Print the merged timeline from local state, no network call |
 | `driftnode follow <pubkey>` / `unfollow <pubkey>` | Add or remove a follow edge, a signed Profile-log event |
