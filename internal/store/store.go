@@ -6,6 +6,7 @@ package store
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -33,6 +34,7 @@ var (
 	bucketRouting   = []byte("routing")   // identity -> tailcat token
 	bucketVerified  = []byte("verified")  // identity -> presence (out-of-band confirmed)
 	bucketTransport = []byte("transport") // tailcat private key, so the node's address token stays stable across restarts
+	bucketCursor   = []byte("cursor")   // per-(author,log) high-water timestamp of last successful pull
 )
 
 // meta keys
@@ -70,7 +72,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketTransport} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketTransport, bucketCursor} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -612,6 +614,42 @@ func (s *Store) RoutingByToken(token string) (core.Identity, bool, error) {
 		})
 	})
 	return found, found != "", err
+}
+
+// SyncCursor returns the high-water timestamp of the last successful pull
+// of (author, log). Returns 0 when no cursor is recorded, so a first pull
+// requests the full log. The cursor is advanced after events are merged,
+// so a re-pull after a dropped connection re-sends and dedups any events
+// already stored (see PutCrawledEvent).
+func (s *Store) SyncCursor(author core.Identity, log core.LogName) (int64, error) {
+	var raw []byte
+	err := s.db.View(func(tx *bolt.Tx) error {
+		raw = tx.Bucket(bucketCursor).Get(cursorKey(author, log))
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	if raw == nil {
+		return 0, nil
+	}
+	return int64(binary.BigEndian.Uint64(raw)), nil
+}
+
+// PutSyncCursor records the high-water timestamp for (author, log).
+func (s *Store) PutSyncCursor(author core.Identity, log core.LogName, ts int64) error {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(ts))
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketCursor).Put(cursorKey(author, log), buf[:])
+	})
+}
+
+func cursorKey(author core.Identity, log core.LogName) []byte {
+	k := make([]byte, 0, len(author)+len(log))
+	k = append(k, []byte(author)...)
+	k = append(k, []byte(log)...)
+	return k
 }
 
 // PutTransportKey stores the tailcat private key bytes, so the node's address

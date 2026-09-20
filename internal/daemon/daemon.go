@@ -93,6 +93,10 @@ type Daemon struct {
 	// Cleared while the key is locked, so the next unlock retries the
 	// bootstrap auto-follow if it ran before the key was available.
 	bootstrapDone bool
+
+	// syncConcurrency caps the number of zen dials that run in parallel
+	// during a sync round. Default 8; 0 falls back to that.
+	syncConcurrency int
 }
 
 // zenInfo describes a known zen and its connection state.
@@ -151,6 +155,17 @@ func (d *Daemon) SetBootstrap(path string, verifyKey ed25519.PublicKey) {
 func (d *Daemon) SetIdleLock(dur time.Duration) {
 	d.mu.Lock()
 	d.idleLock = dur
+	d.mu.Unlock()
+}
+
+// SetSyncConcurrency caps the number of zen dials that run in parallel
+// during a sync round. A zero or negative value falls back to the default.
+func (d *Daemon) SetSyncConcurrency(n int) {
+	if n <= 0 {
+		n = 8
+	}
+	d.mu.Lock()
+	d.syncConcurrency = n
 	d.mu.Unlock()
 }
 
@@ -1292,7 +1307,7 @@ func (d *Daemon) triggerSyncNow() {
 // when syncNow is signaled. It also runs the crawler periodically to walk
 // the follow graph (section 9.3).
 func (d *Daemon) syncLoop(ctx context.Context) {
-	const syncInterval = 5 * time.Minute
+	const syncInterval = 1 * time.Minute
 	const crawlInterval = 10 * time.Minute
 	syncTicker := time.NewTicker(syncInterval)
 	crawlTicker := time.NewTicker(crawlInterval)
@@ -1369,11 +1384,30 @@ func (d *Daemon) syncAllZens() {
 			pending = append(pending, id)
 		}
 	}
-	// Dial bound identities directly.
+	// Dial bound identities in parallel with a bounded fan-out, so a
+	// large follow graph syncs in wall-clock time proportional to
+	// syncConcurrency rather than to the number of follows. The shared
+	// state each session touches is already safe: daemon state is under
+	// d.mu, and bbolt serializes store writes internally.
+	d.mu.Lock()
+	syncConcurrency := d.syncConcurrency
+	d.mu.Unlock()
+	if syncConcurrency <= 0 {
+		syncConcurrency = 8
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, syncConcurrency)
 	for _, id := range bound {
 		token, _, _ := d.store.Routing(id)
-		d.connectAndSync(token)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			d.connectAndSync(token)
+		}()
 	}
+	wg.Wait()
 	// Resolve pending follows by probing known tokens.
 	if len(pending) > 0 {
 		d.resolvePendingFollows(pending)
@@ -1578,6 +1612,8 @@ func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity)
 	sess := syncproto.NewSession(d.store, d.logger)
 	sess.SetZenSource(d.knownRefsList)
 	sess.SetZenSink(d.learnZenRef)
+	sess.SetCursorSource(d.store.SyncCursor)
+	sess.SetCursorSink(d.store.PutSyncCursor)
 	d.mu.Lock()
 	kp := d.unlocked
 	d.mu.Unlock()

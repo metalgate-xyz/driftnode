@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"driftnode/internal/core"
 	"driftnode/internal/store"
@@ -310,6 +311,16 @@ type Session struct {
 	// onAuthed is called with the zen's authenticated driftnode identity
 	// after a successful handshake, before sync traffic begins. May be nil.
 	onAuthed func(core.Identity)
+
+	// cursorZen is the authenticated identity of the remote zen, set by
+	// Handshake. Used to key per-(zen,log) pull cursors.
+	cursorZen core.Identity
+	// cursorSource returns the high-water timestamp for (author, log) so
+	// the next pull requests only newer events. May be nil (pull from zero).
+	cursorSource func(author core.Identity, log core.LogName) (int64, error)
+	// cursorSink records a new high-water timestamp for (author, log).
+	// May be nil (cursors are not persisted).
+	cursorSink func(author core.Identity, log core.LogName, ts int64) error
 }
 
 // NewSession creates a bidirectional sync session.
@@ -335,6 +346,14 @@ func (s *Session) SetZenSource(fn func() []ZenRef) { s.zens = fn }
 // SetZenSink sets the callback invoked for each zen ref learned from the
 // remote side.
 func (s *Session) SetZenSink(fn func(ZenRef)) { s.onZen = fn }
+
+// SetCursorSource sets the function that returns the stored high-water
+// timestamp for (author, log). Without it, pulls request full logs.
+func (s *Session) SetCursorSource(fn func(core.Identity, core.LogName) (int64, error)) { s.cursorSource = fn }
+
+// SetCursorSink sets the function that records a new high-water timestamp
+// for (author, log) after a successful pull.
+func (s *Session) SetCursorSink(fn func(core.Identity, core.LogName, int64) error) { s.cursorSink = fn }
 
 // Handshake authenticates both sides of the connection by proving possession
 // Handshake authenticates both sides' Ed25519 identities before sync traffic
@@ -392,6 +411,7 @@ func (s *Session) Handshake(r io.Reader, w io.Writer) (core.Identity, error) {
 	if !ed25519.Verify(zenPub, ourNonce[:], zenAuth.Auth.Signature) {
 		return "", errors.New("handshake: zen signature verification failed")
 	}
+	s.cursorZen = zenID
 	if s.onAuthed != nil {
 		s.onAuthed(zenID)
 	}
@@ -466,19 +486,32 @@ func (s *Session) RunListener(r io.Reader, w io.Writer) (int, error) {
 	return merged, nil
 }
 
-// pullLog sends a request for one log and merges the received events.
-// A zen closing the connection (EOF) before MsgDone is treated as a clean
-// end of stream: any events already received are kept, and the caller can
-// retry on the next sync round.
+// pullLog sends a request for one log and merges the received events. When
+// the session has a cursor source for the authenticated zen, the request
+// carries the stored high-water timestamp so the server sends only newer
+// events; after the pull, the cursor advances to the max timestamp of the
+// events actually received, so a dropped connection re-sends and dedups
+// any events already stored. A zen closing the connection (EOF) before
+// MsgDone is treated as a clean end of stream: events already received are
+// kept and the cursor advances over them.
 func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int64, author core.Identity) (int, error) {
+	// For the daemon's own pulls (author == ""), use the per-zen cursor so
+	// we request only events newer than the last successful pull.
+	if author == "" && s.cursorZen != "" && s.cursorSource != nil {
+		if c, err := s.cursorSource(s.cursorZen, log); err == nil && c > after {
+			after = c
+		}
+	}
 	if err := WriteMsg(w, NewRequest(log, after, author)); err != nil {
 		return 0, fmt.Errorf("write request: %w", err)
 	}
 	merged := 0
+	var maxTS int64
 	for {
 		msg, err := ReadMsg(r)
 		if err != nil {
 			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				s.advanceCursor(log, after, maxTS)
 				return merged, nil
 			}
 			return merged, fmt.Errorf("read msg: %w", err)
@@ -501,12 +534,43 @@ func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int6
 				if inserted {
 					merged++
 				}
+				if se.Event.Timestamp > maxTS {
+					maxTS = se.Event.Timestamp
+				}
 			}
 		case MsgDone:
+			s.advanceCursor(log, after, maxTS)
 			return merged, nil
 		default:
 			s.log.Warn("sync: unexpected message kind", "kind", msg.Kind)
 		}
+	}
+}
+
+// cursorSkewWindow is subtracted from the max received timestamp when
+// advancing a pull cursor, so events with slightly earlier timestamps
+// (clock skew, out-of-order delivery) are re-requested and deduped rather
+// than dropped. Re-transfer within the window is cheap because
+// PutCrawledEvent is idempotent.
+const cursorSkewWindow = 5 * time.Minute
+
+// advanceCursor records the new high-water timestamp for (zen, log) when
+// the session has a cursor sink. The cursor is set to the max timestamp of
+// received events minus a skew window, or left unchanged when no events
+// arrived.
+func (s *Session) advanceCursor(log core.LogName, prevAfter, maxTS int64) {
+	if s.cursorZen == "" || s.cursorSink == nil {
+		return
+	}
+	if maxTS == 0 {
+		return
+	}
+	c := maxTS - cursorSkewWindow.Nanoseconds()
+	if c < prevAfter {
+		c = prevAfter
+	}
+	if err := s.cursorSink(s.cursorZen, log, c); err != nil {
+		s.log.Warn("sync: cursor advance failed", "err", err)
 	}
 }
 

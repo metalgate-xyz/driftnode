@@ -857,6 +857,7 @@ func daemonCmd() *cobra.Command {
 	var bootstrapFile string
 	var bootstrapKeyFile string
 	var idleLockStr string
+	var syncConcurrency int
 	c := &cobra.Command{
 		Use:   "daemon",
 		Short: "Start the long-running daemon and control socket",
@@ -890,6 +891,7 @@ func daemonCmd() *cobra.Command {
 				}
 				d.SetIdleLock(dur)
 			}
+			d.SetSyncConcurrency(syncConcurrency)
 			if err := d.Start(sock); err != nil {
 				return err
 			}
@@ -914,6 +916,7 @@ func daemonCmd() *cobra.Command {
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h); default keeps it unlocked until 'daemon lock' or stop")
+	c.Flags().IntVar(&syncConcurrency, "sync-concurrency", 8, "maximum number of zen dials to run in parallel during a sync round")
 	return c
 }
 
