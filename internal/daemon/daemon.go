@@ -904,27 +904,62 @@ func (d *Daemon) handleDetail(bio, firstName, lastName, location string, kp *cor
 }
 
 // handleFollow is the single "add a zen" gesture: it records a Follow event
-// for the target identity. The target may be a driftnode identity/pubkey or a
-// tailcat token. When given a token, it dials the zen, learns the identity
+// for the target identity. The target may be a driftnode identity/pubkey or
+// a tailcat token. When given a token, it dials the zen, learns the identity
 // from the session handshake, writes the Follow event, and binds the token
-// to that identity in the routing table. When given a pubkey (the offline
-// path), it writes the Follow event only; the routing binding is filled in
-// later when the identity is contacted.
+// to that identity in the routing table. When given a pubkey, it does the
+// same when a token for that identity is already known (the common case:
+// the zen was discovered via exchange), so the follow connects at once.
+// Only when no token is known yet does it fall back to writing the Follow
+// event and letting the sync loop resolve the token asynchronously.
 func (d *Daemon) handleFollow(targetStr string, kp *core.KeyPair) Response {
 	// Identities and raw base32 pubkeys can be parsed unambiguously, so
 	// try that first; anything else is treated as a token.
 	if target, err := resolvePubkey(targetStr); err == nil {
-		return d.writeFollow(target, kp)
+		return d.followByPubkey(target, kp)
 	}
 	return d.followByToken(targetStr, kp)
+}
+
+// followByPubkey writes a Follow event for the given pubkey. When a token is
+// already known for that identity (the zen was discovered via exchange), it
+// dials, binds the token to the identity in the routing table, and marks the
+// zen connected before returning. When no token is known, it writes the
+// Follow event and triggers a sync round so the sync loop can resolve the
+// token asynchronously.
+func (d *Daemon) followByPubkey(target [32]byte, kp *core.KeyPair) Response {
+	identity := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
+	if tok, ok := d.tokenForIdentity(identity); ok {
+		return d.followByToken(tok, kp)
+	}
+	return d.writeFollow(target, kp)
+}
+
+// tokenForIdentity returns the token of a known zen whose learned identity
+// matches, if any. Used so a follow-by-pubkey can dial a zen that was
+// already discovered via exchange without waiting for the sync loop.
+func (d *Daemon) tokenForIdentity(identity core.Identity) (string, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for tok, p := range d.zens {
+		if core.Identity(p.Identity) == identity {
+			return tok, true
+		}
+	}
+	return "", false
 }
 
 // followByToken dials a tailcat token, runs the handshake to learn the zen's
 // identity, writes a Follow event for it, and binds the token to that
 // identity in the routing table.
 func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
-	d.addZen(token, "native_zen", "connecting")
 	d.mu.Lock()
+	if p, ok := d.zens[token]; ok {
+		// Preserve identity/name learned via exchange; just update status.
+		p.Status = "connecting"
+	} else {
+		d.zens[token] = &ZenInfo{ID: token, Kind: "native_zen", Status: "connecting"}
+	}
 	transport := d.transport
 	d.mu.Unlock()
 	if transport == nil {
@@ -966,6 +1001,8 @@ func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
 }
 
 // writeFollow signs and appends a Follow event for the given target pubkey.
+// It does not dial; callers that can resolve a token should dial via
+// followByToken so the routing is bound immediately.
 func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 	seq, err := d.store.OwnEventCount(core.ProfileLog)
 	if err != nil {
