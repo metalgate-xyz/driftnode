@@ -159,6 +159,55 @@ func TestZensShowsIdentityWithoutName(t *testing.T) {
 	}
 }
 
+// TestZensRehydratedOnRestart proves the zens map is rebuilt from the
+// persisted routing table when the daemon starts, so the CLI/TUI show the
+// known network immediately after a restart instead of an empty list. A
+// restart must not lose the followed zens; their live status is refreshed
+// by the next sync round.
+func TestZensRehydratedOnRestart(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	peerKP, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	peerID := peerKP.Identity()
+	peerTok := "tok-peer"
+	if err := s.PutRouting(peerID, peerTok); err != nil {
+		t.Fatalf("PutRouting: %v", err)
+	}
+
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	resp, err := SendRequest(sock, "zens", nil)
+	if err != nil {
+		t.Fatalf("zens: %v", err)
+	}
+	zens, ok := resp.Result.([]any)
+	if !ok || len(zens) != 1 {
+		t.Fatalf("want 1 rehydrated zen, got %v", resp.Result)
+	}
+	pm, ok := zens[0].(map[string]any)
+	if !ok {
+		t.Fatalf("zen is not a map: %T", zens[0])
+	}
+	if got, _ := pm["id"].(string); got != peerTok {
+		t.Fatalf("id: want %q, got %q", peerTok, got)
+	}
+	if got, _ := pm["identity"].(string); got != string(peerID) {
+		t.Fatalf("identity: want %s, got %q", peerID, got)
+	}
+	if got, _ := pm["status"].(string); got != "connecting" {
+		t.Fatalf("status: want connecting, got %q", got)
+	}
+
+	d.Stop()
+}
+
 func TestSendRequestStatus(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)

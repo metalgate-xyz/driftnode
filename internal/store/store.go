@@ -616,6 +616,20 @@ func (s *Store) RoutingByToken(token string) (core.Identity, bool, error) {
 	return found, found != "", err
 }
 
+// AllRouting returns every (identity, token) binding in the routing table.
+// Used by the daemon to rehydrate the in-memory zens map on restart, so the
+// known network is visible before the next sync round re-dials each token.
+func (s *Store) AllRouting() (map[core.Identity]string, error) {
+	out := make(map[core.Identity]string)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketRouting).ForEach(func(k, v []byte) error {
+			out[core.Identity(k)] = string(v)
+			return nil
+		})
+	})
+	return out, err
+}
+
 // SyncCursor returns the high-water timestamp of the last successful pull
 // of (author, log). Returns 0 when no cursor is recorded, so a first pull
 // requests the full log. The cursor is advanced after events are merged,

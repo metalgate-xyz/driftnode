@@ -251,11 +251,55 @@ func (d *Daemon) Start(socketPath string) error {
 	d.crawler = crawler.New(d.store, d.logger)
 	d.mu.Unlock()
 
+	// Rehydrate the zens map from the persisted routing table so a restart
+	// shows the known network immediately, before the next sync round
+	// re-dials each token. The routing table binds followed identities to
+	// their tailcat tokens; a fresh daemon otherwise has an empty zens map
+	// until a dial repopulates it. Status starts as "connecting" and is
+	// refreshed to connected/error as the sync loop reaches each token.
+	d.rehydrateZens()
+
 	if bootstrapPath != "" {
 		go d.dialBootstrapSeeds(bootstrapPath, bootstrapKey)
 	}
 
 	return nil
+}
+
+// rehydrateZens loads the persisted routing bindings (identity -> token)
+// into the in-memory zens map. Called from Start so the known network is
+// visible to the zens RPC right after a restart, instead of appearing empty
+// until the background sync loop redials each token. Tokens learned only
+// through zen exchange are not persisted, so they are not restored here;
+// they are relearned on the next exchange.
+func (d *Daemon) rehydrateZens() {
+	routing, err := d.store.AllRouting()
+	if err != nil {
+		d.logger.Warn("rehydrate zens: read routing", "err", err)
+		return
+	}
+	if len(routing) == 0 {
+		return
+	}
+	d.mu.Lock()
+	for id, tok := range routing {
+		if _, exists := d.zens[tok]; exists {
+			continue
+		}
+		d.zens[tok] = &zenInfo{
+			ID:       tok,
+			Identity: string(id),
+			Kind:     "native_zen",
+			Status:   "connecting",
+		}
+		if name, _ := d.store.DisplayName(id); name != "" {
+			d.zens[tok].Name = name
+		}
+		if v, _ := d.store.IsVerified(id); v {
+			d.zens[tok].Verified = true
+		}
+	}
+	d.mu.Unlock()
 }
 
 // startTransport opens the tailcat listener for inbound zen sync using the
