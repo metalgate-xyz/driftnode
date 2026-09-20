@@ -54,6 +54,29 @@ func (m model) renderTabs() string {
 	return theme.tabBar.Width(m.width).MaxHeight(1).Render(row)
 }
 
+// tabAt maps a screen X coordinate to the tab index at that column, or -1 if
+// the column is outside any tab label. It mirrors renderTabs: the bar has one
+// cell of left padding, each label carries two cells of padding on both
+// sides, and labels are separated by two spaces.
+func (m model) tabAt(x int) int {
+	sep := lipgloss.Width(theme.tabBar.Render("  "))
+	x -= theme.tabBar.GetHorizontalFrameSize() / 2
+	for i, t := range tabs {
+		var label string
+		if i == m.activeTab {
+			label = theme.tabActive.Render(t.name)
+		} else {
+			label = theme.tab.Render(t.name)
+		}
+		w := lipgloss.Width(label)
+		if x >= 0 && x < w {
+			return i
+		}
+		x -= w + sep
+	}
+	return -1
+}
+
 // renderActivePanel returns the panel for the current tab, bordered and sized
 // to fill the window. MaxHeight clips the inner content to the panel's row
 // budget so a panel that renders taller than its allotment scrolls inside

@@ -18,14 +18,14 @@ type model struct {
 
 	feed      feedPanel
 	zens      selectList[zen]
-	follows   selectList[identityEntry]
-	followers selectList[identityEntry]
+	follows   selectList[zen]
+	followers selectList[zen]
 	compose   compose
 
 	posts        []feedPost
 	zenList      []zen
-	followList   []identityEntry
-	followerList []identityEntry
+	followList   []zen
+	followerList []zen
 	status       statusInfo
 }
 
@@ -87,7 +87,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m *model) applyRefresh(msg refreshMsg) {
 	if msg.feedErr == nil {
 		m.posts = msg.feed
-		m.feed.setPosts(msg.feed, m.styles, panelWidth(m.width))
+		m.feed.setPosts(msg.feed)
 	} else {
 		m.notice = "feed: " + msg.feedErr.Error()
 	}
@@ -129,7 +129,7 @@ func (m *model) layout() {
 		m.feed = newFeedPanel(w, h)
 	} else {
 		m.feed.resize(w, h)
-		m.feed.setPosts(m.posts, m.styles, m.width)
+		m.feed.setPosts(m.posts)
 	}
 	m.zens.resize(w, h)
 	m.follows.resize(w, h)
@@ -161,10 +161,18 @@ func (m model) routeMouse(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// routeClick maps a left-click to a list row on the selectable tabs. The feed
-// tab has no selection, so clicks there are ignored. Only left clicks select.
+// routeClick maps a left-click to a list row on the selectable tabs. Only
+// left clicks select. A click on the tab bar switches tabs; the feed is also
+// selectable: a click in its panel picks the post.
 func (m model) routeClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	if msg.Button != tea.MouseLeft {
+		return m, nil
+	}
+	// The tab bar is the row below the title.
+	if msg.Y == 1 {
+		if i := m.tabAt(msg.X); i >= 0 {
+			m.activeTab = i
+		}
 		return m, nil
 	}
 	// Screen rows above the panel content: title (1) + tab bar (1) + panel
@@ -172,6 +180,9 @@ func (m model) routeClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
 	const panelContentTop = 3
 	row := msg.Y - panelContentTop
 	switch m.activeTab {
+	case tabFeed:
+		m.feed.click(row)
+		return m, nil
 	case tabZens:
 		m.zens.click(row)
 		return m, nil

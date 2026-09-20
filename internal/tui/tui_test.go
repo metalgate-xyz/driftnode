@@ -73,6 +73,37 @@ func TestTabSwitching(t *testing.T) {
 	}
 }
 
+// TestTabClickSwitch verifies a left-click on each tab label switches to it.
+// The X coordinate for each label is derived from tabAt itself, so the test
+// stays correct if the tab padding or separators change.
+func TestTabClickSwitch(t *testing.T) {
+	m := newModel("", "driftnode:test")
+	m.width, m.height = 80, 24
+	m.layout()
+
+	// Walk every tab and click the middle of its label.
+	for want := 0; want < len(tabs); want++ {
+		// Find an X inside this tab by scanning columns on the tab row.
+		var x int
+		found := false
+		for cx := 0; cx < m.width; cx++ {
+			if m.tabAt(cx) == want {
+				x = cx
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("tab %d: no clickable column found", want)
+		}
+		mm, _ := m.Update(tea.MouseClickMsg{X: x, Y: 1, Button: tea.MouseLeft})
+		m = asModel(t, mm)
+		if m.activeTab != want {
+			t.Fatalf("click tab %d at x=%d: want activeTab %d, got %d", want, x, want, m.activeTab)
+		}
+	}
+}
+
 func TestComposeAndPost(t *testing.T) {
 	m := newModel("", "driftnode:test")
 	// Type "hi".
@@ -119,7 +150,7 @@ func TestViewRendersFeed(t *testing.T) {
 	m.width, m.height = 80, 24
 	m.layout()
 	m.posts = []feedPost{{name: "alice", author: "driftnode:alice", text: "gm", age: "1m"}}
-	m.feed.setPosts(m.posts, m.styles, 80)
+	m.feed.setPosts(m.posts)
 	out := m.View().Content
 	if !strings.Contains(out, "gm") {
 		t.Fatal("view should render feed text")
@@ -164,7 +195,7 @@ func TestZenActions(t *testing.T) {
 	}
 	m = asModel(t, mm)
 	// 'f' again on an already-followed zen does not issue a command.
-	m.followList = []identityEntry{{identity: "driftnode:alice", name: "alice"}}
+	m.followList = []zen{{name: "alice", identity: "driftnode:alice"}}
 	m.follows.setItems(m.followList)
 	mm, cmd = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if cmd != nil {
@@ -186,13 +217,13 @@ func TestMouseClickSelectsZen(t *testing.T) {
 	m.zens.setItems(m.zenList)
 	m.activeTab = tabZens
 
-	// Each zen row is 2 lines (title + description). Click the third item:
-	// content row 4-5 maps to screen row 4+3=7 (its title line).
-	mm, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 7, Button: tea.MouseLeft})
+	// Each zen row is 1 line. Click the third item: content row 2 maps to
+	// screen row 2+3=5.
+	mm, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 5, Button: tea.MouseLeft})
 	m = asModel(t, mm)
 	z, ok := m.zens.selectedItem()
 	if !ok || z.name != "zenc" {
-		t.Fatalf("click on row 4 should select zenc, got %+v ok=%v", z, ok)
+		t.Fatalf("click on row 2 should select zenc, got %+v ok=%v", z, ok)
 	}
 }
 
@@ -229,5 +260,51 @@ func TestMouseClickOutOfBoundsIgnored(t *testing.T) {
 	z, ok := m.zens.selectedItem()
 	if !ok || z.name != "zena" {
 		t.Fatalf("out-of-bounds click should leave selection at first item, got %q ok=%v", z.name, ok)
+	}
+}
+
+// TestFeedSelectionHighlight verifies the selected feed row carries the
+// highlight background, so the selection is visible.
+func TestFeedSelectionHighlight(t *testing.T) {
+	m := simModel(t, 80, 24, "driftnode:test", 0)
+	m.activeTab = tabFeed
+	m.posts = []feedPost{
+		{name: "alice", author: "driftnode:alice", text: "gm", age: "1m"},
+		{name: "bob", author: "driftnode:bob", text: "hello", age: "2m"},
+	}
+	m.feed.setPosts(m.posts)
+	// Move selection to the second post.
+	mm, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = asModel(t, mm)
+	out := m.View().Content
+	const hl = "\x1b[48;2;40;42;64m"
+	if !strings.Contains(out, hl) {
+		t.Fatal("selected feed row should carry the highlight background")
+	}
+	if !strings.Contains(out, "hello") {
+		t.Fatal("selected feed row should still render its text")
+	}
+}
+
+// TestZenSelectionHighlight verifies the selected zen row carries the
+// highlight background, so the selection is visible.
+func TestZenSelectionHighlight(t *testing.T) {
+	m := simModel(t, 80, 24, "driftnode:test", 0)
+	m.activeTab = tabZens
+	m.zenList = []zen{
+		{name: "alice", identity: "driftnode:alice", status: "connected"},
+		{name: "bob", identity: "driftnode:bob", status: "connecting"},
+	}
+	m.zens.setItems(m.zenList)
+	// Move selection to the second zen.
+	mm, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
+	m = asModel(t, mm)
+	out := m.View().Content
+	const hl = "\x1b[48;2;40;42;64m"
+	if !strings.Contains(out, hl) {
+		t.Fatal("selected zen row should carry the highlight background")
+	}
+	if !strings.Contains(out, "bob") {
+		t.Fatal("selected zen row should still render its name")
 	}
 }

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"charm.land/lipgloss/v2"
 	"driftnode/internal/daemon"
 )
 
@@ -32,12 +31,6 @@ type zen struct {
 	kind     string
 	status   string
 	verified bool
-}
-
-// identityEntry is one row of the Follows or Followers list.
-type identityEntry struct {
-	identity string
-	name     string
 }
 
 // statusInfo is the daemon health snapshot.
@@ -96,9 +89,9 @@ type refreshMsg struct {
 	feedErr      error
 	zens         []zen
 	zensErr      error
-	follows      []identityEntry
+	follows      []zen
 	followsErr   error
-	followers    []identityEntry
+	followers    []zen
 	followersErr error
 	status       statusInfo
 	statusErr    error
@@ -164,13 +157,13 @@ func parseZens(r *daemon.Response) ([]zen, error) {
 	return out, nil
 }
 
-func parseIdentities(r *daemon.Response, key string) ([]identityEntry, error) {
+func parseIdentities(r *daemon.Response, key string) ([]zen, error) {
 	m, ok := r.Result.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("unexpected %s response", key)
 	}
 	items, _ := m[key].([]any)
-	out := make([]identityEntry, 0, len(items))
+	out := make([]zen, 0, len(items))
 	for _, it := range items {
 		entry, ok := it.(map[string]any)
 		if !ok {
@@ -181,10 +174,10 @@ func parseIdentities(r *daemon.Response, key string) ([]identityEntry, error) {
 		if name == "" {
 			name = shortID(id)
 		}
-		out = append(out, identityEntry{identity: id, name: name})
+		out = append(out, zen{name: name, identity: id})
 	}
 	// Sort by display name so the list is stable and scannable.
-	slices.SortFunc(out, func(a, b identityEntry) int { return strings.Compare(a.name, b.name) })
+	slices.SortFunc(out, func(a, b zen) int { return strings.Compare(a.name, b.name) })
 	return out, nil
 }
 
@@ -283,25 +276,4 @@ func ageOf(ts int64) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
-}
-
-func padRight(s string, n int) string {
-	if lipgloss.Width(s) >= n {
-		return s
-	}
-	return s + strings.Repeat(" ", n-lipgloss.Width(s))
-}
-
-// truncate caps s to n visible cells, appending an ellipsis if it was longer.
-func truncate(s string, n int) string {
-	if n <= 0 {
-		return ""
-	}
-	if lipgloss.Width(s) <= n {
-		return s
-	}
-	if n == 1 {
-		return "…"
-	}
-	return s[:n-1] + "…"
 }
