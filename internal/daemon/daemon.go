@@ -732,7 +732,7 @@ func (d *Daemon) handleFeed(limit int) Response {
 	for _, p := range posts {
 		text := p.Event.Post.Text
 		if p.Event.Reply != nil {
-			text = "(reply) " + text
+			text = "(reply) " + p.Event.Reply.Text
 		}
 		name, _ := d.store.DisplayName(p.Author)
 		items = append(items, feedItem{

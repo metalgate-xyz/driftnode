@@ -67,6 +67,10 @@ func Open(path string) (*Store, error) {
 // Close closes the underlying database.
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB returns the underlying bbolt database, for batch writes that the
+// per-event store methods do not support.
+func (s *Store) DB() *bolt.DB { return s.db }
+
 // Path returns the filesystem path of the store.
 func (s *Store) Path() string { return s.path }
 

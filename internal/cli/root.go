@@ -347,7 +347,7 @@ func feedCmd() *cobra.Command {
 				}
 				text := p.Event.Post.Text
 				if p.Event.Reply != nil {
-					text = "(reply) " + text
+					text = "(reply) " + p.Event.Reply.Text
 				}
 				cmd.Printf("%s  %s> %s\n", ts, author, text)
 			}
