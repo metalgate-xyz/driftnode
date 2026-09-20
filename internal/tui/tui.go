@@ -64,11 +64,11 @@ func (m model) renderActivePanel() string {
 	case tabFeed:
 		content = m.feed.render()
 	case tabZens:
-		content = m.zens.View()
+		content = m.zens.view()
 	case tabFollows:
-		content = m.follows.View()
+		content = m.follows.view()
 	case tabFollowers:
-		content = m.followers.View()
+		content = m.followers.view()
 	}
 	return theme.panel.
 		Width(m.width).

@@ -58,7 +58,7 @@ func (m model) handleKey(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 // selected in the Zens list. It returns handled=true only when it consumed
 // the key, so other keys fall through to compose/navigation.
 func (m model) zenAction(msg tea.KeyPressMsg) (model, tea.Cmd, bool) {
-	z, ok := m.zens.SelectedItem().(zenItem)
+	z, ok := m.zens.selectedItem()
 	if !ok || z.identity == "" {
 		return m, nil, false
 	}
@@ -103,15 +103,15 @@ func (m model) routeToPanel(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case tabZens:
 		var cmd tea.Cmd
-		m.zens, cmd = m.zens.Update(msg)
+		m.zens, cmd = m.zens.update(msg)
 		return m, cmd
 	case tabFollows:
 		var cmd tea.Cmd
-		m.follows, cmd = m.follows.Update(msg)
+		m.follows, cmd = m.follows.update(msg)
 		return m, cmd
 	case tabFollowers:
 		var cmd tea.Cmd
-		m.followers, cmd = m.followers.Update(msg)
+		m.followers, cmd = m.followers.update(msg)
 		return m, cmd
 	}
 	return m, nil
@@ -119,8 +119,8 @@ func (m model) routeToPanel(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // isFollowing reports whether the given identity is in the follow graph.
 func (m model) isFollowing(identity string) bool {
-	for _, it := range m.follows.Items() {
-		if f, ok := it.(followItem); ok && f.identity == identity {
+	for _, f := range m.follows.allItems() {
+		if f.identity == identity {
 			return true
 		}
 	}

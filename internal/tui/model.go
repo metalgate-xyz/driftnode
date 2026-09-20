@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -18,9 +17,9 @@ type model struct {
 	notice    string
 
 	feed      feedPanel
-	zens      list.Model
-	follows   list.Model
-	followers list.Model
+	zens      selectList[zen]
+	follows   selectList[identityEntry]
+	followers selectList[identityEntry]
 	compose   compose
 
 	posts        []feedPost
@@ -44,8 +43,8 @@ func newModel(socket, identity string) model {
 	m.compose.focus()
 	// Lists start at size 0; layout() sizes them once the window is known.
 	m.zens = newZenList(0, 0)
-	m.follows = newFollowList("Follows", 0, 0)
-	m.followers = newFollowList("Followers", 0, 0)
+	m.follows = newFollowList(0, 0)
+	m.followers = newFollowList(0, 0)
 	return m
 }
 
@@ -78,6 +77,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	case tea.MouseWheelMsg:
 		return m.routeMouse(msg)
+	case tea.MouseClickMsg:
+		return m.routeClick(msg)
 	}
 	return m, nil
 }
@@ -92,19 +93,15 @@ func (m *model) applyRefresh(msg refreshMsg) {
 	}
 	if msg.zensErr == nil {
 		m.zenList = msg.zens
-		items := make([]list.Item, 0, len(msg.zens))
-		for _, z := range msg.zens {
-			items = append(items, zenItem{z})
-		}
-		_ = m.zens.SetItems(items)
+		m.zens.setItems(msg.zens)
 	}
 	if msg.followsErr == nil {
 		m.followList = msg.follows
-		setFollowItems(&m.follows, msg.follows)
+		m.follows.setItems(msg.follows)
 	}
 	if msg.followersErr == nil {
 		m.followerList = msg.followers
-		setFollowItems(&m.followers, msg.followers)
+		m.followers.setItems(msg.followers)
 	}
 	if msg.statusErr == nil {
 		m.status = msg.status
@@ -116,9 +113,9 @@ func (m *model) applyRefresh(msg refreshMsg) {
 func (m model) refreshPanels() tea.Cmd {
 	w, h := panelContentWidth(panelWidth(m.width)), panelContentHeight(panelHeight(m.height))
 	m.feed.resize(w, h)
-	m.zens.SetSize(w, h)
-	m.follows.SetSize(w, h)
-	m.followers.SetSize(w, h)
+	m.zens.resize(w, h)
+	m.follows.resize(w, h)
+	m.followers.resize(w, h)
 	return nil
 }
 
@@ -134,9 +131,9 @@ func (m *model) layout() {
 		m.feed.resize(w, h)
 		m.feed.setPosts(m.posts, m.styles, m.width)
 	}
-	m.zens.SetSize(w, h)
-	m.follows.SetSize(w, h)
-	m.followers.SetSize(w, h)
+	m.zens.resize(w, h)
+	m.follows.resize(w, h)
+	m.followers.resize(w, h)
 	// Keep the compose input width sensible: leave room for the prompt.
 	m.compose.input.SetWidth(m.width - 4)
 }
@@ -150,16 +147,40 @@ func (m model) routeMouse(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case tabZens:
 		var cmd tea.Cmd
-		m.zens, cmd = m.zens.Update(msg)
+		m.zens, cmd = m.zens.update(msg)
 		return m, cmd
 	case tabFollows:
 		var cmd tea.Cmd
-		m.follows, cmd = m.follows.Update(msg)
+		m.follows, cmd = m.follows.update(msg)
 		return m, cmd
 	case tabFollowers:
 		var cmd tea.Cmd
-		m.followers, cmd = m.followers.Update(msg)
+		m.followers, cmd = m.followers.update(msg)
 		return m, cmd
+	}
+	return m, nil
+}
+
+// routeClick maps a left-click to a list row on the selectable tabs. The feed
+// tab has no selection, so clicks there are ignored. Only left clicks select.
+func (m model) routeClick(msg tea.MouseClickMsg) (tea.Model, tea.Cmd) {
+	if msg.Button != tea.MouseLeft {
+		return m, nil
+	}
+	// Screen rows above the panel content: title (1) + tab bar (1) + panel
+	// top border (1).
+	const panelContentTop = 3
+	row := msg.Y - panelContentTop
+	switch m.activeTab {
+	case tabZens:
+		m.zens.click(row)
+		return m, nil
+	case tabFollows:
+		m.follows.click(row)
+		return m, nil
+	case tabFollowers:
+		m.followers.click(row)
+		return m, nil
 	}
 	return m, nil
 }

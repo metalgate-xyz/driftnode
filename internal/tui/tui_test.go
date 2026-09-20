@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"charm.land/bubbles/v2/list"
 	tea "charm.land/bubbletea/v2"
 )
 
@@ -147,11 +146,7 @@ func TestZenActions(t *testing.T) {
 	m.layout()
 	// Seed the zens list with one discovered zen.
 	m.zenList = []zen{{name: "alice", identity: "driftnode:alice", status: "connected"}}
-	items := make([]list.Item, 0, 1)
-	for _, z := range m.zenList {
-		items = append(items, zenItem{z})
-	}
-	_ = m.zens.SetItems(items)
+	m.zens.setItems(m.zenList)
 	// Switch to Zens tab.
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.activeTab != tabZens {
@@ -170,12 +165,69 @@ func TestZenActions(t *testing.T) {
 	m = asModel(t, mm)
 	// 'f' again on an already-followed zen does not issue a command.
 	m.followList = []identityEntry{{identity: "driftnode:alice", name: "alice"}}
-	setFollowItems(&m.follows, m.followList)
+	m.follows.setItems(m.followList)
 	mm, cmd = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if cmd != nil {
 		t.Fatal("follow on an already-followed zen should not produce a command")
 	}
 	if !strings.Contains(asModel(t, mm).notice, "already following") {
 		t.Fatal("should report already following")
+	}
+}
+
+// TestMouseClickSelectsZen verifies a left-click on a list row selects the item
+// at that row. The coordinate math accounts for the three screen rows above
+// the panel content: title, tab bar, and the panel's top border.
+func TestMouseClickSelectsZen(t *testing.T) {
+	m := simModel(t, 80, 24, "driftnode:test", 5)
+	for i := range m.zenList {
+		m.zenList[i] = zen{name: "zen" + string(rune('a'+i)), identity: "driftnode:z" + string(rune('a'+i)), status: "connected"}
+	}
+	m.zens.setItems(m.zenList)
+	m.activeTab = tabZens
+
+	// Each zen row is 2 lines (title + description). Click the third item:
+	// content row 4-5 maps to screen row 4+3=7 (its title line).
+	mm, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 7, Button: tea.MouseLeft})
+	m = asModel(t, mm)
+	z, ok := m.zens.selectedItem()
+	if !ok || z.name != "zenc" {
+		t.Fatalf("click on row 4 should select zenc, got %+v ok=%v", z, ok)
+	}
+}
+
+// TestMouseClickIgnoresNonLeftButton ensures only left clicks select.
+func TestMouseClickIgnoresNonLeftButton(t *testing.T) {
+	m := simModel(t, 80, 24, "driftnode:test", 3)
+	for i := range m.zenList {
+		m.zenList[i] = zen{name: "zen" + string(rune('a'+i)), identity: "driftnode:z" + string(rune('a'+i)), status: "connected"}
+	}
+	m.zens.setItems(m.zenList)
+	m.activeTab = tabZens
+
+	mm, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 3, Button: tea.MouseRight})
+	m = asModel(t, mm)
+	z, _ := m.zens.selectedItem()
+	if z.name != "zena" {
+		t.Fatalf("right click should not change selection, got %q", z.name)
+	}
+}
+
+// TestMouseClickOutOfBoundsIgnored ensures clicks below the last item don't
+// wrap or select garbage.
+func TestMouseClickOutOfBoundsIgnored(t *testing.T) {
+	m := simModel(t, 80, 24, "driftnode:test", 2)
+	for i := range m.zenList {
+		m.zenList[i] = zen{name: "zen" + string(rune('a'+i)), identity: "driftnode:z" + string(rune('a'+i)), status: "connected"}
+	}
+	m.zens.setItems(m.zenList)
+	m.activeTab = tabZens
+
+	// Click far below the last item (screen row 30).
+	mm, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 30, Button: tea.MouseLeft})
+	m = asModel(t, mm)
+	z, ok := m.zens.selectedItem()
+	if !ok || z.name != "zena" {
+		t.Fatalf("out-of-bounds click should leave selection at first item, got %q ok=%v", z.name, ok)
 	}
 }
