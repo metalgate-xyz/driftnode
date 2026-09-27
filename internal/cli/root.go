@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -25,11 +26,13 @@ import (
 	"driftnode/internal/core"
 	"driftnode/internal/daemon"
 	p2p "driftnode/internal/net"
+	"driftnode/internal/proto/driftnodepb"
 	"driftnode/internal/store"
 	"driftnode/internal/tui"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+	"google.golang.org/grpc"
 	"gopkg.in/yaml.v3"
 )
 
@@ -145,13 +148,15 @@ func whoamiCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// When the daemon is running, ask it for the full view; it
 			// holds the store lock and the same projection.
-			sock, err := daemonSocketPath()
-			if err == nil {
-				if resp, err := daemon.SendRequest(sock, "whoami", nil); err == nil {
-					if m, ok := resp.Result.(map[string]any); ok {
-						printWhoami(cmd, m)
-						return nil
-					}
+			if cl, cc, err := dialDaemon(); err == nil {
+				defer cc.Close()
+				resp, err := cl.Whoami(context.Background(), &driftnodepb.Empty{})
+				if err == nil {
+					printWhoami(cmd, resp)
+					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
 				}
 			}
 			s, err := openStoreAt(dbPath)
@@ -166,35 +171,35 @@ func whoamiCmd() *cobra.Command {
 			if !ok {
 				return fmt.Errorf("no identity found; run 'driftnode init' first")
 			}
-			out := map[string]any{"identity": id.String()}
+			out := &driftnodepb.WhoamiResp{Identity: id.String()}
 			if tk, ok, _ := s.TransportKey(); ok {
 				if addr, err := p2p.AddrFromKeyBytes(tk); err == nil && addr != "" {
-					out["token"] = addr
-					out["stable"] = true
+					out.Token = addr
+					out.Stable = true
 				}
 			}
 			profEvents, _ := s.OwnEvents(core.ProfileLog)
 			if prof := core.NewLog(profEvents).Profile(); prof != nil {
 				if prof.DisplayName != "" {
-					out["display_name"] = prof.DisplayName
+					out.DisplayName = prof.DisplayName
 				}
 				if prof.AvatarHash != nil && !prof.AvatarHash.IsZero() {
-					out["has_avatar"] = true
+					out.HasAvatar = true
 				}
 			}
 			detEvents, _ := s.OwnEvents(core.DetailLog)
 			if det := core.NewLog(detEvents).Detail(); det != nil {
 				if det.Bio != "" {
-					out["bio"] = det.Bio
+					out.Bio = det.Bio
 				}
 				if det.FirstName != "" {
-					out["first_name"] = det.FirstName
+					out.FirstName = det.FirstName
 				}
 				if det.LastName != "" {
-					out["last_name"] = det.LastName
+					out.LastName = det.LastName
 				}
 				if det.Location != "" {
-					out["location"] = det.Location
+					out.Location = det.Location
 				}
 			}
 			printWhoami(cmd, out)
@@ -205,34 +210,34 @@ func whoamiCmd() *cobra.Command {
 	return c
 }
 
-// printWhoami renders the whoami map: identity, then profile fields, then
-// detail fields if set. Fields that are absent are omitted.
-func printWhoami(cmd *cobra.Command, m map[string]any) {
-	cmd.Println(m["identity"])
-	if token, ok := m["token"].(string); ok && token != "" {
-		if stable, _ := m["stable"].(bool); stable {
-			cmd.Printf("address: %s (stable)\n", token)
+// printWhoami renders the identity and optional profile fields from the
+// daemon's whoami response.
+func printWhoami(cmd *cobra.Command, r *driftnodepb.WhoamiResp) {
+	cmd.Println(r.Identity)
+	if r.Token != "" {
+		if r.Stable {
+			cmd.Printf("address: %s (stable)\n", r.Token)
 		} else {
-			cmd.Printf("address: %s (ephemeral)\n", token)
+			cmd.Printf("address: %s (ephemeral)\n", r.Token)
 		}
 	}
-	if name, ok := m["display_name"].(string); ok && name != "" {
-		cmd.Printf("zen name: %s\n", name)
+	if r.DisplayName != "" {
+		cmd.Printf("zen name: %s\n", r.DisplayName)
 	}
-	if hasAvatar, _ := m["has_avatar"].(bool); hasAvatar {
+	if r.HasAvatar {
 		cmd.Println("avatar: (present)")
 	}
-	if bio, ok := m["bio"].(string); ok && bio != "" {
-		cmd.Printf("bio: %s\n", bio)
+	if r.Bio != "" {
+		cmd.Printf("bio: %s\n", r.Bio)
 	}
-	if fn, ok := m["first_name"].(string); ok && fn != "" {
-		cmd.Printf("first name: %s\n", fn)
+	if r.FirstName != "" {
+		cmd.Printf("first name: %s\n", r.FirstName)
 	}
-	if ln, ok := m["last_name"].(string); ok && ln != "" {
-		cmd.Printf("last name: %s\n", ln)
+	if r.LastName != "" {
+		cmd.Printf("last name: %s\n", r.LastName)
 	}
-	if loc, ok := m["location"].(string); ok && loc != "" {
-		cmd.Printf("location: %s\n", loc)
+	if r.Location != "" {
+		cmd.Printf("location: %s\n", r.Location)
 	}
 }
 
@@ -246,24 +251,15 @@ func postCmd() *cobra.Command {
 			// When the daemon is running, post via the control socket. The
 			// passphrase is optional then: the daemon holds the unlocked key
 			// after `driftnode daemon unlock`.
-			sock, err := daemonSocketPath()
-			if err == nil {
-				params := map[string]any{"text": args[0]}
-				if passphrase != "" {
-					params["passphrase"] = passphrase
-				}
-				resp, err := daemon.SendRequest(sock, "post", params)
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: args[0], Passphrase: passphrase})
 				if err == nil {
-					if m, ok := resp.Result.(map[string]any); ok {
-						if id, ok := m["event_id"].(string); ok {
-							cmd.Println(id)
-							return nil
-						}
-					}
-					return fmt.Errorf("unexpected post response: %v", resp.Result)
+					cmd.Println(resp.EventId)
+					return nil
 				}
 				if !errors.Is(err, daemon.ErrNotRunning) {
-					return err // daemon up but refused the post (e.g. key locked)
+					return err
 				}
 			}
 			if passphrase == "" {
@@ -313,12 +309,19 @@ func feedCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// When the daemon is running (it holds the store lock),
-			// query the merged feed via the control socket. Otherwise
-			// open the store directly for offline use.
-			sock, err := daemonSocketPath()
-			if err == nil {
-				if resp, err := daemon.SendRequest(sock, "feed", map[string]any{"limit": limit}); err == nil {
-					return printFeedFromRPC(cmd, resp)
+			// read the feed via the subscribe stream. The snapshot is capped
+			// server-side, so a large feed does not blow the gRPC message
+			// limit the way a full unary Feed would. Otherwise open the store
+			// directly for offline use.
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				snap, err := subscribeSnapshot(cl)
+				if err == nil {
+					printFeedSnapshot(cmd, snap, limit)
+					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
 				}
 			}
 			s, err := openStoreAt(dbPath)
@@ -359,29 +362,45 @@ func feedCmd() *cobra.Command {
 	return c
 }
 
-// printFeedFromRPC renders feed items from a daemon RPC response.
-func printFeedFromRPC(cmd *cobra.Command, resp *daemon.Response) error {
-	items, ok := resp.Result.([]any)
+// subscribeSnapshot opens a subscribe stream, reads the initial snapshot,
+// and returns it. The snapshot is capped server-side, so the CLI never
+// receives the full merged state in one message.
+func subscribeSnapshot(cl driftnodepb.DriftnodeClient) (*driftnodepb.Snapshot, error) {
+	stream, err := cl.Subscribe(context.Background(), &driftnodepb.SubscribeReq{})
+	if err != nil {
+		return nil, fmt.Errorf("subscribe: %w", err)
+	}
+	ev, err := stream.Recv()
+	if err != nil {
+		return nil, fmt.Errorf("read snapshot: %w", err)
+	}
+	s, ok := ev.Kind.(*driftnodepb.Event_Snapshot)
 	if !ok {
-		return fmt.Errorf("unexpected feed response")
+		return nil, fmt.Errorf("expected snapshot, got %T", ev.Kind)
+	}
+	return s.Snapshot, nil
+}
+
+// printFeedSnapshot prints feed items from a subscribe snapshot. The limit
+// flag further bounds the printed lines; 0 means print the whole snapshot.
+func printFeedSnapshot(cmd *cobra.Command, snap *driftnodepb.Snapshot, limit int) {
+	if snap == nil {
+		return
+	}
+	items := snap.Feed
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
 	}
 	for _, item := range items {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		ts := int64(m["timestamp"].(float64))
-		author, _ := m["name"].(string)
+		author := item.Name
 		if author == "" {
-			author = m["author"].(string)
+			author = item.Author
 			if len(author) > 16 {
 				author = author[:16]
 			}
 		}
-		text := m["text"].(string)
-		cmd.Printf("%s  %s> %s\n", core.FormatTime(ts), author, text)
+		cmd.Printf("%s  %s> %s\n", core.FormatTime(item.Timestamp), author, item.Text)
 	}
-	return nil
 }
 
 func followCmd() *cobra.Command {
@@ -391,21 +410,12 @@ func followCmd() *cobra.Command {
 		Short: "Follow an identity, or dial and follow a zen by its token",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
-			if err == nil {
-				params := map[string]any{"target": args[0]}
-				if passphrase != "" {
-					params["passphrase"] = passphrase
-				}
-				resp, err := daemon.SendRequest(sock, "follow", params)
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Follow(context.Background(), &driftnodepb.FollowReq{Target: args[0], Passphrase: passphrase})
 				if err == nil {
-					if m, ok := resp.Result.(map[string]any); ok {
-						if id, ok := m["followed"].(string); ok {
-							cmd.Printf("followed %s\n", id)
-							return nil
-						}
-					}
-					return fmt.Errorf("unexpected follow response: %v", resp.Result)
+					cmd.Printf("followed %s\n", resp.Followed)
+					return nil
 				}
 				if !errors.Is(err, daemon.ErrNotRunning) {
 					return err
@@ -460,21 +470,12 @@ func unfollowCmd() *cobra.Command {
 		Short: "Unfollow an identity (append a signed Unfollow event)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
-			if err == nil {
-				params := map[string]any{"target": args[0]}
-				if passphrase != "" {
-					params["passphrase"] = passphrase
-				}
-				resp, err := daemon.SendRequest(sock, "unfollow", params)
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Unfollow(context.Background(), &driftnodepb.UnfollowReq{Target: args[0], Passphrase: passphrase})
 				if err == nil {
-					if m, ok := resp.Result.(map[string]any); ok {
-						if id, ok := m["unfollowed"].(string); ok {
-							cmd.Printf("unfollowed %s\n", id)
-							return nil
-						}
-					}
-					return fmt.Errorf("unexpected unfollow response: %v", resp.Result)
+					cmd.Printf("unfollowed %s\n", resp.Unfollowed)
+					return nil
 				}
 				if !errors.Is(err, daemon.ErrNotRunning) {
 					return err
@@ -531,10 +532,15 @@ func followsCmd() *cobra.Command {
 		Short: "List the identities this zen follows",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if sock, err := daemonSocketPath(); err == nil {
-				if resp, err := daemon.SendRequest(sock, "follows", nil); err == nil {
-					printIdentityList(cmd, resp.Result, "follows")
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				snap, err := subscribeSnapshot(cl)
+				if err == nil {
+					printIdentities(cmd, snap.GetFollows())
 					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
 				}
 			}
 			s, err := openStoreAt(dbPath)
@@ -546,7 +552,7 @@ func followsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printIdentityList(cmd, followsResult("follows", ids, s), "follows")
+			printIdentities(cmd, identitiesFromStore(ids, s))
 			return nil
 		},
 	}
@@ -563,10 +569,15 @@ func followersCmd() *cobra.Command {
 		Short: "List the identities that follow this zen",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if sock, err := daemonSocketPath(); err == nil {
-				if resp, err := daemon.SendRequest(sock, "followers", nil); err == nil {
-					printIdentityList(cmd, resp.Result, "followers")
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				snap, err := subscribeSnapshot(cl)
+				if err == nil {
+					printIdentities(cmd, snap.GetFollowers())
 					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
 				}
 			}
 			s, err := openStoreAt(dbPath)
@@ -578,7 +589,7 @@ func followersCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printIdentityList(cmd, followsResult("followers", ids, s), "followers")
+			printIdentities(cmd, identitiesFromStore(ids, s))
 			return nil
 		},
 	}
@@ -586,39 +597,27 @@ func followersCmd() *cobra.Command {
 	return c
 }
 
-// followsResult builds a result map shaped like the daemon response from a
-// slice of identities, resolving display names from the store.
-func followsResult(key string, ids []core.Identity, s *store.Store) map[string]any {
-	out := make([]any, 0, len(ids))
+// identitiesFromStore builds an identity list from a slice of core identities,
+// resolving display names from the store. Used by the offline fallback path.
+func identitiesFromStore(ids []core.Identity, s *store.Store) []*driftnodepb.Identity {
+	out := make([]*driftnodepb.Identity, 0, len(ids))
 	for _, id := range ids {
-		entry := map[string]any{"identity": id.String()}
+		entry := &driftnodepb.Identity{Identity: id.String()}
 		if name, err := s.DisplayName(id); err == nil && name != "" {
-			entry["name"] = name
+			entry.Name = name
 		}
 		out = append(out, entry)
 	}
-	return map[string]any{key: out}
+	return out
 }
 
-// printIdentityList renders the follows/followers response: one line per
-// identity, with the zen name shown if known. An empty list prints nothing.
-func printIdentityList(cmd *cobra.Command, result any, key string) {
-	m, ok := result.(map[string]any)
-	if !ok {
-		return
-	}
-	items, _ := m[key].([]any)
-	for _, it := range items {
-		entry, ok := it.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, _ := entry["identity"].(string)
-		name, _ := entry["name"].(string)
-		if name != "" {
-			cmd.Printf("%s\t%s\n", id, name)
+// printIdentities renders follows/followers from a daemon RPC response.
+func printIdentities(cmd *cobra.Command, items []*driftnodepb.Identity) {
+	for _, entry := range items {
+		if entry.Name != "" {
+			cmd.Printf("%s\t%s\n", entry.Identity, entry.Name)
 		} else {
-			cmd.Println(id)
+			cmd.Println(entry.Identity)
 		}
 	}
 }
@@ -839,6 +838,17 @@ func daemonSocketPath() (string, error) {
 	return daemon.SocketPathFor(abs)
 }
 
+// dialDaemon connects to the running daemon's gRPC control socket and returns
+// the typed client and connection. Callers must close the connection when
+// done. An error means the daemon is not running.
+func dialDaemon() (driftnodepb.DriftnodeClient, *grpc.ClientConn, error) {
+	sock, err := daemonSocketPath()
+	if err != nil {
+		return nil, nil, err
+	}
+	return daemon.DialClient(sock)
+}
+
 // passphrase, returning a ready-to-sign KeyPair.
 func loadKey(s *store.Store, passphrase string) (*core.KeyPair, error) {
 	ek, err := s.EncryptedKey()
@@ -1043,14 +1053,7 @@ func daemonUnlockCmd() *cobra.Command {
 		Short: "Unlock the daemon's signing key so post/follow/unfollow don't need a passphrase",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
-			if err != nil {
-				return err
-			}
-			params := map[string]any{}
-			if passphrase != "" {
-				params["passphrase"] = passphrase
-			} else {
+			if passphrase == "" {
 				p, err := readPassphrase("passphrase: ")
 				if err != nil {
 					return err
@@ -1058,9 +1061,14 @@ func daemonUnlockCmd() *cobra.Command {
 				if p == "" {
 					return fmt.Errorf("passphrase required")
 				}
-				params["passphrase"] = p
+				passphrase = p
 			}
-			if _, err := daemon.SendRequest(sock, "unlock", params); err != nil {
+			cl, cc, err := dialDaemon()
+			if err != nil {
+				return err
+			}
+			defer cc.Close()
+			if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: passphrase}); err != nil {
 				return err
 			}
 			cmd.Println("key unlocked")
@@ -1078,11 +1086,12 @@ func daemonLockCmd() *cobra.Command {
 		Short: "Clear the daemon's in-memory signing key",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
+			cl, cc, err := dialDaemon()
 			if err != nil {
 				return err
 			}
-			if _, err := daemon.SendRequest(sock, "lock", nil); err != nil {
+			defer cc.Close()
+			if _, err := cl.Lock(context.Background(), &driftnodepb.Empty{}); err != nil {
 				return err
 			}
 			cmd.Println("key locked")
@@ -1139,12 +1148,12 @@ func daemonStopCmd() *cobra.Command {
 		Short: "Stop a running daemon via its control socket",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
+			cl, cc, err := dialDaemon()
 			if err != nil {
 				return err
 			}
-			_, err = daemon.SendRequest(sock, "stop", nil)
-			if err != nil {
+			defer cc.Close()
+			if _, err := cl.Stop(context.Background(), &driftnodepb.Empty{}); err != nil {
 				return err
 			}
 			cmd.Println("daemon stopping")
@@ -1176,10 +1185,15 @@ func daemonRestartCmd() *cobra.Command {
 			}
 			// Stop the running daemon. A not-running error is fine: restart
 			// can launch a fresh daemon even when none is up.
-			if _, err := daemon.SendRequest(sock, "stop", nil); err == nil {
-				cmd.Println("daemon stopping")
-				if err := waitForSocketGone(sock, 5*time.Second); err != nil {
-					return fmt.Errorf("old daemon did not shut down: %w", err)
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				if _, err := cl.Stop(context.Background(), &driftnodepb.Empty{}); err == nil {
+					cc.Close()
+					cmd.Println("daemon stopping")
+					if err := waitForSocketGone(sock, 5*time.Second); err != nil {
+						return fmt.Errorf("old daemon did not shut down: %w", err)
+					}
+				} else {
+					cc.Close()
 				}
 			}
 			return spawnDetachedDaemon(cmd, c, logFile)
@@ -1216,24 +1230,22 @@ func daemonStatusCmd() *cobra.Command {
 		Short: "Show whether the daemon is running",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
-			if err != nil {
-				return err
-			}
-			resp, err := daemon.SendRequest(sock, "status", nil)
+			cl, cc, err := dialDaemon()
 			if err != nil {
 				cmd.Println("not running")
 				return nil
 			}
-			result, ok := resp.Result.(map[string]any)
-			if !ok {
-				return fmt.Errorf("unexpected status response")
+			defer cc.Close()
+			resp, err := cl.Status(context.Background(), &driftnodepb.Empty{})
+			if err != nil {
+				cmd.Println("not running")
+				return nil
 			}
-			cmd.Printf("running: %v\n", result["running"])
-			cmd.Printf("socket: %v\n", result["socket"])
-			cmd.Printf("zens: %v\n", result["zens"])
-			cmd.Printf("transport: %v\n", result["transport"])
-			cmd.Printf("unlocked: %v\n", result["unlocked"])
+			cmd.Printf("running: %v\n", resp.Running)
+			cmd.Printf("socket: %v\n", resp.Socket)
+			cmd.Printf("zens: %v\n", resp.Zens)
+			cmd.Printf("transport: %v\n", resp.Transport)
+			cmd.Printf("unlocked: %v\n", resp.Unlocked)
 			return nil
 		},
 	}
@@ -1249,35 +1261,32 @@ func tuiCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// The TUI is a thin client of the daemon's control socket; it
-			// never opens the store, so it can run alongside the daemon
-			// (which holds the bbolt lock).
-			whoami, err := daemon.SendRequest(sock, "whoami", nil)
+			cl, cc, err := daemon.DialClient(sock)
 			if err != nil {
 				return fmt.Errorf("daemon not running; start it with 'driftnode daemon' first: %w", err)
 			}
-			m, ok := whoami.Result.(map[string]any)
-			if !ok {
-				return fmt.Errorf("unexpected whoami response")
+			defer cc.Close()
+			whoami, err := cl.Whoami(context.Background(), &driftnodepb.Empty{})
+			if err != nil {
+				return fmt.Errorf("daemon not running; start it with 'driftnode daemon' first: %w", err)
 			}
-			identity, _ := m["identity"].(string)
-			if identity == "" {
+			if whoami.Identity == "" {
 				return fmt.Errorf("no identity found; run 'driftnode init' first")
 			}
 			// Unlock the daemon's signing key once, so compose can post
 			// without re-prompting. If already unlocked, the daemon keeps
 			// the existing key.
-			status, _ := daemon.SendRequest(sock, "status", nil)
-			if sm, ok := status.Result.(map[string]any); ok && !sm["unlocked"].(bool) {
+			status, err := cl.Status(context.Background(), &driftnodepb.Empty{})
+			if err == nil && !status.Unlocked {
 				passphrase, err := readPassphrase("passphrase: ")
 				if err != nil {
 					return err
 				}
-				if _, err := daemon.SendRequest(sock, "unlock", map[string]any{"passphrase": passphrase}); err != nil {
+				if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: passphrase}); err != nil {
 					return err
 				}
 			}
-			return tui.Run(sock, identity)
+			return tui.Run(sock, whoami.Identity)
 		},
 	}
 	addDBFlag(c)
@@ -1300,37 +1309,33 @@ func zensListCmd() *cobra.Command {
 		Short: "Show currently connected zens",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
+			cl, cc, err := dialDaemon()
 			if err != nil {
 				return err
 			}
-			resp, err := daemon.SendRequest(sock, "zens", nil)
+			defer cc.Close()
+			snap, err := subscribeSnapshot(cl)
 			if err != nil {
 				return err
 			}
-			zens, ok := resp.Result.([]any)
-			if !ok || len(zens) == 0 {
+			zens := snap.GetZens()
+			if len(zens) == 0 {
 				cmd.Println("(no zens connected)")
 				return nil
 			}
-			for _, p := range zens {
-				pm, ok := p.(map[string]any)
-				if !ok {
-					continue
-				}
-				identity, _ := pm["identity"].(string)
+			for _, z := range zens {
+				identity := z.Identity
 				if identity == "" {
 					identity = "(unknown)"
 				}
 				mark := " "
-				if v, _ := pm["verified"].(bool); v {
+				if z.Verified {
 					mark = "✓"
 				}
-				name, _ := pm["name"].(string)
-				if name != "" {
-					cmd.Printf("%s %s  %s  %s (%s)\n", mark, pm["status"], name, identity, pm["kind"])
+				if z.Name != "" {
+					cmd.Printf("%s %s  %s  %s (%s)\n", mark, z.Status, z.Name, identity, z.Kind)
 				} else {
-					cmd.Printf("%s %s  %s (%s)\n", mark, pm["status"], identity, pm["kind"])
+					cmd.Printf("%s %s  %s (%s)\n", mark, z.Status, identity, z.Kind)
 				}
 			}
 			return nil
@@ -1348,11 +1353,15 @@ func zensVerifyCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid identity: %w", err)
 			}
-			sock, err := daemonSocketPath()
-			if err == nil {
-				if _, err := daemon.SendRequest(sock, "verify", map[string]any{"identity": string(id)}); err == nil {
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				_, err := cl.Verify(context.Background(), &driftnodepb.IdentityReq{Identity: string(id)})
+				if err == nil {
 					cmd.Printf("verified %s\n", id)
 					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
 				}
 			}
 			// Offline: write directly to the store.
@@ -1380,11 +1389,15 @@ func zensUnverifyCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("invalid identity: %w", err)
 			}
-			sock, err := daemonSocketPath()
-			if err == nil {
-				if _, err := daemon.SendRequest(sock, "unverify", map[string]any{"identity": string(id)}); err == nil {
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				_, err := cl.Unverify(context.Background(), &driftnodepb.IdentityReq{Identity: string(id)})
+				if err == nil {
 					cmd.Printf("unverified %s\n", id)
 					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
 				}
 			}
 			s, err := openStoreAt(dbPath)
@@ -1407,11 +1420,12 @@ func syncCmd() *cobra.Command {
 		Short: "Trigger a sync round",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
+			cl, cc, err := dialDaemon()
 			if err != nil {
 				return err
 			}
-			_, err = daemon.SendRequest(sock, "sync", nil)
+			defer cc.Close()
+			_, err = cl.Sync(context.Background(), &driftnodepb.Empty{})
 			if err != nil {
 				return err
 			}
@@ -1429,21 +1443,17 @@ func rotateKeyCmd() *cobra.Command {
 		Short: "Generate a fresh address token, persist it, and restart the listener",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sock, err := daemonSocketPath()
+			cl, cc, err := dialDaemon()
 			if err != nil {
 				return err
 			}
-			resp, err := daemon.SendRequest(sock, "rotate-key", nil)
+			defer cc.Close()
+			resp, err := cl.RotateKey(context.Background(), &driftnodepb.Empty{})
 			if err != nil {
 				return err
 			}
-			m, ok := resp.Result.(map[string]any)
-			if !ok {
-				return fmt.Errorf("unexpected rotate-key response: %v", resp.Result)
-			}
-			token, _ := m["token"].(string)
 			cmd.Println("rotated address token:")
-			cmd.Println("address:", token, "(stable)")
+			cmd.Println("address:", resp.Token, "(stable)")
 			cmd.Println("followers must re-discover your identity to use the new token")
 			return nil
 		},
@@ -1644,21 +1654,12 @@ func profileCmd() *cobra.Command {
 			if name == "" {
 				return fmt.Errorf("--name is required")
 			}
-			sock, err := daemonSocketPath()
-			if err == nil {
-				params := map[string]any{"name": name}
-				if passphrase != "" {
-					params["passphrase"] = passphrase
-				}
-				resp, err := daemon.SendRequest(sock, "profile", params)
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Profile(context.Background(), &driftnodepb.ProfileReq{Name: name, Passphrase: passphrase})
 				if err == nil {
-					if m, ok := resp.Result.(map[string]any); ok {
-						if id, ok := m["event_id"].(string); ok {
-							cmd.Println(id)
-							return nil
-						}
-					}
-					return fmt.Errorf("unexpected profile response: %v", resp.Result)
+					cmd.Println(resp.Status)
+					return nil
 				}
 				if !errors.Is(err, daemon.ErrNotRunning) {
 					return err
@@ -1718,33 +1719,14 @@ func detailCmd() *cobra.Command {
 			if bio == "" && firstName == "" && lastName == "" && location == "" {
 				return fmt.Errorf("provide at least one of --bio, --first-name, --last-name, --location")
 			}
-			sock, err := daemonSocketPath()
-			if err == nil {
-				params := map[string]any{}
-				if bio != "" {
-					params["bio"] = bio
-				}
-				if firstName != "" {
-					params["first_name"] = firstName
-				}
-				if lastName != "" {
-					params["last_name"] = lastName
-				}
-				if location != "" {
-					params["location"] = location
-				}
-				if passphrase != "" {
-					params["passphrase"] = passphrase
-				}
-				resp, err := daemon.SendRequest(sock, "detail", params)
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Detail(context.Background(), &driftnodepb.DetailReq{
+					Bio: bio, FirstName: firstName, LastName: lastName, Location: location, Passphrase: passphrase,
+				})
 				if err == nil {
-					if m, ok := resp.Result.(map[string]any); ok {
-						if id, ok := m["event_id"].(string); ok {
-							cmd.Println(id)
-							return nil
-						}
-					}
-					return fmt.Errorf("unexpected detail response: %v", resp.Result)
+					cmd.Println(resp.Status)
+					return nil
 				}
 				if !errors.Is(err, daemon.ErrNotRunning) {
 					return err

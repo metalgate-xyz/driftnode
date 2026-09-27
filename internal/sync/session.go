@@ -312,6 +312,11 @@ type Session struct {
 	// after a successful handshake, before sync traffic begins. May be nil.
 	onAuthed func(core.Identity)
 
+	// onMerge is called for each event newly inserted into the store during
+	// this session (inserted=true), so the caller can batch a diff for push
+	// subscribers. May be nil.
+	onMerge func(se *core.SignedEvent, inserted bool)
+
 	// cursorZen is the authenticated identity of the remote zen, set by
 	// Handshake. Used to key per-(zen,log) pull cursors.
 	cursorZen core.Identity
@@ -338,6 +343,11 @@ func (s *Session) SetKey(k *core.KeyPair) { s.key = k }
 // SetAuthed sets the callback invoked with the zen's authenticated identity
 // after a successful handshake.
 func (s *Session) SetAuthed(fn func(core.Identity)) { s.onAuthed = fn }
+
+// SetOnMerge sets the callback invoked for each event newly inserted during
+// this session. It lets the caller collect merged events for an incremental
+// push diff without re-reading the whole store.
+func (s *Session) SetOnMerge(fn func(se *core.SignedEvent, inserted bool)) { s.onMerge = fn }
 
 // SetZenSource sets the function that returns this node's known zen refs to
 // offer during zen exchange.
@@ -706,9 +716,16 @@ func (s *Session) mergeEvent(se *core.SignedEvent) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	var inserted bool
 	if se.Author == ownID {
-		return true, s.store.AppendOwnEvent(se.Event.Log, se)
+		err = s.store.AppendOwnEvent(se.Event.Log, se)
+		inserted = true
+	} else {
+		seq := uint64(se.Event.Sequence)
+		inserted, err = s.store.PutCrawledEvent(se, seq)
 	}
-	seq := uint64(se.Event.Sequence)
-	return s.store.PutCrawledEvent(se, seq)
+	if s.onMerge != nil {
+		s.onMerge(se, inserted)
+	}
+	return inserted, err
 }

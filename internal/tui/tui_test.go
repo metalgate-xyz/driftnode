@@ -149,8 +149,8 @@ func TestViewRendersFeed(t *testing.T) {
 	m := newModel("", "driftnode:test")
 	m.width, m.height = 80, 24
 	m.layout()
-	m.posts = []feedPost{{name: "alice", author: "driftnode:alice", text: "gm", age: "1m"}}
-	m.feed.setPosts(m.posts)
+	posts := []feedPost{{id: "p1", name: "alice", author: "driftnode:alice", text: "gm", age: "1m"}}
+	m.feed.setPosts(posts)
 	out := m.View().Content
 	if !strings.Contains(out, "gm") {
 		t.Fatal("view should render feed text")
@@ -176,8 +176,7 @@ func TestZenActions(t *testing.T) {
 	m.width, m.height = 80, 24
 	m.layout()
 	// Seed the zens list with one discovered zen.
-	m.zenList = []zen{{name: "alice", identity: "driftnode:alice", status: "connected"}}
-	m.zens.setItems(m.zenList)
+	m.zens.setItems([]zen{{name: "alice", identity: "driftnode:alice", id: "driftnode:alice", status: "connected"}})
 	// Switch to Zens tab.
 	m = press(t, m, tea.KeyPressMsg{Code: tea.KeyTab})
 	if m.activeTab != tabZens {
@@ -195,8 +194,7 @@ func TestZenActions(t *testing.T) {
 	}
 	m = asModel(t, mm)
 	// 'f' again on an already-followed zen does not issue a command.
-	m.followList = []zen{{name: "alice", identity: "driftnode:alice"}}
-	m.follows.setItems(m.followList)
+	m.follows.setItems([]zen{{name: "alice", identity: "driftnode:alice"}})
 	mm, cmd = m.Update(tea.KeyPressMsg{Code: 'f', Text: "f"})
 	if cmd != nil {
 		t.Fatal("follow on an already-followed zen should not produce a command")
@@ -210,11 +208,12 @@ func TestZenActions(t *testing.T) {
 // at that row. The coordinate math accounts for the three screen rows above
 // the panel content: title, tab bar, and the panel's top border.
 func TestMouseClickSelectsZen(t *testing.T) {
-	m := simModel(t, 80, 24, "driftnode:test", 5)
-	for i := range m.zenList {
-		m.zenList[i] = zen{name: "zen" + string(rune('a'+i)), identity: "driftnode:z" + string(rune('a'+i)), status: "connected"}
-	}
-	m.zens.setItems(m.zenList)
+	m := simModel(t, 80, 24, "driftnode:test", 0)
+	m.zens.setItems([]zen{
+		{name: "zena", identity: "driftnode:za", id: "driftnode:za", status: "connected"},
+		{name: "zenb", identity: "driftnode:zb", id: "driftnode:zb", status: "connected"},
+		{name: "zenc", identity: "driftnode:zc", id: "driftnode:zc", status: "connected"},
+	})
 	m.activeTab = tabZens
 
 	// Each zen row is 1 line. Click the third item: content row 2 maps to
@@ -229,11 +228,12 @@ func TestMouseClickSelectsZen(t *testing.T) {
 
 // TestMouseClickIgnoresNonLeftButton ensures only left clicks select.
 func TestMouseClickIgnoresNonLeftButton(t *testing.T) {
-	m := simModel(t, 80, 24, "driftnode:test", 3)
-	for i := range m.zenList {
-		m.zenList[i] = zen{name: "zen" + string(rune('a'+i)), identity: "driftnode:z" + string(rune('a'+i)), status: "connected"}
-	}
-	m.zens.setItems(m.zenList)
+	m := simModel(t, 80, 24, "driftnode:test", 0)
+	m.zens.setItems([]zen{
+		{name: "zena", identity: "driftnode:za", id: "driftnode:za", status: "connected"},
+		{name: "zenb", identity: "driftnode:zb", id: "driftnode:zb", status: "connected"},
+		{name: "zenc", identity: "driftnode:zc", id: "driftnode:zc", status: "connected"},
+	})
 	m.activeTab = tabZens
 
 	mm, _ := m.Update(tea.MouseClickMsg{X: 5, Y: 3, Button: tea.MouseRight})
@@ -247,11 +247,11 @@ func TestMouseClickIgnoresNonLeftButton(t *testing.T) {
 // TestMouseClickOutOfBoundsIgnored ensures clicks below the last item don't
 // wrap or select garbage.
 func TestMouseClickOutOfBoundsIgnored(t *testing.T) {
-	m := simModel(t, 80, 24, "driftnode:test", 2)
-	for i := range m.zenList {
-		m.zenList[i] = zen{name: "zen" + string(rune('a'+i)), identity: "driftnode:z" + string(rune('a'+i)), status: "connected"}
-	}
-	m.zens.setItems(m.zenList)
+	m := simModel(t, 80, 24, "driftnode:test", 0)
+	m.zens.setItems([]zen{
+		{name: "zena", identity: "driftnode:za", id: "driftnode:za", status: "connected"},
+		{name: "zenb", identity: "driftnode:zb", id: "driftnode:zb", status: "connected"},
+	})
 	m.activeTab = tabZens
 
 	// Click far below the last item (screen row 30).
@@ -268,11 +268,11 @@ func TestMouseClickOutOfBoundsIgnored(t *testing.T) {
 func TestFeedSelectionHighlight(t *testing.T) {
 	m := simModel(t, 80, 24, "driftnode:test", 0)
 	m.activeTab = tabFeed
-	m.posts = []feedPost{
-		{name: "alice", author: "driftnode:alice", text: "gm", age: "1m"},
-		{name: "bob", author: "driftnode:bob", text: "hello", age: "2m"},
+	posts := []feedPost{
+		{id: "p1", name: "alice", author: "driftnode:alice", text: "gm", age: "1m"},
+		{id: "p2", name: "bob", author: "driftnode:bob", text: "hello", age: "2m"},
 	}
-	m.feed.setPosts(m.posts)
+	m.feed.setPosts(posts)
 	// Move selection to the second post.
 	mm, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	m = asModel(t, mm)
@@ -291,11 +291,10 @@ func TestFeedSelectionHighlight(t *testing.T) {
 func TestZenSelectionHighlight(t *testing.T) {
 	m := simModel(t, 80, 24, "driftnode:test", 0)
 	m.activeTab = tabZens
-	m.zenList = []zen{
-		{name: "alice", identity: "driftnode:alice", status: "connected"},
-		{name: "bob", identity: "driftnode:bob", status: "connecting"},
-	}
-	m.zens.setItems(m.zenList)
+	m.zens.setItems([]zen{
+		{name: "alice", identity: "driftnode:alice", id: "driftnode:alice", status: "connected"},
+		{name: "bob", identity: "driftnode:bob", id: "driftnode:bob", status: "connecting"},
+	})
 	// Move selection to the second zen.
 	mm, _ := m.Update(tea.KeyPressMsg{Code: 'j', Text: "j"})
 	m = asModel(t, mm)

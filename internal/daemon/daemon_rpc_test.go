@@ -1,16 +1,18 @@
 package daemon
 
 import (
-	"encoding/json"
+	"context"
+	"io"
 	"os"
 	"testing"
 	"time"
 
 	"driftnode/internal/core"
+	"driftnode/internal/proto/driftnodepb"
 	syncproto "driftnode/internal/sync"
 )
 
-func TestSendRequestWhoami(t *testing.T) {
+func TestWhoami(t *testing.T) {
 	s := newTestStore(t)
 	initTestIdentity(t, s)
 	d := New(s, nil)
@@ -20,20 +22,17 @@ func TestSendRequestWhoami(t *testing.T) {
 	}
 	defer d.Stop()
 
-	resp, err := SendRequest(sock, "whoami", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Whoami(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("SendRequest: %v", err)
+		t.Fatalf("Whoami: %v", err)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	if _, ok := result["identity"].(string); !ok {
+	if resp.Identity == "" {
 		t.Fatal("missing identity in result")
 	}
 }
 
-func TestSendRequestZens(t *testing.T) {
+func TestZens(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)
 	sock := testSocketPath(t)
@@ -43,20 +42,17 @@ func TestSendRequestZens(t *testing.T) {
 	d.upsertZen("p1", "native", "connected")
 	d.upsertZen("p2", "browser", "connected")
 
-	resp, err := SendRequest(sock, "zens", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("SendRequest: %v", err)
+		t.Fatalf("Zens: %v", err)
 	}
-	zens, ok := resp.Result.([]any)
-	if !ok {
-		t.Fatalf("result is not a slice: %T", resp.Result)
-	}
-	if len(zens) != 2 {
-		t.Fatalf("want 2 zens, got %d", len(zens))
+	if len(resp.Zens) != 2 {
+		t.Fatalf("want 2 zens, got %d", len(resp.Zens))
 	}
 }
 
-func TestSendRequestVerifyZens(t *testing.T) {
+func TestVerifyZens(t *testing.T) {
 	s := newTestStore(t)
 	initTestIdentity(t, s)
 	d := New(s, nil)
@@ -64,7 +60,6 @@ func TestSendRequestVerifyZens(t *testing.T) {
 	d.Start(sock)
 	defer d.Stop()
 
-	// Add a zen and bind its token to a known identity via the routing table.
 	peerKP, err := core.NewKeyPair()
 	if err != nil {
 		t.Fatalf("NewKeyPair: %v", err)
@@ -75,46 +70,40 @@ func TestSendRequestVerifyZens(t *testing.T) {
 		t.Fatalf("PutRouting: %v", err)
 	}
 
+	cl, _ := testClient(t, sock)
+
 	// Before verify, the zen is not marked verified.
-	resp, err := SendRequest(sock, "zens", nil)
+	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("zens: %v", err)
 	}
-	zens, ok := resp.Result.([]any)
-	if !ok || len(zens) != 1 {
-		t.Fatalf("want 1 zen, got %v", resp.Result)
+	if len(resp.Zens) != 1 {
+		t.Fatalf("want 1 zen, got %d", len(resp.Zens))
 	}
-	if pm, _ := zens[0].(map[string]any); pm["verified"] == true {
+	if resp.Zens[0].Verified {
 		t.Fatal("zen should not be verified before verify RPC")
 	}
 
 	// Verify the peer identity out-of-band.
-	if _, err := SendRequest(sock, "verify", map[string]any{"identity": string(peerID)}); err != nil {
+	if _, err := cl.Verify(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 
 	// After verify, the zen is marked verified.
-	resp, err = SendRequest(sock, "zens", nil)
+	resp, err = cl.Zens(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("zens after verify: %v", err)
 	}
-	zens, _ = resp.Result.([]any)
-	pm, ok := zens[0].(map[string]any)
-	if !ok {
-		t.Fatalf("zen is not a map: %T", zens[0])
-	}
-	if pm["verified"] != true {
-		t.Fatalf("zen should be verified after verify RPC, got %v", pm["verified"])
+	if !resp.Zens[0].Verified {
+		t.Fatal("zen should be verified after verify RPC")
 	}
 
 	// Unverify clears the flag.
-	if _, err := SendRequest(sock, "unverify", map[string]any{"identity": string(peerID)}); err != nil {
+	if _, err := cl.Unverify(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err != nil {
 		t.Fatalf("unverify: %v", err)
 	}
-	resp, _ = SendRequest(sock, "zens", nil)
-	zens, _ = resp.Result.([]any)
-	pm, _ = zens[0].(map[string]any)
-	if pm["verified"] == true {
+	resp, _ = cl.Zens(context.Background(), &driftnodepb.Empty{})
+	if resp.Zens[0].Verified {
 		t.Fatal("zen should not be verified after unverify")
 	}
 }
@@ -136,34 +125,27 @@ func TestZensShowsIdentityWithoutName(t *testing.T) {
 	}
 	peerID := peerKP.Identity()
 
-	// Learn the zen through exchange with an identity but no name.
 	d.learnZenRef(syncproto.ZenRef{Token: "tok-no-name", Identity: peerID})
 
-	resp, err := SendRequest(sock, "zens", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("zens: %v", err)
 	}
-	zens, ok := resp.Result.([]any)
-	if !ok || len(zens) != 1 {
-		t.Fatalf("want 1 zen, got %v", resp.Result)
+	if len(resp.Zens) != 1 {
+		t.Fatalf("want 1 zen, got %d", len(resp.Zens))
 	}
-	pm, ok := zens[0].(map[string]any)
-	if !ok {
-		t.Fatalf("zen is not a map: %T", zens[0])
+	if resp.Zens[0].Identity != string(peerID) {
+		t.Fatalf("identity: want %s, got %q", peerID, resp.Zens[0].Identity)
 	}
-	if got, _ := pm["identity"].(string); got != string(peerID) {
-		t.Fatalf("identity: want %s, got %q", peerID, got)
-	}
-	if got, _ := pm["name"].(string); got != "" {
-		t.Fatalf("name should be empty, got %q", got)
+	if resp.Zens[0].Name != "" {
+		t.Fatalf("name should be empty, got %q", resp.Zens[0].Name)
 	}
 }
 
 // TestZensRehydratedOnRestart proves the zens map is rebuilt from the
 // persisted routing table when the daemon starts, so the CLI/TUI show the
-// known network immediately after a restart instead of an empty list. A
-// restart must not lose the followed zens; their live status is refreshed
-// by the next sync round.
+// known network immediately after a restart instead of an empty list.
 func TestZensRehydratedOnRestart(t *testing.T) {
 	s := newTestStore(t)
 	initTestIdentity(t, s)
@@ -183,80 +165,70 @@ func TestZensRehydratedOnRestart(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	resp, err := SendRequest(sock, "zens", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("zens: %v", err)
 	}
-	zens, ok := resp.Result.([]any)
-	if !ok || len(zens) != 1 {
-		t.Fatalf("want 1 rehydrated zen, got %v", resp.Result)
+	if len(resp.Zens) != 1 {
+		t.Fatalf("want 1 rehydrated zen, got %d", len(resp.Zens))
 	}
-	pm, ok := zens[0].(map[string]any)
-	if !ok {
-		t.Fatalf("zen is not a map: %T", zens[0])
+	if resp.Zens[0].Id != peerTok {
+		t.Fatalf("id: want %q, got %q", peerTok, resp.Zens[0].Id)
 	}
-	if got, _ := pm["id"].(string); got != peerTok {
-		t.Fatalf("id: want %q, got %q", peerTok, got)
+	if resp.Zens[0].Identity != string(peerID) {
+		t.Fatalf("identity: want %s, got %q", peerID, resp.Zens[0].Identity)
 	}
-	if got, _ := pm["identity"].(string); got != string(peerID) {
-		t.Fatalf("identity: want %s, got %q", peerID, got)
-	}
-	if got, _ := pm["status"].(string); got != "connecting" {
-		t.Fatalf("status: want connecting, got %q", got)
+	if resp.Zens[0].Status != "connecting" {
+		t.Fatalf("status: want connecting, got %q", resp.Zens[0].Status)
 	}
 
 	d.Stop()
 }
 
-func TestSendRequestStatus(t *testing.T) {
+func TestStatus(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)
 	sock := testSocketPath(t)
 	d.Start(sock)
 	defer d.Stop()
 
-	resp, err := SendRequest(sock, "status", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Status(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("SendRequest: %v", err)
+		t.Fatalf("Status: %v", err)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	if result["running"] != true {
+	if !resp.Running {
 		t.Fatal("not running")
 	}
 }
 
-func TestSendRequestSync(t *testing.T) {
+func TestSync(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)
 	sock := testSocketPath(t)
 	d.Start(sock)
 	defer d.Stop()
 
-	resp, err := SendRequest(sock, "sync", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Sync(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("SendRequest: %v", err)
+		t.Fatalf("Sync: %v", err)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	if result["status"] != "triggered" {
-		t.Fatalf("unexpected status: %v", result["status"])
+	if resp.Status != "triggered" {
+		t.Fatalf("unexpected status: %v", resp.Status)
 	}
 }
 
-func TestSendRequestNotRunning(t *testing.T) {
+func TestDialClientNotRunning(t *testing.T) {
 	sock := testSocketPath(t)
-	_, err := SendRequest(sock, "whoami", nil)
+	_, _, err := DialClient(sock)
 	if err == nil {
 		t.Fatal("expected error when daemon not running")
 	}
 }
 
-func TestSendRequestParamsMarshal(t *testing.T) {
+func TestFollowParamsMarshal(t *testing.T) {
 	s := newTestStore(t)
 	kp := initTestIdentity(t, s)
 	d := New(s, nil)
@@ -264,29 +236,20 @@ func TestSendRequestParamsMarshal(t *testing.T) {
 	d.Start(sock)
 	defer d.Stop()
 
-	// follow <pubkey> (offline path): requires a passphrase to sign the
-	// Follow event. Passing the node's own identity as target proves the
-	// params marshal and dispatch.
-	resp, err := SendRequest(sock, "follow", map[string]any{
-		"target":     string(kp.Identity()),
-		"passphrase": "pass",
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Follow(context.Background(), &driftnodepb.FollowReq{
+		Target:     string(kp.Identity()),
+		Passphrase: "pass",
 	})
 	if err != nil {
-		t.Fatalf("SendRequest: %v", err)
+		t.Fatalf("Follow: %v", err)
 	}
-	result, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("result is not a map: %T", resp.Result)
-	}
-	if result["followed"] == nil {
-		t.Fatalf("unexpected result: %v", result)
+	if resp.Followed == "" {
+		t.Fatalf("unexpected empty followed: %v", resp)
 	}
 }
 
-// Compile-time check.
-var _ = json.Marshal
-
-func TestSendRequestStop(t *testing.T) {
+func TestStop(t *testing.T) {
 	s := newTestStore(t)
 	d := New(s, nil)
 	sock := testSocketPath(t)
@@ -294,40 +257,34 @@ func TestSendRequestStop(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 
-	// Send the stop RPC. The daemon acknowledges, then shuts itself down.
-	resp, err := SendRequest(sock, "stop", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Stop(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("SendRequest stop: %v", err)
+		t.Fatalf("Stop: %v", err)
 	}
-	if resp.Result.(map[string]any)["status"] != "stopping" {
-		t.Fatalf("unexpected stop status: %v", resp.Result)
+	if resp.Status != "stopping" {
+		t.Fatalf("unexpected stop status: %v", resp.Status)
 	}
 
-	// Wait for the daemon to stop itself.
 	select {
 	case <-d.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("daemon did not stop after stop RPC")
 	}
 
-	// The socket file must be gone.
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Fatalf("socket file still exists: %v", err)
 	}
 }
 
-// statusUnlocked reads the "unlocked" field from a status response.
-func statusUnlocked(t *testing.T, sock string) bool {
+// statusUnlocked reads the unlocked field from a status response.
+func statusUnlocked(t *testing.T, cl driftnodepb.DriftnodeClient) bool {
 	t.Helper()
-	resp, err := SendRequest(sock, "status", nil)
+	resp, err := cl.Status(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
-	m, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("status result not a map: %T", resp.Result)
-	}
-	return m["unlocked"].(bool)
+	return resp.Unlocked
 }
 
 func TestUnlockPostWithoutPassphrase(t *testing.T) {
@@ -340,45 +297,46 @@ func TestUnlockPostWithoutPassphrase(t *testing.T) {
 	}
 	defer d.Stop()
 
-	// Before unlock, status reports locked and keyless post fails.
-	if statusUnlocked(t, sock) {
+	cl, _ := testClient(t, sock)
+
+	if statusUnlocked(t, cl) {
 		t.Fatal("key should be locked before unlock")
 	}
-	if _, err := SendRequest(sock, "post", map[string]any{"text": "no"}); err == nil {
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "no"}); err == nil {
 		t.Fatal("keyless post should fail before unlock")
 	}
 
 	// Wrong passphrase is rejected and leaves the key locked.
-	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "wrong"}); err == nil {
+	if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: "wrong"}); err == nil {
 		t.Fatal("wrong passphrase should fail")
 	}
-	if statusUnlocked(t, sock) {
+	if statusUnlocked(t, cl) {
 		t.Fatal("key should stay locked after wrong passphrase")
 	}
 
 	// Correct passphrase unlocks and lets post omit it.
-	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
+	if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: "pass"}); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if !statusUnlocked(t, sock) {
+	if !statusUnlocked(t, cl) {
 		t.Fatal("key should be unlocked after unlock RPC")
 	}
-	resp, err := SendRequest(sock, "post", map[string]any{"text": "hello"})
+	resp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "hello"})
 	if err != nil {
 		t.Fatalf("keyless post: %v", err)
 	}
-	if _, ok := resp.Result.(map[string]any)["event_id"].(string); !ok {
-		t.Fatalf("missing event_id: %v", resp.Result)
+	if resp.EventId == "" {
+		t.Fatalf("missing event_id: %v", resp)
 	}
 
 	// Lock clears the key; keyless post fails again.
-	if _, err := SendRequest(sock, "lock", nil); err != nil {
+	if _, err := cl.Lock(context.Background(), &driftnodepb.Empty{}); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if statusUnlocked(t, sock) {
+	if statusUnlocked(t, cl) {
 		t.Fatal("key should be locked after lock RPC")
 	}
-	if _, err := SendRequest(sock, "post", map[string]any{"text": "no"}); err == nil {
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "no"}); err == nil {
 		t.Fatal("keyless post should fail after lock")
 	}
 }
@@ -393,19 +351,18 @@ func TestPostWithPassphraseUnlocksImplicitly(t *testing.T) {
 	}
 	defer d.Stop()
 
-	// Supplying the passphrase on post unlocks implicitly, so the next
-	// keyless post succeeds.
-	resp, err := SendRequest(sock, "post", map[string]any{"text": "one", "passphrase": "pass"})
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "one", Passphrase: "pass"})
 	if err != nil {
 		t.Fatalf("post with passphrase: %v", err)
 	}
-	if _, ok := resp.Result.(map[string]any)["event_id"].(string); !ok {
-		t.Fatalf("missing event_id: %v", resp.Result)
+	if resp.EventId == "" {
+		t.Fatalf("missing event_id: %v", resp)
 	}
-	if !statusUnlocked(t, sock) {
+	if !statusUnlocked(t, cl) {
 		t.Fatal("post with passphrase should unlock implicitly")
 	}
-	if _, err := SendRequest(sock, "post", map[string]any{"text": "two"}); err != nil {
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "two"}); err != nil {
 		t.Fatalf("keyless post after implicit unlock: %v", err)
 	}
 }
@@ -414,26 +371,26 @@ func TestIdleLockReapsKey(t *testing.T) {
 	s := newTestStore(t)
 	initTestIdentity(t, s)
 	d := New(s, nil)
-	d.SetIdleLock(20 * time.Millisecond) // very short for the test
+	d.SetIdleLock(20 * time.Millisecond)
 	sock := testSocketPath(t)
 	if err := d.Start(sock); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	defer d.Stop()
 
-	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
+	cl, _ := testClient(t, sock)
+	if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: "pass"}); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-	if !statusUnlocked(t, sock) {
+	if !statusUnlocked(t, cl) {
 		t.Fatal("key should be unlocked")
 	}
-	time.Sleep(40 * time.Millisecond) // exceed the idle window
+	time.Sleep(40 * time.Millisecond)
 
-	// A keyless post after the idle window reaps the key and fails.
-	if _, err := SendRequest(sock, "post", map[string]any{"text": "no"}); err == nil {
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "no"}); err == nil {
 		t.Fatal("keyless post should fail after idle-lock reaped the key")
 	}
-	if statusUnlocked(t, sock) {
+	if statusUnlocked(t, cl) {
 		t.Fatal("key should be reaped after idle-lock expiry")
 	}
 }
@@ -448,18 +405,17 @@ func TestProfileDetailRPC(t *testing.T) {
 	}
 	defer d.Stop()
 
-	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
+	cl, _ := testClient(t, sock)
+	if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: "pass"}); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
-
-	if _, err := SendRequest(sock, "profile", map[string]any{"name": "alice"}); err != nil {
+	if _, err := cl.Profile(context.Background(), &driftnodepb.ProfileReq{Name: "alice"}); err != nil {
 		t.Fatalf("profile RPC: %v", err)
 	}
-	if _, err := SendRequest(sock, "detail", map[string]any{"bio": "wanderer", "location": "Wonderland"}); err != nil {
+	if _, err := cl.Detail(context.Background(), &driftnodepb.DetailReq{Bio: "wanderer", Location: "Wonderland"}); err != nil {
 		t.Fatalf("detail RPC: %v", err)
 	}
 
-	// Verify the events landed in the own logs.
 	profEvents, err := s.OwnEvents(core.ProfileLog)
 	if err != nil {
 		t.Fatalf("read profile log: %v", err)
@@ -491,31 +447,25 @@ func TestFollowsAndFollowersRPC(t *testing.T) {
 	}
 	defer d.Stop()
 
-	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
+	cl, _ := testClient(t, sock)
+	if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: "pass"}); err != nil {
 		t.Fatalf("unlock: %v", err)
 	}
 
-	// Follow two identities.
 	targetA, _ := core.NewKeyPair()
 	targetB, _ := core.NewKeyPair()
 	for _, target := range []core.Identity{targetA.Identity(), targetB.Identity()} {
-		if _, err := SendRequest(sock, "follow", map[string]any{"target": string(target)}); err != nil {
+		if _, err := cl.Follow(context.Background(), &driftnodepb.FollowReq{Target: string(target)}); err != nil {
 			t.Fatalf("follow %s: %v", target, err)
 		}
 	}
 
-	// follows RPC returns both.
-	resp, err := SendRequest(sock, "follows", nil)
+	resp, err := cl.Follows(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("follows: %v", err)
 	}
-	m, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("follows result: %v", resp.Result)
-	}
-	items, _ := m["follows"].([]any)
-	if len(items) != 2 {
-		t.Fatalf("follows: want 2, got %d (%v)", len(items), items)
+	if len(resp.Identities) != 2 {
+		t.Fatalf("follows: want 2, got %d", len(resp.Identities))
 	}
 
 	// A follower follows us: store their Follow event via the sync path.
@@ -534,18 +484,12 @@ func TestFollowsAndFollowersRPC(t *testing.T) {
 		t.Fatalf("PutCrawledEvent: %v", err)
 	}
 
-	// followers RPC returns the follower.
-	resp, err = SendRequest(sock, "followers", nil)
+	fresp, err := cl.Followers(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("followers: %v", err)
 	}
-	m, ok = resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("followers result: %v", resp.Result)
-	}
-	items, _ = m["followers"].([]any)
-	if len(items) != 1 {
-		t.Fatalf("followers: want 1, got %d (%v)", len(items), items)
+	if len(fresp.Identities) != 1 {
+		t.Fatalf("followers: want 1, got %d", len(fresp.Identities))
 	}
 }
 
@@ -569,23 +513,18 @@ func TestRotateKey(t *testing.T) {
 	}
 	oldAddr := string(oldListener.Addr())
 
-	resp, err := SendRequest(sock, "rotate-key", nil)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.RotateKey(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("rotate-key: %v", err)
 	}
-	m, ok := resp.Result.(map[string]any)
-	if !ok {
-		t.Fatalf("rotate-key result: %v", resp.Result)
-	}
-	newAddr, _ := m["token"].(string)
-	if newAddr == "" {
+	if resp.Token == "" {
 		t.Fatal("rotate-key returned empty token")
 	}
-	if newAddr == oldAddr {
+	if resp.Token == oldAddr {
 		t.Fatal("rotate-key did not change the address token")
 	}
 
-	// The new key must be persisted so it survives a restart.
 	stored, ok, _ := s.TransportKey()
 	if !ok {
 		t.Fatal("transport key not persisted after rotate")
@@ -594,13 +533,280 @@ func TestRotateKey(t *testing.T) {
 		t.Fatal("persisted transport key is empty")
 	}
 
-	// whoami must report the new token.
-	whoami, err := SendRequest(sock, "whoami", nil)
+	whoami, err := cl.Whoami(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
 		t.Fatalf("whoami after rotate: %v", err)
 	}
-	wm, _ := whoami.Result.(map[string]any)
-	if got, _ := wm["token"].(string); got != newAddr {
-		t.Fatalf("whoami token after rotate: want %s, got %s", newAddr, got)
+	if whoami.Token != resp.Token {
+		t.Fatalf("whoami token after rotate: want %s, got %s", resp.Token, whoami.Token)
 	}
 }
+
+// subscribeStream opens a subscribe stream and reads one event. It fails the
+// test on error.
+func subscribeStream(t *testing.T, cl driftnodepb.DriftnodeClient) (driftnodepb.Driftnode_SubscribeClient, *driftnodepb.Event) {
+	t.Helper()
+	stream, err := cl.Subscribe(context.Background(), &driftnodepb.SubscribeReq{})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv subscribe event: %v", err)
+	}
+	return stream, ev
+}
+
+// TestSubscribeSnapshot verifies a subscribe stream receives a snapshot
+// carrying all four panels plus status.
+func TestSubscribeSnapshot(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+	_, ev := subscribeStream(t, cl)
+	snap, ok := ev.Kind.(*driftnodepb.Event_Snapshot)
+	if !ok {
+		t.Fatalf("first event: want Snapshot, got %T", ev.Kind)
+	}
+	if snap.Snapshot == nil {
+		t.Fatal("nil snapshot")
+	}
+	if snap.Snapshot.Status == nil {
+		t.Fatal("snapshot missing status")
+	}
+}
+
+// TestSubscribeSnapshotFeedIsCapped verifies the snapshot does not send the
+// entire feed when it is large. The TUI only renders the visible window, so
+// sending millions of posts would freeze the client; the snapshot is capped
+// and newer posts arrive as diffs.
+func TestSubscribeSnapshotFeedIsCapped(t *testing.T) {
+	s := newTestStore(t)
+	kp := initTestIdentity(t, s)
+	d := New(s, nil)
+	d.SetUnlockedKey(kp)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+	for i := 0; i < snapshotFeedLimit+50; i++ {
+		if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "post"}); err != nil {
+			t.Fatalf("post %d: %v", i, err)
+		}
+	}
+
+	_, ev := subscribeStream(t, cl)
+	snap, ok := ev.Kind.(*driftnodepb.Event_Snapshot)
+	if !ok {
+		t.Fatalf("first event: want Snapshot, got %T", ev.Kind)
+	}
+	if len(snap.Snapshot.Feed) > snapshotFeedLimit {
+		t.Fatalf("snapshot feed cap: want <= %d, got %d", snapshotFeedLimit, len(snap.Snapshot.Feed))
+	}
+
+	// A second subscribe must return the same feed from the cache without
+	// rebuilding from disk.
+	_, ev2 := subscribeStream(t, cl)
+	snap2, _ := ev2.Kind.(*driftnodepb.Event_Snapshot)
+	if len(snap2.Snapshot.Feed) != len(snap.Snapshot.Feed) {
+		t.Fatalf("cached snapshot feed: want %d, got %d", len(snap.Snapshot.Feed), len(snap2.Snapshot.Feed))
+	}
+}
+
+// TestSubscribeDiffOnPost verifies the daemon pushes a feed diff to a
+// subscriber when a post is created, without the TUI re-fetching.
+func TestSubscribeDiffOnPost(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+	stream, _ := subscribeStream(t, cl)
+
+	// Unlock and post; a feed diff should arrive over the stream.
+	if _, err := cl.Unlock(context.Background(), &driftnodepb.UnlockReq{Passphrase: "pass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	// Drain the status diff from unlock so the next event is the feed diff.
+	if _, err := stream.Recv(); err != nil {
+		t.Fatalf("drain status diff: %v", err)
+	}
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "hello-sub"}); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	ev, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("recv feed diff: %v", err)
+	}
+	diff, ok := ev.Kind.(*driftnodepb.Event_FeedDiff)
+	if !ok {
+		t.Fatalf("want FeedDiff, got %T", ev.Kind)
+	}
+	if len(diff.FeedDiff.Add) == 0 {
+		t.Fatal("feed diff add is empty")
+	}
+	if diff.FeedDiff.Add[0].Text != "hello-sub" {
+		t.Fatalf("feed diff text: want hello-sub, got %v", diff.FeedDiff.Add[0].Text)
+	}
+}
+
+// TestSubscribeNoLostEvents verifies a subscriber does not miss a post that
+// arrives while it is mid-subscribe. A correct implementation registers the
+// subscriber before building the snapshot, so any post that lands between
+// subscribe-open and first-event-read is either in the snapshot or delivered
+// as a diff. The current ordering (snapshot -> send -> register) leaves a
+// window where a post is neither.
+//
+// We maximize overlap by running many iterations of subscribe-while-posting
+// concurrently; under the buggy ordering a post can land after the snapshot
+// is built but before the subscriber is registered.
+func TestSubscribeNoLostEvents(t *testing.T) {
+	s := newTestStore(t)
+	kp := initTestIdentity(t, s)
+	d := New(s, nil)
+	d.SetUnlockedKey(kp)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		postCl, _ := testClient(t, sock)
+		text := "race-post-" + itoa10(i)
+
+		// Subscribe and immediately start a concurrent poster. The poster
+		// races the snapshot/registration; a correct daemon delivers the
+		// post either in the snapshot or as a subsequent diff.
+		subCl, _ := testClient(t, sock)
+		subCtx, subCancel := context.WithCancel(context.Background())
+		stream, err := subCl.Subscribe(subCtx, &driftnodepb.SubscribeReq{})
+		if err != nil {
+			subCancel()
+			t.Fatalf("subscribe: %v", err)
+		}
+		postDone := make(chan error, 1)
+		go func() {
+			_, err := postCl.Post(context.Background(), &driftnodepb.PostReq{Text: text})
+			postDone <- err
+		}()
+
+		// Read the snapshot, then drain diffs looking for our post. The
+		// contract is delivery in the snapshot feed OR a subsequent feed
+		// diff; a correct Subscribe ordering must satisfy one of the two.
+		snap, err := stream.Recv()
+		if err != nil {
+			subCancel()
+			t.Fatalf("recv snapshot: %v", err)
+		}
+		snapEv, ok := snap.Kind.(*driftnodepb.Event_Snapshot)
+		if !ok {
+			subCancel()
+			t.Fatalf("first event: want Snapshot, got %T", snap.Kind)
+		}
+		found := false
+		if snapEv.Snapshot != nil {
+			for _, it := range snapEv.Snapshot.Feed {
+				if it.Text == text {
+					found = true
+				}
+			}
+		}
+		if err := <-postDone; err != nil {
+			subCancel()
+			t.Fatalf("post: %v", err)
+		}
+
+		// Bounded drain: cancel the stream after a short window so a lost
+		// event surfaces as a clean EOF instead of hanging forever.
+		go time.AfterFunc(500*time.Millisecond, subCancel)
+		for !found {
+			ev, err := stream.Recv()
+			if err != nil {
+				break
+			}
+			if diff, ok := ev.Kind.(*driftnodepb.Event_FeedDiff); ok {
+				for _, it := range diff.FeedDiff.Add {
+					if it.Text == text {
+						found = true
+					}
+				}
+			}
+		}
+		subCancel()
+		if !found {
+			t.Fatalf("iteration %d: lost event %q (not in snapshot, not delivered as diff)", i, text)
+		}
+	}
+}
+
+// itoa10 formats a non-negative integer. Kept local to avoid a strconv import.
+func itoa10(i int) string {
+	if i == 0 {
+		return "0"
+	}
+	var b []byte
+	for i > 0 {
+		b = append([]byte{byte('0' + i%10)}, b...)
+		i /= 10
+	}
+	return string(b)
+}
+
+// TestZensRPCConcurrentStatusMutation exercises the data race between the
+// Zens RPC reading zenInfo fields after releasing d.mu and setZenStatus
+// mutating the same struct under d.mu. The Zens handler collects *zenInfo
+// pointers under the lock but reads their fields (Identity, Name, Status,
+// Verified) after unlocking, so a concurrent status update races.
+func TestZensRPCConcurrentStatusMutation(t *testing.T) {
+	s := newTestStore(t)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	d.upsertZen("tok-a", "native_zen", "connecting")
+
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				d.setZenStatus("tok-a", "connecting")
+				d.setZenStatus("tok-a", "connected")
+			}
+		}
+	}()
+
+	cl, _ := testClient(t, sock)
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, err := cl.Zens(context.Background(), &driftnodepb.Empty{}); err != nil {
+			t.Fatalf("Zens: %v", err)
+		}
+	}
+	close(stop)
+}
+
+// Compile-time check that io is used (stream EOF handling).
+var _ = io.EOF

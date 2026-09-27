@@ -36,6 +36,18 @@ cd driftnode
 go build -o driftnode .
 ```
 
+The daemon control-plane API (CLI/TUI to daemon) is gRPC over a Unix socket,
+defined in `internal/proto/driftnode.proto`. The generated bindings are
+committed, so a plain `go build` needs no proto toolchain. Regenerate after
+editing the `.proto` with:
+
+```sh
+go generate ./...
+```
+
+The vendored `protoc` binary in `internal/proto/bin/` handles codegen; no
+external install is required.
+
 ### Docker
 
 ```sh

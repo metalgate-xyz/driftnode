@@ -8,19 +8,18 @@ import (
 )
 
 // simModel drives the model through the same messages the real program sees:
-// a WindowSizeMsg to set the geometry, then a refreshMsg to populate the lists.
+// a WindowSizeMsg to set the geometry, then a snapshotMsg to populate the
+// lists.
 func simModel(t *testing.T, w, h int, identity string, zenCount int) model {
 	t.Helper()
 	m := newModel("", identity)
 	mm, _ := m.Update(tea.WindowSizeMsg{Width: w, Height: h})
 	m = mm.(model)
-	rm := refreshMsg{
-		zens: make([]zen, zenCount),
+	zens := make([]zen, zenCount)
+	for i := range zens {
+		zens[i] = zen{name: "alice", identity: identity, id: identity, status: "connected", verified: true}
 	}
-	for i := range rm.zens {
-		rm.zens[i] = zen{name: "alice", identity: identity, status: "connected", verified: true}
-	}
-	m.applyRefresh(rm)
+	m.applySnapshot(snapshotMsg{zens: zens})
 	m.status = statusInfo{zens: zenCount, transport: true, unlocked: true}
 	return m
 }

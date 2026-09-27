@@ -42,7 +42,8 @@ func renderZen(z zen, selected bool) string {
 	return fmt.Sprintf("%s%s  %s  %s", check, title, status, id)
 }
 
-// newZenList builds the scrollable list for the Zens tab.
+// newZenList builds the scrollable list for the Zens tab. Zens are keyed by
+// their token (id), matching the daemon's zens upsert/remove diffs.
 func newZenList(w, h int) selectList[zen] {
-	return newSelectList[zen](w, h, renderZen)
+	return newSelectList[zen](w, h, renderZen, func(z zen) string { return z.id })
 }

@@ -1,0 +1,243 @@
+syntax = "proto3";
+
+package driftnode.v1;
+
+option go_package = "driftnode/internal/proto/driftnodepb;driftnodepb";
+
+// Driftnode is the control-plane API the daemon exposes to the CLI and TUI
+// over a Unix domain socket. Unary RPCs cover one-shot commands; Subscribe is
+// a server stream of typed events that replaces the old polling model.
+service Driftnode {
+  rpc Whoami(Empty) returns (WhoamiResp);
+  rpc Follows(Empty) returns (IdentitiesResp);
+  rpc Followers(Empty) returns (IdentitiesResp);
+  rpc Feed(FeedReq) returns (FeedResp);
+  rpc Post(PostReq) returns (PostResp);
+  rpc Profile(ProfileReq) returns (EmptyResp);
+  rpc Detail(DetailReq) returns (EmptyResp);
+  rpc Zens(Empty) returns (ZensResp);
+  rpc Verify(IdentityReq) returns (VerifyResp);
+  rpc Unverify(IdentityReq) returns (VerifyResp);
+  rpc Follow(FollowReq) returns (FollowResp);
+  rpc Unfollow(UnfollowReq) returns (UnfollowResp);
+  rpc Unlock(UnlockReq) returns (UnlockResp);
+  rpc Lock(Empty) returns (EmptyResp);
+  rpc Sync(Empty) returns (EmptyResp);
+  rpc Stop(Empty) returns (EmptyResp);
+  rpc Status(Empty) returns (StatusResp);
+  rpc RotateKey(Empty) returns (RotateKeyResp);
+  rpc Subscribe(SubscribeReq) returns (stream Event);
+}
+
+// Empty carries no parameters. Used by RPCs that need no input.
+message Empty {}
+
+// EmptyResp acknowledges a command with a status string.
+message EmptyResp {
+  string status = 1;
+}
+
+// WhoamiResp is the node's own identity and optional profile fields projected
+// from the own logs.
+message WhoamiResp {
+  string identity = 1;
+  string token = 2;
+  bool stable = 3;
+  string display_name = 4;
+  bool has_avatar = 5;
+  string bio = 6;
+  string first_name = 7;
+  string last_name = 8;
+  string location = 9;
+}
+
+// IdentityReq targets one driftnode identity.
+message IdentityReq {
+  string identity = 1;
+}
+
+// VerifyResp reports the identity that was verified or unverified.
+message VerifyResp {
+  string identity = 1;
+}
+
+// FeedReq limits the returned timeline. limit <= 0 means all.
+message FeedReq {
+  int32 limit = 1;
+}
+
+// FeedResp is a slice of merged-timeline posts, newest-first.
+message FeedResp {
+  repeated FeedItem items = 1;
+}
+
+// FeedItem is one post in the merged timeline.
+message FeedItem {
+  string id = 1;
+  int64 timestamp = 2;
+  string author = 3;
+  string name = 4;
+  string text = 5;
+}
+
+// PostReq creates a post. Passphrase unlocks the signing key; omit when the
+// daemon is already unlocked.
+message PostReq {
+  string text = 1;
+  string passphrase = 2;
+}
+
+// PostResp reports the created event id.
+message PostResp {
+  string event_id = 1;
+}
+
+// ProfileReq sets the display name. Passphrase unlocks the signing key.
+message ProfileReq {
+  string name = 1;
+  string passphrase = 2;
+}
+
+// DetailReq sets optional profile fields. At least one field is required.
+message DetailReq {
+  string bio = 1;
+  string first_name = 2;
+  string last_name = 3;
+  string location = 4;
+  string passphrase = 5;
+}
+
+// Zen is a discovered or connected zen, keyed by its tailcat token.
+message Zen {
+  string id = 1;
+  string identity = 2;
+  string name = 3;
+  string kind = 4;
+  string status = 5;
+  bool verified = 6;
+}
+
+// ZensResp lists known zens.
+message ZensResp {
+  repeated Zen zens = 1;
+}
+
+// Identity is one row of the follows or followers list.
+message Identity {
+  string identity = 1;
+  string name = 2;
+}
+
+// IdentitiesResp lists identities.
+message IdentitiesResp {
+  repeated Identity identities = 1;
+}
+
+// FollowReq targets a zen by token or identity. Passphrase unlocks the key.
+message FollowReq {
+  string target = 1;
+  string passphrase = 2;
+}
+
+// FollowResp reports the followed identity.
+message FollowResp {
+  string followed = 1;
+}
+
+// UnfollowReq targets a zen by identity. Passphrase unlocks the key.
+message UnfollowReq {
+  string target = 1;
+  string passphrase = 2;
+}
+
+// UnfollowResp reports the unfollowed identity.
+message UnfollowResp {
+  string unfollowed = 1;
+}
+
+// UnlockReq supplies the passphrase to decrypt the signing key.
+message UnlockReq {
+  string passphrase = 1;
+}
+
+// UnlockResp reports the unlocked identity.
+message UnlockResp {
+  string status = 1;
+  string identity = 2;
+}
+
+// StatusResp is the daemon health snapshot.
+message StatusResp {
+  bool running = 1;
+  int32 zens = 2;
+  string socket = 3;
+  bool transport = 4;
+  bool unlocked = 5;
+}
+
+// RotateKeyResp reports the new tailcat address token after a key rotation.
+message RotateKeyResp {
+  string token = 1;
+}
+
+// SubscribeReq has no parameters; the stream sends a Snapshot first, then
+// incremental diff events.
+message SubscribeReq {}
+
+// Event is one message on the subscribe stream. The first is always a
+// Snapshot; later events are diffs that the client applies in place by key.
+message Event {
+  oneof kind {
+    Snapshot snapshot = 1;
+    FeedDiff feed_diff = 2;
+    ZenUpsert zen_upsert = 3;
+    ZenRemove zen_remove = 4;
+    FollowsDiff follows_diff = 5;
+    FollowersDiff followers_diff = 6;
+    StatusDiff status_diff = 7;
+  }
+}
+
+// Snapshot is the initial subscribe event: the full state of all panels.
+message Snapshot {
+  repeated FeedItem feed = 1;
+  repeated Zen zens = 2;
+  repeated Identity follows = 3;
+  repeated Identity followers = 4;
+  StatusDiff status = 5;
+}
+
+// FeedDiff adds newly merged posts, newest-first.
+message FeedDiff {
+  repeated FeedItem add = 1;
+}
+
+// ZenUpsert updates or inserts one zen by its token id.
+message ZenUpsert {
+  Zen zen = 1;
+}
+
+// ZenRemove drops one zen by its token id.
+message ZenRemove {
+  string id = 1;
+}
+
+// FollowsDiff adds or removes one followed identity.
+message FollowsDiff {
+  repeated Identity add = 1;
+  string remove = 2;
+}
+
+// FollowersDiff adds or removes one follower identity.
+message FollowersDiff {
+  repeated Identity add = 1;
+  string remove = 2;
+}
+
+// StatusDiff is an updated health snapshot pushed on state changes.
+message StatusDiff {
+  bool running = 1;
+  int32 zens = 2;
+  bool transport = 3;
+  bool unlocked = 4;
+}

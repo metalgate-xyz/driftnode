@@ -5,7 +5,7 @@ import (
 )
 
 // model is the Bubble Tea model. It holds the daemon socket, the active tab,
-// the panels, and the shared refresh state.
+// the panels, and the live subscription state.
 type model struct {
 	socket   string
 	identity string
@@ -22,11 +22,12 @@ type model struct {
 	followers selectList[zen]
 	compose   compose
 
-	posts        []feedPost
-	zenList      []zen
-	followList   []zen
-	followerList []zen
-	status       statusInfo
+	// sub is the open subscribe connection, or nil between reconnects. The
+	// daemon pushes diffs over it; the TUI applies them in place so the
+	// panels are never rebuilt from scratch.
+	sub *subscription
+
+	status statusInfo
 }
 
 func newModel(socket, identity string) model {
@@ -48,10 +49,10 @@ func newModel(socket, identity string) model {
 	return m
 }
 
-// Init starts the first poll. The compose input is always focused so typing
+// Init opens the subscription. The compose input is always focused so typing
 // lands in the post box without a separate focus step.
 func (m model) Init() tea.Cmd {
-	return tea.Batch(m.compose.focus(), feedCmd(m.socket))
+	return tea.Batch(m.compose.focus(), subscribeCmd(m.socket))
 }
 
 // Update is the Elm Architecture entry point.
@@ -61,18 +62,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = msg.Width, msg.Height
 		m.layout()
 		return m, nil
-	case refreshMsg:
-		m.applyRefresh(msg)
-		return m, tea.Batch(tickCmd(m.socket), m.refreshPanels())
-	case tickMsg:
-		return m, feedCmd(m.socket)
+	case snapshotMsg:
+		if msg.err != nil {
+			m.notice = "daemon: " + msg.err.Error()
+			return m, reconnectCmd(m.socket)
+		}
+		m.applySnapshot(msg)
+		m.sub = msg.sub
+		return m, subscribeContinueCmd(m.sub)
+	case diffMsg:
+		m.applyDiff(msg)
+		return m, subscribeContinueCmd(msg.sub)
+	case subClosedMsg:
+		m.sub = nil
+		m.notice = "reconnecting…"
+		return m, reconnectCmd(m.socket)
+	case reconnectTickMsg:
+		return m, subscribeCmd(m.socket)
 	case actionResultMsg:
 		if msg.err != nil {
 			m.notice = msg.err.Error()
 		} else {
 			m.notice = msg.notice
 		}
-		return m, tea.Batch(tickCmd(m.socket), m.refreshPanels())
+		return m, nil
 	case tea.KeyPressMsg:
 		return m.handleKey(msg)
 	case tea.MouseWheelMsg:
@@ -83,40 +96,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// applyRefresh merges a poll result into the model state.
-func (m *model) applyRefresh(msg refreshMsg) {
-	if msg.feedErr == nil {
-		m.posts = msg.feed
-		m.feed.setPosts(msg.feed)
-	} else {
-		m.notice = "feed: " + msg.feedErr.Error()
-	}
-	if msg.zensErr == nil {
-		m.zenList = msg.zens
-		m.zens.setItems(msg.zens)
-	}
-	if msg.followsErr == nil {
-		m.followList = msg.follows
-		m.follows.setItems(msg.follows)
-	}
-	if msg.followersErr == nil {
-		m.followerList = msg.followers
-		m.followers.setItems(msg.followers)
-	}
-	if msg.statusErr == nil {
-		m.status = msg.status
-	}
+// applySnapshot seeds all panels from the initial subscribe snapshot.
+func (m *model) applySnapshot(msg snapshotMsg) {
+	m.feed.setPosts(msg.feed)
+	m.zens.setItems(msg.zens)
+	m.follows.setItems(msg.follows)
+	m.followers.setItems(msg.followers)
+	m.status = msg.status
+	m.notice = ""
 }
 
-// refreshPanels re-applies sizes after content changes so the viewport and
-// lists keep their geometry.
-func (m model) refreshPanels() tea.Cmd {
-	w, h := panelContentWidth(panelWidth(m.width)), panelContentHeight(panelHeight(m.height))
-	m.feed.resize(w, h)
-	m.zens.resize(w, h)
-	m.follows.resize(w, h)
-	m.followers.resize(w, h)
-	return nil
+// applyDiff applies one incremental push event to the matching panel. Each
+// panel upserts/removes by key, so only the changed row moves and the scroll
+// position and selection survive.
+func (m *model) applyDiff(d diffMsg) {
+	switch d.panel {
+	case "feed":
+		for _, p := range d.add {
+			m.feed.upsert(p)
+		}
+	case "zens":
+		if d.upsert != nil {
+			m.zens.upsert(*d.upsert)
+		}
+		if d.removeID != "" {
+			m.zens.remove(d.removeID)
+		}
+	case "follows":
+		for _, z := range d.addZens {
+			m.follows.upsert(z)
+		}
+		if d.removeID != "" {
+			m.follows.remove(d.removeID)
+		}
+	case "followers":
+		for _, z := range d.addZens {
+			m.followers.upsert(z)
+		}
+		if d.removeID != "" {
+			m.followers.remove(d.removeID)
+		}
+	case "status":
+		if d.status != nil {
+			m.status = *d.status
+		}
+	}
 }
 
 // layout sizes all panels for the current window. Called on WindowSizeMsg.
@@ -125,12 +149,7 @@ func (m *model) layout() {
 		return
 	}
 	w, h := panelContentWidth(panelWidth(m.width)), panelContentHeight(panelHeight(m.height))
-	if m.feed.vp.Width() == 0 {
-		m.feed = newFeedPanel(w, h)
-	} else {
-		m.feed.resize(w, h)
-		m.feed.setPosts(m.posts)
-	}
+	m.feed.resize(w, h)
 	m.zens.resize(w, h)
 	m.follows.resize(w, h)
 	m.followers.resize(w, h)

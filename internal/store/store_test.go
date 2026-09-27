@@ -385,6 +385,88 @@ func TestAllPostsScopedToFollowGraph(t *testing.T) {
 	}
 }
 
+// TestAllPostsOneTxMatchesAllPosts verifies the single-transaction feed
+// loader returns the same events as the per-identity loader. AllPosts opens
+// one bbolt transaction per followed identity; AllPostsOneTx collapses them
+// into one, so both must yield the same scoped set.
+func TestAllPostsOneTxMatchesAllPosts(t *testing.T) {
+	s := newTestStore(t)
+	me, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("me: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	alice, _ := core.NewKeyPair()
+	alicePub, _ := alice.Identity().PubkeyBytes()
+	followAlice, err := me.Sign(core.Event{
+		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 1, Sequence: 1,
+		Follow: &core.Follow{TargetPubkey: [32]byte(alicePub)},
+	})
+	if err != nil {
+		t.Fatalf("sign follow: %v", err)
+	}
+	if err := s.AppendOwnEvent(core.ProfileLog, followAlice); err != nil {
+		t.Fatalf("append follow: %v", err)
+	}
+	ownPost, err := me.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 5, Sequence: 1,
+		Post: &core.Post{Text: "mine"},
+	})
+	if err != nil {
+		t.Fatalf("sign own: %v", err)
+	}
+	if err := s.AppendOwnEvent(core.PostLog, ownPost); err != nil {
+		t.Fatalf("append own: %v", err)
+	}
+	alicePost, err := alice.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 10, Sequence: 1,
+		Post: &core.Post{Text: "alice"},
+	})
+	if err != nil {
+		t.Fatalf("sign alice: %v", err)
+	}
+	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+		t.Fatalf("put alice: %v", err)
+	}
+
+	a, err := s.AllPosts()
+	if err != nil {
+		t.Fatalf("AllPosts: %v", err)
+	}
+	b, err := s.AllPostsOneTx()
+	if err != nil {
+		t.Fatalf("AllPostsOneTx: %v", err)
+	}
+	if len(a) != len(b) {
+		t.Fatalf("len: AllPosts=%d AllPostsOneTx=%d", len(a), len(b))
+	}
+	// Order is not guaranteed equal (AllPosts groups by identity; AllPostsOneTx
+	// interleaves), so compare as id sets.
+	ids := func(events []core.SignedEvent) map[string]bool {
+		m := make(map[string]bool, len(events))
+		for _, se := range events {
+			id, _ := se.ID()
+			m[id.String()] = true
+		}
+		return m
+	}
+	ai, bi := ids(a), ids(b)
+	for id := range ai {
+		if !bi[id] {
+			t.Fatalf("AllPostsOneTx missing %s (present in AllPosts)", id)
+		}
+	}
+	for id := range bi {
+		if !ai[id] {
+			t.Fatalf("AllPostsOneTx has extra %s (absent in AllPosts)", id)
+		}
+	}
+}
+
 func makeFollowEventFor(t *testing.T, follower *core.KeyPair, seq uint64, target core.Identity) *core.SignedEvent {
 	t.Helper()
 	pub, err := target.PubkeyBytes()

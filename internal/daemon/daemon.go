@@ -1,3 +1,7 @@
+// Package daemon runs the long-lived driftnode process and exposes a gRPC
+// control API over a Unix domain socket. The CLI and TUI are clients.
+//
+//go:generate ../../scripts/gen-proto.sh
 package daemon
 
 import (
@@ -19,10 +23,12 @@ import (
 	"driftnode/internal/core"
 	"driftnode/internal/crawler"
 	p2p "driftnode/internal/net"
+	"driftnode/internal/proto/driftnodepb"
 	"driftnode/internal/store"
 	syncproto "driftnode/internal/sync"
 
 	"github.com/tailscale/tailcat"
+	"google.golang.org/grpc"
 )
 
 // Transport dials a zen by its address token and returns a duplex stream
@@ -59,6 +65,10 @@ type Daemon struct {
 	syncNow chan struct{}
 	// done is closed when Stop is called, allowing Start's Wait to return.
 	done chan struct{}
+
+	// grpcServer serves the typed control API over the Unix socket. nil
+	// before Start and after Stop. Guarded by mu.
+	grpcServer *grpc.Server
 
 	// unlocked holds the signing key after a successful unlock RPC, so
 	// signing commands (post, follow, unfollow) don't re-supply the
@@ -97,6 +107,25 @@ type Daemon struct {
 	// syncConcurrency caps the number of zen dials that run in parallel
 	// during a sync round. Default 8; 0 falls back to that.
 	syncConcurrency int
+
+	// subscribers are open subscribe connections. Each holds a buffered
+	// queue of push events. The daemon broadcasts state changes (zens
+	// upsert/remove, follow/follower add/remove, feed add, status) to all
+	// subscribers so the TUI never polls and never rebuilds from scratch.
+	subs []*subscriber
+
+	// feedCache holds the merged timeline sorted newest-first, rebuilt only
+	// when feedGen changes (a post is created or synced). Without it every
+	// subscribe snapshot reloads and re-sorts the full PostLog from disk,
+	// which is seconds for a large feed. feedMu guards the cache and gen.
+	feedMu   sync.Mutex
+	feedGen  uint64
+	feedCache []core.SignedEvent
+
+	// nameCache memoizes DisplayName per identity so the snapshot and feed
+	// diffs do not each re-run a bbolt projection per item. Invalidated on
+	// profile writes. Guarded by feedMu.
+	nameCache map[core.Identity]string
 }
 
 // zenInfo describes a known zen and its connection state.
@@ -107,6 +136,263 @@ type zenInfo struct {
 	Kind     string `json:"kind"`     // native_zen or browser
 	Status   string `json:"status"`   // connecting, connected, discovered, error
 	Verified bool   `json:"verified"` // identity confirmed out-of-band (§7)
+}
+
+// subscriber is one open subscribe stream. The daemon pushes typed events
+// onto events; if events fills (slow TUI), done is closed to drop the
+// subscriber, and its pump exits so the TUI reconnects.
+type subscriber struct {
+	events chan *driftnodepb.Event
+	done   chan struct{}
+}
+
+// subscribeQueue bounds how many push events a subscriber queues before the
+// daemon drops it. A bounded buffer keeps the daemon from blocking on a slow
+// TUI while still protecting against a truly stuck client.
+const subscribeQueue = 256
+
+// gracefulStopTimeout bounds how long Stop waits for in-flight RPCs to
+// finish cleanly before force-cancelling them. A healthy shutdown flushes
+// in microseconds; the bound only fires when a stuck client (a Subscribe
+// pump blocked in srv.Send on a full flow-control window) would otherwise
+// hang teardown.
+const gracefulStopTimeout = 5 * time.Second
+
+// newSubscriber constructs a subscriber with the standard buffer size.
+func newSubscriber() *subscriber {
+	return &subscriber{
+		events: make(chan *driftnodepb.Event, subscribeQueue),
+		done:   make(chan struct{}),
+	}
+}
+
+// broadcast sends ev to every subscriber without blocking the daemon. A
+// subscriber whose queue is full is dropped (its done channel is closed so
+// its pump exits and the stream is torn down).
+func (d *Daemon) broadcast(ev *driftnodepb.Event) {
+	d.mu.Lock()
+	subs := make([]*subscriber, 0, len(d.subs))
+	for _, s := range d.subs {
+		subs = append(subs, s)
+	}
+	d.mu.Unlock()
+	for _, s := range subs {
+		select {
+		case s.events <- ev:
+		default:
+			// Queue full: drop the slow subscriber.
+			select {
+			case <-s.done:
+			default:
+				close(s.done)
+			}
+		}
+	}
+}
+
+// emitZenUpsert pushes a zens upsert for one zen, enriching it with the
+// authoritative name/identity/verified state from the crawl cache. The
+// caller must pass a value copied under d.mu so a concurrent setZenStatus
+// cannot race the enrichment reads.
+func (d *Daemon) emitZenUpsert(z zenInfo) {
+	d.broadcast(d.zenDiffEvent(z))
+}
+
+// zenDiffEvent builds a zens upsert event for one zen, enriched with the
+// name/identity/verified state bound to its token. The enrichment mirrors
+// the zens RPC so a push carries the same fields a poll would.
+func (d *Daemon) zenDiffEvent(z zenInfo) *driftnodepb.Event {
+	zen := d.zenToProto(z)
+	return &driftnodepb.Event{Kind: &driftnodepb.Event_ZenUpsert{ZenUpsert: &driftnodepb.ZenUpsert{Zen: zen}}}
+}
+
+// emitZenRemove pushes a zens removal by token.
+func (d *Daemon) emitZenRemove(id string) {
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_ZenRemove{ZenRemove: &driftnodepb.ZenRemove{Id: id}}})
+}
+
+// emitFollowsAdd pushes a follows addition.
+func (d *Daemon) emitFollowsAdd(entry map[string]string) {
+	ident := identityEntryToProto(entry)
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowsDiff{FollowsDiff: &driftnodepb.FollowsDiff{Add: []*driftnodepb.Identity{ident}}}})
+}
+
+// emitFollowsRemove pushes a follows removal by identity.
+func (d *Daemon) emitFollowsRemove(identity string) {
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowsDiff{FollowsDiff: &driftnodepb.FollowsDiff{Remove: identity}}})
+}
+
+// emitFollowersAdd pushes a followers addition.
+func (d *Daemon) emitFollowersAdd(entry map[string]string) {
+	ident := identityEntryToProto(entry)
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowersDiff{FollowersDiff: &driftnodepb.FollowersDiff{Add: []*driftnodepb.Identity{ident}}}})
+}
+
+// emitFeedAdd pushes a feed addition (newly merged posts, newest-first).
+func (d *Daemon) emitFeedAdd(items []feedItem) {
+	if len(items) == 0 {
+		return
+	}
+	add := make([]*driftnodepb.FeedItem, 0, len(items))
+	for _, it := range items {
+		add = append(add, feedItemToProto(it))
+	}
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FeedDiff{FeedDiff: &driftnodepb.FeedDiff{Add: add}}})
+}
+
+// emitStatus pushes a status snapshot.
+func (d *Daemon) emitStatus() {
+	d.mu.Lock()
+	tcUp := d.tcListener != nil
+	unlocked := d.unlocked != nil
+	zenCount := len(d.zens)
+	d.mu.Unlock()
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_StatusDiff{StatusDiff: &driftnodepb.StatusDiff{
+		Running:   true,
+		Zens:      int32(zenCount),
+		Transport: tcUp,
+		Unlocked:  unlocked,
+	}}})
+}
+
+// addSubscriber registers a subscriber for push events.
+func (d *Daemon) addSubscriber(s *subscriber) {
+	d.mu.Lock()
+	d.subs = append(d.subs, s)
+	d.mu.Unlock()
+}
+
+// removeSubscriber unregisters a subscriber.
+func (d *Daemon) removeSubscriber(s *subscriber) {
+	d.mu.Lock()
+	for i, sub := range d.subs {
+		if sub == s {
+			d.subs = append(d.subs[:i], d.subs[i+1:]...)
+			break
+		}
+	}
+	d.mu.Unlock()
+}
+
+// buildFeedItems returns the merged timeline feedItems, newest-first, up to
+// limit entries. limit <= 0 means all. Shared by the feed RPC and the
+// subscribe snapshot. It reads from the feed cache, which is rebuilt only
+// when the feed generation changes (a post is created or synced), so a
+// snapshot does not reload and re-sort the full PostLog from disk each time.
+func (d *Daemon) buildFeedItems(limit int) ([]feedItem, error) {
+	posts := d.cachedPosts()
+	if limit > 0 && len(posts) > limit {
+		posts = posts[:limit]
+	}
+	items := make([]feedItem, 0, len(posts))
+	for _, p := range posts {
+		items = append(items, d.feedItemFor(p))
+	}
+	return items, nil
+}
+
+// cachedPosts returns the merged timeline sorted newest-first, rebuilding it
+// from disk only when the feed generation has changed since the last build.
+// A large feed (millions of posts) otherwise reloads and re-sorts on every
+// subscribe snapshot, freezing the TUI for seconds.
+func (d *Daemon) cachedPosts() []core.SignedEvent {
+	d.feedMu.Lock()
+	gen := d.feedGen
+	cached := d.feedCache
+	d.feedMu.Unlock()
+	if cached != nil {
+		return cached
+	}
+	// Cache miss: rebuild. feedGen is bumped on any post mutation, so a
+	// concurrent bump is caught on the next call (we rebuild under the lock
+	// and store the result for the current gen).
+	d.feedMu.Lock()
+	defer d.feedMu.Unlock()
+	if d.feedCache != nil && d.feedGen == gen {
+		return d.feedCache
+	}
+	allPosts, err := d.store.AllPostsOneTx()
+	if err != nil {
+		d.logger.Info("cachedPosts AllPostsOneTx error", "err", err)
+		return nil
+	}
+	posts := core.NewLog(allPosts).Posts()
+	d.feedCache = posts
+	return posts
+}
+
+// invalidateFeed bumps the feed generation so the next cachedPosts call
+// rebuilds from disk. Called when a post is created or synced.
+func (d *Daemon) invalidateFeed() {
+	d.feedMu.Lock()
+	d.feedGen++
+	d.feedCache = nil
+	d.feedMu.Unlock()
+}
+
+// invalidateNames drops the name cache so the next DisplayName lookup
+// re-reads from disk. Called when a profile is written.
+func (d *Daemon) invalidateNames() {
+	d.feedMu.Lock()
+	d.nameCache = make(map[core.Identity]string)
+	d.feedMu.Unlock()
+}
+
+// displayName returns the cached display name for an identity, populating
+// the cache on first access. The per-identity projection over the
+// ProfileLog is expensive at scale (one bbolt scan per item), so memoizing
+// keeps the snapshot and feed diffs from re-running it per row.
+func (d *Daemon) displayName(id core.Identity) string {
+	d.feedMu.Lock()
+	if d.nameCache == nil {
+		d.nameCache = make(map[core.Identity]string)
+	}
+	if name, ok := d.nameCache[id]; ok {
+		d.feedMu.Unlock()
+		return name
+	}
+	d.feedMu.Unlock()
+	name, _ := d.store.DisplayName(id)
+	d.feedMu.Lock()
+	d.nameCache[id] = name
+	d.feedMu.Unlock()
+	return name
+}
+
+// followEntries returns the identities this zen follows, with display names,
+// for the subscribe snapshot.
+func (d *Daemon) followEntries() []map[string]string {
+	ids, err := d.store.FollowGraph()
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]string{"identity": id.String()}
+		if name := d.displayName(id); name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// followerEntries returns the identities that follow this zen, with display
+// names, for the subscribe snapshot.
+func (d *Daemon) followerEntries() []map[string]string {
+	ids, err := d.store.ReceivedFollowers()
+	if err != nil {
+		return nil
+	}
+	out := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		entry := map[string]string{"identity": id.String()}
+		if name := d.displayName(id); name != "" {
+			entry["name"] = name
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // New creates a Daemon backed by the given store.
@@ -121,6 +407,7 @@ func New(s *store.Store, logger *slog.Logger) *Daemon {
 		knownTokens: make(map[string]bool),
 		syncNow:     make(chan struct{}, 1),
 		done:        make(chan struct{}),
+		nameCache:   make(map[core.Identity]string),
 	}
 }
 
@@ -210,11 +497,20 @@ func (d *Daemon) Start(socketPath string) error {
 	if err != nil {
 		return fmt.Errorf("listen on control socket: %w", err)
 	}
+	// Serve the control API as gRPC over the Unix socket. The typed
+	// Driftnode service replaces the former JSON-lines request/response
+	// and push protocol; the CLI and TUI are gRPC clients.
+	grpcSrv := grpc.NewServer()
+	RegisterServer(grpcSrv, d)
 	d.mu.Lock()
 	d.listener = l
+	d.grpcServer = grpcSrv
 	d.socket = socketPath
 	d.mu.Unlock()
 	d.logger.Info("daemon started", "socket", socketPath)
+	// Pre-warm the feed cache in the background so the first subscribe
+	// snapshot does not stall on loading and sorting the full PostLog.
+	go d.cachedPosts()
 	go d.acceptLoop()
 
 	// Start the tailcat listener for inbound zen sync. Non-fatal if the
@@ -228,6 +524,8 @@ func (d *Daemon) Start(socketPath string) error {
 	}
 	if err := d.startTransport(); err != nil {
 		d.logger.Warn("tailcat listener unavailable; inbound zen sync disabled", "err", err)
+	} else {
+		d.emitStatus()
 	}
 
 	// Background sync loop: pull from known zens periodically and on demand.
@@ -383,34 +681,75 @@ func (d *Daemon) rotateKey() (string, error) {
 // Stop closes the control socket, the tailcat listener, and stops the
 // background sync loop, then removes the socket file. It is safe to call
 // from the control-socket handler (self-stop) or from a signal handler.
+//
+// Teardown ordering matters: subscribers are closed first so the Subscribe
+// pumps exit and their streams complete; then GracefulStop waits for in-flight
+// RPCs (the Stop ack flush plus the just-ended subscribe streams) before
+// tearing down transports. GracefulStop is bounded so a stuck client cannot
+// hang shutdown: if it has not returned by the deadline, a hard Stop cancels
+// the remaining streams. The blocking teardown runs outside d.mu so RPC
+// handlers that need the lock are not deadlocked against shutdown.
 func (d *Daemon) Stop() {
 	d.mu.Lock()
-	if d.listener != nil {
-		d.listener.Close()
-		d.listener = nil
+	srv := d.grpcServer
+	d.grpcServer = nil
+	listener := d.listener
+	d.listener = nil
+	tc := d.tcListener
+	d.tcListener = nil
+	syncCancel := d.syncCancel
+	d.syncCancel = nil
+	subs := d.subs
+	d.subs = nil
+	socket := d.socket
+	d.socket = ""
+	d.unlocked = nil
+	d.mu.Unlock()
+
+	// 1. Close subscribers so Subscribe pumps parked in their select exit
+	// and their streams complete. Pumps blocked in srv.Send (slow client
+	// with a full flow-control window) are handled by the deadline below.
+	for _, s := range subs {
+		select {
+		case <-s.done:
+		default:
+			close(s.done)
+		}
 	}
-	if d.tcListener != nil {
-		d.tcListener.Close()
-		d.tcListener = nil
+
+	// 2. GracefulStop waits for in-flight RPCs to finish (the Stop ack is
+	// flushed, subscribe streams that just exited complete) before tearing
+	// down transports. A stuck stream gets force-stopped after the deadline.
+	if srv != nil {
+		stopped := make(chan struct{})
+		go func() { srv.GracefulStop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(gracefulStopTimeout):
+			srv.Stop()
+		}
 	}
-	if d.syncCancel != nil {
-		d.syncCancel()
-		d.syncCancel = nil
+
+	// 3. Close listeners and finish cleanup.
+	if listener != nil {
+		listener.Close()
 	}
-	if d.socket != "" {
-		os.Remove(d.socket)
-		d.socket = ""
+	if tc != nil {
+		tc.Close()
 	}
-	d.unlocked = nil // drop the signing key on shutdown
-	// Signal Start's Wait (or the foreground blocker) to return. Use a
-	// guard so a double Stop is a no-op for the channel close.
+	if syncCancel != nil {
+		syncCancel()
+	}
+	if socket != "" {
+		os.Remove(socket)
+	}
+	// Signal Start's Wait (or the foreground blocker) to return. Guard so
+	// a double Stop is a no-op for the channel close.
 	select {
 	case <-d.done:
-		// already closed
 	default:
 		close(d.done)
 	}
-	d.mu.Unlock()
 	d.logger.Info("daemon stopped")
 }
 
@@ -427,19 +766,15 @@ func (d *Daemon) Done() <-chan struct{} {
 }
 
 func (d *Daemon) acceptLoop() {
-	for {
-		d.mu.Lock()
-		listener := d.listener
-		d.mu.Unlock()
-		if listener == nil {
-			return
-		}
-		conn, err := listener.Accept()
-		if err != nil {
-			return
-		}
-		go d.handleConn(conn)
+	d.mu.Lock()
+	listener := d.listener
+	srv := d.grpcServer
+	d.mu.Unlock()
+	if listener == nil || srv == nil {
+		return
 	}
+	// Serve blocks until Stop closes the listener or stops the server.
+	_ = srv.Serve(listener)
 }
 
 // Request is the JSON-lines request envelope sent by CLI/TUI clients.
@@ -454,262 +789,125 @@ type Response struct {
 	Error  string `json:"error,omitempty"`
 }
 
-func (d *Daemon) handleConn(conn net.Conn) {
-	defer conn.Close()
-	dec := json.NewDecoder(conn)
-	enc := json.NewEncoder(conn)
-	for {
-		var req Request
-		if err := dec.Decode(&req); err != nil {
-			return
-		}
-		resp := d.dispatch(req)
-		if err := enc.Encode(resp); err != nil {
-			return
-		}
+// snapshotFeedLimit caps how many feed items the subscribe snapshot sends.
+// The TUI only renders the visible window, so sending the entire feed (which
+// can be millions of posts) makes the snapshot encode, transfer, and decode
+// each O(n) and freezes the TUI for seconds. Newer posts arrive as diffs
+// afterward, so capping the initial window does not lose data.
+const snapshotFeedLimit = 200
+
+// snapshot builds the initial subscribe event carrying the full state of all
+// four panels, so the TUI seeds everything from one message. It builds fresh
+// proto values and never mutates the live zens map.
+func (d *Daemon) snapshot() *driftnodepb.Snapshot {
+	d.mu.Lock()
+	src := make([]zenInfo, 0, len(d.zens))
+	for _, z := range d.zens {
+		src = append(src, *z)
+	}
+	tcUp := d.tcListener != nil
+	unlocked := d.unlocked != nil
+	d.mu.Unlock()
+	zens := make([]*driftnodepb.Zen, 0, len(src))
+	for i := range src {
+		zens = append(zens, d.zenToProto(src[i]))
+	}
+	feed, _ := d.buildFeedItems(snapshotFeedLimit)
+	follows := d.followEntries()
+	followers := d.followerEntries()
+	return &driftnodepb.Snapshot{
+		Feed:      feedItemsToProto(feed),
+		Zens:      zens,
+		Follows:   identityEntriesToProto(follows),
+		Followers: identityEntriesToProto(followers),
+		Status: &driftnodepb.StatusDiff{
+			Running:   true,
+			Zens:      int32(len(zens)),
+			Transport: tcUp,
+			Unlocked:  unlocked,
+		},
 	}
 }
 
-func (d *Daemon) dispatch(req Request) Response {
-	switch req.Method {
-	case "whoami":
-		id, ok, err := d.store.Identity()
-		if err != nil {
-			return Response{Error: err.Error()}
+// snapshotProto is an alias for snapshot so the gRPC Subscribe handler
+// reads as a typed builder.
+func (d *Daemon) snapshotProto() *driftnodepb.Snapshot { return d.snapshot() }
+
+// zenToProto copies one zenInfo into a fresh proto Zen, enriching it with
+// the name/identity/verified state bound to its token. It takes the zenInfo
+// by value so the caller can copy it under d.mu and then enrich without the
+// lock, avoiding a race on fields a concurrent setZenStatus may mutate.
+func (d *Daemon) zenToProto(z zenInfo) *driftnodepb.Zen {
+	out := zenToProtoPlain(z)
+	out.Verified = false
+	if id, ok, _ := d.store.RoutingByToken(z.ID); ok {
+		out.Identity = string(id)
+		if name, _ := d.store.DisplayName(id); name != "" {
+			out.Name = name
 		}
-		if !ok {
-			return Response{Error: "no identity"}
+		if v, _ := d.store.IsVerified(id); v {
+			out.Verified = true
 		}
-		return d.handleWhoami(id)
-	case "follows":
-		return d.handleFollows()
-	case "followers":
-		return d.handleFollowers()
-	case "feed":
-		var p struct {
-			Limit int `json:"limit"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		return d.handleFeed(p.Limit)
-	case "post":
-		var p struct {
-			Text       string `json:"text"`
-			Passphrase string `json:"passphrase"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Text == "" {
-			return Response{Error: "text required"}
-		}
-		kp, err := d.signingKey(p.Passphrase)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		return d.handlePost(p.Text, kp)
-	case "profile":
-		var p struct {
-			Name       string `json:"name"`
-			Passphrase string `json:"passphrase"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Name == "" {
-			return Response{Error: "name required"}
-		}
-		kp, err := d.signingKey(p.Passphrase)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		return d.handleProfile(p.Name, kp)
-	case "detail":
-		var p struct {
-			Bio        string `json:"bio"`
-			FirstName  string `json:"first_name"`
-			LastName   string `json:"last_name"`
-			Location   string `json:"location"`
-			Passphrase string `json:"passphrase"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Bio == "" && p.FirstName == "" && p.LastName == "" && p.Location == "" {
-			return Response{Error: "at least one detail field required"}
-		}
-		kp, err := d.signingKey(p.Passphrase)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		return d.handleDetail(p.Bio, p.FirstName, p.LastName, p.Location, kp)
-	case "zens":
-		d.mu.Lock()
-		zens := make([]*zenInfo, 0, len(d.zens))
-		for _, p := range d.zens {
-			zens = append(zens, p)
-		}
-		d.mu.Unlock()
-		// Enrich each zen with the connected identity's name when a
-		// routing binding exists. After a sync binds the token to an
-		// identity, the crawl cache holds the authoritative name; that
-		// overrides any unverified hint set during discovery. Zens
-		// discovered only via exchange keep their hint name/identity.
-		for _, z := range zens {
-			z.Verified = false
-			if id, ok, _ := d.store.RoutingByToken(z.ID); ok {
-				z.Identity = string(id)
-				if name, _ := d.store.DisplayName(id); name != "" {
-					z.Name = name
-				}
-				if v, _ := d.store.IsVerified(id); v {
-					z.Verified = true
-				}
-			}
-		}
-		return Response{Result: zens}
-	case "verify":
-		var p struct {
-			Identity string `json:"identity"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Identity == "" {
-			return Response{Error: "identity required"}
-		}
-		id, err := core.ParseIdentity(p.Identity)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		if err := d.store.VerifyIdentity(id); err != nil {
-			return Response{Error: err.Error()}
-		}
-		d.logger.Info("identity verified out-of-band", "identity", id)
-		return Response{Result: map[string]string{"verified": string(id)}}
-	case "unverify":
-		var p struct {
-			Identity string `json:"identity"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Identity == "" {
-			return Response{Error: "identity required"}
-		}
-		id, err := core.ParseIdentity(p.Identity)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		if err := d.store.UnverifyIdentity(id); err != nil {
-			return Response{Error: err.Error()}
-		}
-		return Response{Result: map[string]string{"unverified": string(id)}}
-	case "follow":
-		var p struct {
-			Target     string `json:"target"`
-			Passphrase string `json:"passphrase"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Target == "" {
-			return Response{Error: "target required"}
-		}
-		kp, err := d.signingKey(p.Passphrase)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		return d.handleFollow(p.Target, kp)
-	case "unfollow":
-		var p struct {
-			Target     string `json:"target"`
-			Passphrase string `json:"passphrase"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Target == "" {
-			return Response{Error: "target required"}
-		}
-		kp, err := d.signingKey(p.Passphrase)
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		return d.handleUnfollow(p.Target, kp)
-	case "unlock":
-		var p struct {
-			Passphrase string `json:"passphrase"`
-		}
-		if len(req.Params) > 0 {
-			if err := json.Unmarshal(req.Params, &p); err != nil {
-				return Response{Error: fmt.Sprintf("parse params: %s", err)}
-			}
-		}
-		if p.Passphrase == "" {
-			return Response{Error: "passphrase required"}
-		}
-		return d.handleUnlock(p.Passphrase).resp
-	case "lock":
-		d.mu.Lock()
-		d.unlocked = nil
-		d.mu.Unlock()
-		d.logger.Info("key locked")
-		return Response{Result: map[string]string{"status": "locked"}}
-	case "sync":
-		d.triggerSyncNow()
-		d.logger.Info("sync requested")
-		return Response{Result: map[string]string{"status": "triggered"}}
-	case "stop":
-		// Acknowledge first, then shut down asynchronously so the response
-		// is written before the listener closes and tears down this conn.
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			d.Stop()
-		}()
-		return Response{Result: map[string]string{"status": "stopping"}}
-	case "status":
-		d.mu.Lock()
-		tcUp := d.tcListener != nil
-		unlocked := d.unlocked != nil
-		d.mu.Unlock()
-		return Response{Result: map[string]any{
-			"running":   true,
-			"zens":      len(d.zens),
-			"socket":    d.socket,
-			"transport": tcUp,
-			"unlocked":  unlocked,
-		}}
-	case "rotate-key":
-		newAddr, err := d.rotateKey()
-		if err != nil {
-			return Response{Error: err.Error()}
-		}
-		return Response{Result: map[string]any{"token": newAddr}}
-	default:
-		return Response{Error: fmt.Sprintf("unknown method: %s", req.Method)}
 	}
+	return out
+}
+
+// zenToProtoPlain copies a zenInfo value into a proto Zen with no enrichment.
+func zenToProtoPlain(z zenInfo) *driftnodepb.Zen {
+	return &driftnodepb.Zen{
+		Id:       z.ID,
+		Identity: z.Identity,
+		Name:     z.Name,
+		Kind:     z.Kind,
+		Status:   z.Status,
+		Verified: z.Verified,
+	}
+}
+
+// feedItemToProto converts one feedItem to a proto FeedItem.
+func feedItemToProto(it feedItem) *driftnodepb.FeedItem {
+	return &driftnodepb.FeedItem{
+		Id:        it.ID,
+		Timestamp: it.Timestamp,
+		Author:    it.Author,
+		Name:      it.Name,
+		Text:      it.Text,
+	}
+}
+
+// feedItemsToProto converts a feedItem slice to proto.
+func feedItemsToProto(items []feedItem) []*driftnodepb.FeedItem {
+	out := make([]*driftnodepb.FeedItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, feedItemToProto(it))
+	}
+	return out
+}
+
+// identityEntryToProto converts one map[string]string identity row to proto.
+func identityEntryToProto(r map[string]string) *driftnodepb.Identity {
+	return &driftnodepb.Identity{Identity: r["identity"], Name: r["name"]}
+}
+
+// identityEntriesToProto converts a map[string]string identity slice to proto.
+func identityEntriesToProto(rows []map[string]string) []*driftnodepb.Identity {
+	out := make([]*driftnodepb.Identity, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, identityEntryToProto(r))
+	}
+	return out
+}
+
+// addSubscriberProto registers a typed subscriber and returns it.
+func (d *Daemon) addSubscriberProto() *subscriber {
+	sub := newSubscriber()
+	d.addSubscriber(sub)
+	return sub
 }
 
 // feedItem is one post in the merged feed, serialized to the CLI.
 type feedItem struct {
+	ID        string `json:"id"`
 	Timestamp int64  `json:"timestamp"`
 	Author    string `json:"author"`
 	Name      string `json:"name"`
@@ -719,30 +917,38 @@ type feedItem struct {
 // handleFeed returns the merged timeline (own PostLog plus synced PostLogs
 // from followed identities), reverse-chronological, up to limit entries.
 func (d *Daemon) handleFeed(limit int) Response {
-	allPosts, err := d.store.AllPosts()
+	items, err := d.buildFeedItems(limit)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("read posts: %s", err)}
 	}
-	log := core.NewLog(allPosts)
-	posts := log.Posts()
-	if limit > 0 && len(posts) > limit {
-		posts = posts[:limit]
+	return Response{Result: items}
+}
+
+// feedItemFor builds a feedItem from one signed post/reply event.
+func (d *Daemon) feedItemFor(p core.SignedEvent) feedItem {
+	text := p.Event.Post.Text
+	if p.Event.Reply != nil {
+		text = "(reply) " + p.Event.Reply.Text
 	}
+	name := d.displayName(p.Author)
+	id, _ := p.ID()
+	return feedItem{
+		ID:        id.String(),
+		Timestamp: p.Event.Timestamp,
+		Author:    p.Author.String(),
+		Name:      name,
+		Text:      text,
+	}
+}
+
+// feedItemsFor builds feedItems for a batch of merged post/reply events,
+// used to push a feed diff after a sync round.
+func (d *Daemon) feedItemsFor(posts []core.SignedEvent) []feedItem {
 	items := make([]feedItem, 0, len(posts))
 	for _, p := range posts {
-		text := p.Event.Post.Text
-		if p.Event.Reply != nil {
-			text = "(reply) " + p.Event.Reply.Text
-		}
-		name, _ := d.store.DisplayName(p.Author)
-		items = append(items, feedItem{
-			Timestamp: p.Event.Timestamp,
-			Author:    p.Author.String(),
-			Name:      name,
-			Text:      text,
-		})
+		items = append(items, d.feedItemFor(p))
 	}
-	return Response{Result: items}
+	return items
 }
 
 // signingKey returns the key to sign with. If the caller supplies a
@@ -797,6 +1003,7 @@ func (d *Daemon) handleUnlock(passphrase string) unlockResult {
 	if !bootstrapDone && bootstrapPath != "" {
 		go d.dialBootstrapSeeds(bootstrapPath, bootstrapKey)
 	}
+	d.emitStatus()
 	return unlockResult{kp: kp, resp: Response{Result: map[string]string{"status": "unlocked", "identity": kp.Identity().String()}}}
 }
 
@@ -834,9 +1041,19 @@ func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 	if err := d.store.AppendOwnEvent(core.PostLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	d.invalidateFeed()
+	id, _ := se.ID()
 	d.touchSignAt()
 	d.triggerSyncNow()
-	id, _ := se.ID()
+	ownID, _, _ := d.store.Identity()
+	name := d.displayName(ownID)
+	d.emitFeedAdd([]feedItem{{
+		ID:        id.String(),
+		Timestamp: se.Event.Timestamp,
+		Author:    ownID.String(),
+		Name:      name,
+		Text:      text,
+	}})
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
@@ -941,6 +1158,7 @@ func (d *Daemon) handleProfile(name string, kp *core.KeyPair) Response {
 	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	d.invalidateNames()
 	d.touchSignAt()
 	d.triggerSyncNow()
 	id, _ := se.ID()
@@ -1093,9 +1311,12 @@ func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
 		return Response{Error: fmt.Sprintf("append: %s", err)}
 	}
+	followedID := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
 	d.touchSignAt()
 	d.triggerSyncNow()
-	return Response{Result: map[string]string{"followed": core.IdentityFromPubkey(ed25519.PublicKey(target[:])).String()}}
+	name, _ := d.store.DisplayName(followedID)
+	d.emitFollowsAdd(map[string]string{"identity": followedID.String(), "name": name})
+	return Response{Result: map[string]string{"followed": followedID.String()}}
 }
 
 // handleUnfollow signs an Unfollow event, removes the routing binding for
@@ -1134,6 +1355,7 @@ func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	} else {
 		d.removeZen(string(id))
 	}
+	d.emitFollowsRemove(id.String())
 	d.touchSignAt()
 	d.triggerSyncNow()
 	return Response{Result: map[string]string{"unfollowed": id.String()}}
@@ -1528,9 +1750,12 @@ func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
 
 // upsertZen records a zen in the given state, overwriting any existing entry.
 func (d *Daemon) upsertZen(id, kind, status string) {
+	z := zenInfo{ID: id, Kind: kind, Status: status}
 	d.mu.Lock()
-	d.zens[id] = &zenInfo{ID: id, Kind: kind, Status: status}
+	d.zens[id] = &z
+	snap := z
 	d.mu.Unlock()
+	d.emitZenUpsert(snap)
 }
 
 // removeZen removes a zen record.
@@ -1538,15 +1763,22 @@ func (d *Daemon) removeZen(id string) {
 	d.mu.Lock()
 	delete(d.zens, id)
 	d.mu.Unlock()
+	d.emitZenRemove(id)
 }
 
 // setZenStatus updates a recorded zen's status.
 func (d *Daemon) setZenStatus(id, status string) {
 	d.mu.Lock()
-	if p, ok := d.zens[id]; ok {
+	p, ok := d.zens[id]
+	var snap zenInfo
+	if ok {
 		p.Status = status
+		snap = *p
 	}
 	d.mu.Unlock()
+	if ok {
+		d.emitZenUpsert(snap)
+	}
 }
 
 // crawlFetch fetches a remote identity's ProfileLog by dialing each known
@@ -1671,6 +1903,35 @@ func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity)
 	sess.SetZenSink(d.learnZenRef)
 	sess.SetCursorSource(d.store.SyncCursor)
 	sess.SetCursorSink(d.store.PutSyncCursor)
+	// Collect Post/Reply events and inbound Follows merged during this
+	// session so the daemon can push feed and follower diffs to subscribers
+	// once the round completes.
+	var mergedPosts []core.SignedEvent
+	var newFollowers []core.Identity
+	ownID, _, _ := d.store.Identity()
+	var ownPub [32]byte
+	if ownID != "" {
+		if pub, err := ownID.PubkeyBytes(); err == nil {
+			copy(ownPub[:], pub)
+		}
+	}
+	sess.SetOnMerge(func(se *core.SignedEvent, inserted bool) {
+		if !inserted {
+			return
+		}
+		switch se.Event.Log {
+		case core.PostLog:
+			if se.Event.Kind != core.KindPost && se.Event.Kind != core.KindReply {
+				return
+			}
+			mergedPosts = append(mergedPosts, *se)
+		case core.ProfileLog:
+			if se.Event.Kind == core.KindFollow && se.Event.Follow != nil &&
+				ownPub != [32]byte{} && se.Event.Follow.TargetPubkey == ownPub {
+				newFollowers = append(newFollowers, se.Author)
+			}
+		}
+	})
 	d.mu.Lock()
 	kp := d.unlocked
 	d.mu.Unlock()
@@ -1681,10 +1942,22 @@ func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity)
 	if zenID != nil {
 		sess.SetAuthed(func(id core.Identity) { *zenID = id })
 	}
+	var n int
+	var err error
 	if initiator {
-		return sess.RunInitiator(conn, conn)
+		n, err = sess.RunInitiator(conn, conn)
+	} else {
+		n, err = sess.RunListener(conn, conn)
 	}
-	return sess.RunListener(conn, conn)
+	if len(mergedPosts) > 0 {
+		d.invalidateFeed()
+		d.emitFeedAdd(d.feedItemsFor(mergedPosts))
+	}
+	for _, fid := range newFollowers {
+		name := d.displayName(fid)
+		d.emitFollowersAdd(map[string]string{"identity": fid.String(), "name": name})
+	}
+	return n, err
 }
 
 // resolvePubkey parses a driftnode identity string or raw base32 pubkey into
@@ -1704,8 +1977,9 @@ func resolvePubkey(arg string) ([32]byte, error) {
 	return [32]byte(pub), nil
 }
 
-// Dial connects to a running daemon's control socket and returns the
-// connection. It returns ErrNotRunning if the daemon is not running.
+// Dial probes the daemon's control socket and returns ErrNotRunning if no
+// daemon is listening. The socket now speaks gRPC; callers that need to talk
+// to the daemon should use DialClient for a typed client.
 func Dial(socketPath string) (net.Conn, error) {
 	conn, err := net.Dial("unix", socketPath)
 	if err != nil {
@@ -1714,36 +1988,182 @@ func Dial(socketPath string) (net.Conn, error) {
 	return conn, nil
 }
 
-// SendRequest opens a connection to the daemon, sends a request, and reads
-// the response. It closes the connection after one request.
+// SendRequest is a test convenience that dials the gRPC daemon and maps a
+// legacy method name to a typed RPC, returning a Response shaped like the old
+// JSON-lines protocol so tests can drive the daemon with map[string]any
+// params. Production callers use DialClient and the typed client directly.
 func SendRequest(socketPath, method string, params map[string]any) (*Response, error) {
-	conn, err := Dial(socketPath)
+	cl, cc, err := DialClient(socketPath)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
-	var paramsRaw json.RawMessage
-	if params != nil {
-		b, err := json.Marshal(params)
+	defer cc.Close()
+	ctx := context.Background()
+	switch method {
+	case "whoami":
+		r, err := cl.Whoami(ctx, &driftnodepb.Empty{})
 		if err != nil {
-			return nil, fmt.Errorf("marshal params: %w", err)
+			return nil, err
 		}
-		paramsRaw = b
+		return &Response{Result: map[string]any{"identity": r.Identity, "token": r.Token, "stable": r.Stable, "display_name": r.DisplayName, "has_avatar": r.HasAvatar, "bio": r.Bio, "first_name": r.FirstName, "last_name": r.LastName, "location": r.Location}}, nil
+	case "follows":
+		r, err := cl.Follows(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"follows": identitiesFromProto(r.Identities)}}, nil
+	case "followers":
+		r, err := cl.Followers(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"followers": identitiesFromProto(r.Identities)}}, nil
+	case "feed":
+		limit := 0
+		if v, ok := params["limit"]; ok {
+			if f, ok := v.(float64); ok {
+				limit = int(f)
+			}
+		}
+		r, err := cl.Feed(ctx, &driftnodepb.FeedReq{Limit: int32(limit)})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: feedItemsFromProto(r.Items)}, nil
+	case "post":
+		r, err := cl.Post(ctx, &driftnodepb.PostReq{Text: paramString(params, "text"), Passphrase: paramString(params, "passphrase")})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"event_id": r.EventId}}, nil
+	case "profile":
+		if _, err := cl.Profile(ctx, &driftnodepb.ProfileReq{Name: paramString(params, "name"), Passphrase: paramString(params, "passphrase")}); err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"status": "ok"}}, nil
+	case "detail":
+		if _, err := cl.Detail(ctx, &driftnodepb.DetailReq{Bio: paramString(params, "bio"), FirstName: paramString(params, "first_name"), LastName: paramString(params, "last_name"), Location: paramString(params, "location"), Passphrase: paramString(params, "passphrase")}); err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"status": "ok"}}, nil
+	case "zens":
+		r, err := cl.Zens(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: zensFromProto(r.Zens)}, nil
+	case "verify":
+		r, err := cl.Verify(ctx, &driftnodepb.IdentityReq{Identity: paramString(params, "identity")})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"verified": r.Identity}}, nil
+	case "unverify":
+		r, err := cl.Unverify(ctx, &driftnodepb.IdentityReq{Identity: paramString(params, "identity")})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"unverified": r.Identity}}, nil
+	case "follow":
+		r, err := cl.Follow(ctx, &driftnodepb.FollowReq{Target: paramString(params, "target"), Passphrase: paramString(params, "passphrase")})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"followed": r.Followed}}, nil
+	case "unfollow":
+		r, err := cl.Unfollow(ctx, &driftnodepb.UnfollowReq{Target: paramString(params, "target"), Passphrase: paramString(params, "passphrase")})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"unfollowed": r.Unfollowed}}, nil
+	case "unlock":
+		r, err := cl.Unlock(ctx, &driftnodepb.UnlockReq{Passphrase: paramString(params, "passphrase")})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"status": r.Status, "identity": r.Identity}}, nil
+	case "lock":
+		r, err := cl.Lock(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"status": r.Status}}, nil
+	case "sync":
+		r, err := cl.Sync(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"status": r.Status}}, nil
+	case "stop":
+		r, err := cl.Stop(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"status": r.Status}}, nil
+	case "status":
+		r, err := cl.Status(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"running": r.Running, "zens": int(r.Zens), "socket": r.Socket, "transport": r.Transport, "unlocked": r.Unlocked}}, nil
+	case "rotate-key":
+		r, err := cl.RotateKey(ctx, &driftnodepb.Empty{})
+		if err != nil {
+			return nil, err
+		}
+		return &Response{Result: map[string]any{"token": r.Token}}, nil
+	default:
+		return nil, fmt.Errorf("unknown method: %s", method)
 	}
-	req := Request{Method: method, Params: paramsRaw}
-	enc := json.NewEncoder(conn)
-	if err := enc.Encode(&req); err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+}
+
+// paramString reads a string parameter from a params map.
+func paramString(params map[string]any, key string) string {
+	if params == nil {
+		return ""
 	}
-	var resp Response
-	dec := json.NewDecoder(conn)
-	if err := dec.Decode(&resp); err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
+	if v, ok := params[key].(string); ok {
+		return v
 	}
-	if resp.Error != "" {
-		return &resp, fmt.Errorf("%s", resp.Error)
+	return ""
+}
+
+// identitiesFromProto converts proto identities back to the map slice shape
+// the legacy Response.Result carried.
+func identitiesFromProto(ids []*driftnodepb.Identity) []map[string]string {
+	out := make([]map[string]string, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, map[string]string{"identity": id.Identity, "name": id.Name})
 	}
-	return &resp, nil
+	return out
+}
+
+// feedItemsFromProto converts proto feed items back to the feedItem slice
+// shape the legacy Response.Result carried.
+func feedItemsFromProto(items []*driftnodepb.FeedItem) []feedItem {
+	out := make([]feedItem, 0, len(items))
+	for _, it := range items {
+		out = append(out, feedItem{ID: it.Id, Timestamp: it.Timestamp, Author: it.Author, Name: it.Name, Text: it.Text})
+	}
+	return out
+}
+
+// zensFromProto converts proto zens back to the []any shape the legacy
+// Response.Result carried, so callers asserting on resp.Result.([]any)
+// keep working.
+func zensFromProto(zens []*driftnodepb.Zen) []any {
+	out := make([]any, 0, len(zens))
+	for _, z := range zens {
+		out = append(out, map[string]any{
+			"id":       z.Id,
+			"identity": z.Identity,
+			"name":     z.Name,
+			"kind":     z.Kind,
+			"status":   z.Status,
+			"verified": z.Verified,
+		})
+	}
+	return out
 }
 
 // tailcatTransport adapts the net.Dialer (which dials a tailcat.Addr) to the

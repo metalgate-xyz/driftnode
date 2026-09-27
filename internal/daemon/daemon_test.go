@@ -1,16 +1,16 @@
 package daemon
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"driftnode/internal/core"
+	"driftnode/internal/proto/driftnodepb"
 	"driftnode/internal/store"
 )
 
@@ -37,6 +37,18 @@ func testSocketPath(t *testing.T) string {
 	}
 	t.Cleanup(func() { os.Remove(sock) })
 	return sock
+}
+
+// testClient dials the daemon over gRPC and returns the typed client plus the
+// connection. The connection is closed on test cleanup.
+func testClient(t *testing.T, sock string) (driftnodepb.DriftnodeClient, func()) {
+	t.Helper()
+	cl, conn, err := DialClient(sock)
+	if err != nil {
+		t.Fatalf("DialClient: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return cl, func() {}
 }
 
 func initTestIdentity(t *testing.T, s *store.Store) *core.KeyPair {
@@ -66,27 +78,12 @@ func TestDaemonWhoami(t *testing.T) {
 	}
 	defer d.Stop()
 
-	conn, err := Dial(sock)
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Whoami(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("Dial: %v", err)
+		t.Fatalf("Whoami: %v", err)
 	}
-	defer conn.Close()
-
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	if err := enc.Encode(Request{Method: "whoami"}); err != nil {
-		t.Fatalf("encode: %v", err)
-	}
-	var resp Response
-	if err := dec.Decode(&resp); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if resp.Error != "" {
-		t.Fatalf("error: %s", resp.Error)
-	}
-	result := resp.Result.(map[string]any)
-	id := result["identity"].(string)
-	if _, err := core.ParseIdentity(id); err != nil {
+	if _, err := core.ParseIdentity(resp.Identity); err != nil {
 		t.Fatalf("invalid identity: %v", err)
 	}
 }
@@ -98,15 +95,12 @@ func TestDaemonStatus(t *testing.T) {
 	d.Start(sock)
 	defer d.Stop()
 
-	conn, _ := Dial(sock)
-	defer conn.Close()
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	enc.Encode(Request{Method: "status"})
-	var resp Response
-	dec.Decode(&resp)
-	result := resp.Result.(map[string]any)
-	if result["running"] != true {
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Status(context.Background(), &driftnodepb.Empty{})
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if !resp.Running {
 		t.Fatal("not running")
 	}
 }
@@ -121,22 +115,19 @@ func TestDaemonZens(t *testing.T) {
 	d.upsertZen("zen1", "native", "connected")
 	d.upsertZen("zen2", "browser", "connected")
 
-	conn, _ := Dial(sock)
-	defer conn.Close()
-	enc := json.NewEncoder(conn)
-	dec := json.NewDecoder(conn)
-	enc.Encode(Request{Method: "zens"})
-	var resp Response
-	dec.Decode(&resp)
-	zens := resp.Result.([]any)
-	if len(zens) != 2 {
-		t.Fatalf("want 2 zens, got %d", len(zens))
+	cl, _ := testClient(t, sock)
+	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
+	if err != nil {
+		t.Fatalf("Zens: %v", err)
+	}
+	if len(resp.Zens) != 2 {
+		t.Fatalf("want 2 zens, got %d", len(resp.Zens))
 	}
 }
 
 func TestDialNotRunning(t *testing.T) {
 	sock := testSocketPath(t)
-	_, err := Dial(sock)
+	_, _, err := DialClient(sock)
 	if err == nil {
 		t.Fatal("expected error when daemon not running")
 	}
@@ -152,7 +143,3 @@ func TestSocketPathCleanup(t *testing.T) {
 		t.Fatal("socket file not cleaned up")
 	}
 }
-
-// Compile-time check: ensure we use net and json.
-var _ = json.Marshal
-var _ net.Conn

@@ -732,6 +732,70 @@ func (s *Store) AllPosts() ([]core.SignedEvent, error) {
 	return own, nil
 }
 
+// AllPostsOneTx is AllPosts but reads own + all crawled PostLog events in a
+// single bbolt transaction. AllPosts opens one transaction per followed
+// identity (thousands for a large follow graph), which dominates feed-build
+// time; this collapses them into one read transaction.
+func (s *Store) AllPostsOneTx() ([]core.SignedEvent, error) {
+	var out []core.SignedEvent
+	err := s.db.View(func(tx *bolt.Tx) error {
+		// Own PostLog.
+		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
+			if err := ownBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode own event at %x: %w", k, err)
+				}
+				out = append(out, se)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		// Follow graph from own ProfileLog, then each followed identity's
+		// crawled PostLog events, all within this transaction.
+		var follows []core.Identity
+		if profBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.ProfileLog)); profBucket != nil {
+			var profEvents []core.SignedEvent
+			if err := profBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode profile event at %x: %w", k, err)
+				}
+				profEvents = append(profEvents, se)
+				return nil
+			}); err != nil {
+				return err
+			}
+			fs := core.NewLog(profEvents).FollowSet()
+			fs.Each(func(target [32]byte) {
+				follows = append(follows, core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
+			})
+		}
+		crawl := tx.Bucket(bucketCrawl)
+		for _, id := range follows {
+			authorBucket := crawl.Bucket([]byte(id))
+			if authorBucket == nil {
+				continue
+			}
+			if err := authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode crawled event at %x: %w", k, err)
+				}
+				if se.Event.Log == core.PostLog {
+					out = append(out, se)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
 // VerifyIdentity records that the user has confirmed an identity
 // out-of-band (compared the full driftnode:<pubkey> string through a trusted
 // channel). Verified identities are backup-critical trust state: losing them

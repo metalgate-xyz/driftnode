@@ -54,7 +54,6 @@ func TestFollowByPubkeyFlipsConnected(t *testing.T) {
 	}
 
 	// The follow RPC returns only after the dial+handshake complete, so
-	// connected should already be set. Poll briefly to tolerate the async
 	// sync sink that runs in connectAndSync after the handshake.
 	deadline := time.Now().Add(3 * time.Second)
 	var status string
