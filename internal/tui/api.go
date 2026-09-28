@@ -64,7 +64,7 @@ type snapshotMsg struct {
 // diffMsg is one incremental push event from the daemon. sub is nil only on a
 // final close/error, signaling the model to reconnect.
 type diffMsg struct {
-	panel    string // feed, zens, follows, followers, status
+	panel    string     // feed, zens, follows, followers, status
 	add      []feedPost // feed diffs
 	addZens  []zen      // follows/followers diffs
 	upsert   *zen       // zens upsert

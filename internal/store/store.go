@@ -34,7 +34,7 @@ var (
 	bucketRouting   = []byte("routing")   // identity -> tailcat token
 	bucketVerified  = []byte("verified")  // identity -> presence (out-of-band confirmed)
 	bucketTransport = []byte("transport") // tailcat private key, so the node's address token stays stable across restarts
-	bucketCursor   = []byte("cursor")   // per-(author,log) high-water timestamp of last successful pull
+	bucketCursor    = []byte("cursor")    // per-(author,log) high-water timestamp of last successful pull
 )
 
 // meta keys
@@ -792,6 +792,231 @@ func (s *Store) AllPostsOneTx() ([]core.SignedEvent, error) {
 			}
 		}
 		return nil
+	})
+	return out, err
+}
+
+// OutboundReplies counts, per author, how many of the user's own posts are
+// replies to that author's posts. A reply is a Post event with a non-zero
+// ParentID; the parent's author is resolved by looking up the parent event
+// ID across all held PostLogs (own plus followed). Posts whose parent is not
+// held locally are not counted: the parent author is unknown until the
+// referenced PostLog has been synced. This is an interaction metric feeding
+// the weighted follow graph.
+func (s *Store) OutboundReplies() (map[core.Identity]int, error) {
+	out := make(map[core.Identity]int)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		// Build an event ID -> author index over all held PostLogs so a
+		// reply's parent can be resolved to an author in one pass.
+		authors := make(map[[32]byte]core.Identity)
+		// Own PostLog.
+		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
+			if err := ownBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode own event at %x: %w", k, err)
+				}
+				var id [32]byte
+				copy(id[:], k)
+				authors[id] = se.Author
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		// Followed identities' PostLogs from the crawl bucket.
+		// First resolve the follow graph from the own ProfileLog.
+		var profEvents []core.SignedEvent
+		if profBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.ProfileLog)); profBucket != nil {
+			if err := profBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode profile event at %x: %w", k, err)
+				}
+				profEvents = append(profEvents, se)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		fs := core.NewLog(profEvents).FollowSet()
+		fs.Each(func(target [32]byte) {
+			id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
+			authorBucket := tx.Bucket(bucketCrawl).Bucket([]byte(id))
+			if authorBucket == nil {
+				return
+			}
+			_ = authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return nil
+				}
+				if se.Event.Log != core.PostLog {
+					return nil
+				}
+				var evID [32]byte
+				copy(evID[:], k)
+				authors[evID] = se.Author
+				return nil
+			})
+		})
+		// Count the user's own replies grouped by the parent's author.
+		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
+			if err := ownBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode own event at %x: %w", k, err)
+				}
+				if se.Event.Post == nil || se.Event.Post.ParentID.IsZero() {
+					return nil
+				}
+				parent := se.Event.Post.ParentID
+				author, ok := authors[parent]
+				if !ok {
+					return nil
+				}
+				out[author]++
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// OutboundLikes computes how many Like events the user has signed targeting
+// each followed author's posts, by resolving Like.target_id to the liked
+// post's author across held PostLogs. Counts only authors in the current
+// follow graph. An interaction metric feeding the weighted follow graph.
+func (s *Store) OutboundLikes() (map[core.Identity]int, error) {
+	out := make(map[core.Identity]int)
+	err := s.db.View(func(tx *bolt.Tx) error {
+		// Build an event ID -> author index over all held PostLogs so a
+		// like's target can be resolved to an author in one pass.
+		authors := make(map[[32]byte]core.Identity)
+		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
+			if err := ownBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode own event at %x: %w", k, err)
+				}
+				var id [32]byte
+				copy(id[:], k)
+				authors[id] = se.Author
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		var profEvents []core.SignedEvent
+		if profBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.ProfileLog)); profBucket != nil {
+			if err := profBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode profile event at %x: %w", k, err)
+				}
+				profEvents = append(profEvents, se)
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		fs := core.NewLog(profEvents).FollowSet()
+		fs.Each(func(target [32]byte) {
+			id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
+			authorBucket := tx.Bucket(bucketCrawl).Bucket([]byte(id))
+			if authorBucket == nil {
+				return
+			}
+			_ = authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return nil
+				}
+				if se.Event.Log != core.PostLog {
+					return nil
+				}
+				var evID [32]byte
+				copy(evID[:], k)
+				authors[evID] = se.Author
+				return nil
+			})
+		})
+		// Count the user's own likes grouped by the liked post's author.
+		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
+			if err := ownBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode own event at %x: %w", k, err)
+				}
+				if se.Event.Kind != core.KindLike || se.Event.Like == nil {
+					return nil
+				}
+				author, ok := authors[se.Event.Like.TargetID]
+				if !ok {
+					return nil
+				}
+				out[author]++
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// LikesForPosts returns Like events held locally whose target_id matches any
+// of the given event IDs. Scans own PostLog and all crawled PostLogs. Used by
+// the on-demand like fetch: a zen asks "do you have likes for these posts?"
+// and this returns whatever it holds. Results are best-effort, not
+// authoritative.
+func (s *Store) LikesForPosts(targetIDs []core.EventID) ([]core.SignedEvent, error) {
+	wanted := make(map[[32]byte]bool, len(targetIDs))
+	for _, id := range targetIDs {
+		wanted[id] = true
+	}
+	var out []core.SignedEvent
+	err := s.db.View(func(tx *bolt.Tx) error {
+		// Own PostLog.
+		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
+			if err := ownBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return fmt.Errorf("decode own event at %x: %w", k, err)
+				}
+				if se.Event.Kind == core.KindLike && se.Event.Like != nil && wanted[se.Event.Like.TargetID] {
+					out = append(out, se)
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+		}
+		// All crawled PostLogs.
+		crawl := tx.Bucket(bucketCrawl)
+		if crawl == nil {
+			return nil
+		}
+		return crawl.ForEach(func(author, _ []byte) error {
+			authorBucket := crawl.Bucket(author)
+			if authorBucket == nil {
+				return nil
+			}
+			return authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return nil
+				}
+				if se.Event.Kind == core.KindLike && se.Event.Like != nil && wanted[se.Event.Like.TargetID] {
+					out = append(out, se)
+				}
+				return nil
+			})
+		})
 	})
 	return out, err
 }

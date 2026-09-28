@@ -48,6 +48,10 @@ func (s *Server) Serve(r io.Reader, w io.Writer) error {
 			if err := s.handleFollowers(w); err != nil {
 				return err
 			}
+		case MsgLikeRequest:
+			if err := s.handleLikeRequest(msg.LikeRequest, w); err != nil {
+				return err
+			}
 		case MsgDone:
 			return nil
 		default:
@@ -96,6 +100,31 @@ func (s *Server) handleFollowers(w io.Writer) error {
 		}
 		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
 			return fmt.Errorf("write followers: %w", err)
+		}
+	}
+	return WriteMsg(w, NewDone())
+}
+
+// handleLikeRequest responds to a MsgLikeRequest by scanning held PostLogs
+// for Like events matching any of the requested target IDs, sending them in
+// batches followed by Done. Each event is self-certifying: the requester
+// verifies the liker's signature, so the relaying zen cannot fabricate likes.
+func (s *Server) handleLikeRequest(req *LikeRequest, w io.Writer) error {
+	if req == nil {
+		return fmt.Errorf("like request missing payload")
+	}
+	events, err := s.store.LikesForPosts(req.TargetIDs)
+	if err != nil {
+		return fmt.Errorf("fetch likes: %w", err)
+	}
+	const batchSize = 64
+	for i := 0; i < len(events); i += batchSize {
+		end := i + batchSize
+		if end > len(events) {
+			end = len(events)
+		}
+		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
+			return fmt.Errorf("write likes: %w", err)
 		}
 	}
 	return WriteMsg(w, NewDone())
@@ -274,7 +303,48 @@ func (c *Client) FetchFollowers(r io.Reader, w io.Writer) ([]core.SignedEvent, e
 		}
 	}
 }
-// cache. Returns true if the event was newly stored.
+
+// FetchLikes requests Like events targeting any of the given event IDs from
+// the remote zen. The response carries matching Like events from the
+// remote's held PostLogs, each verified. Used for the on-demand like fetch
+// when an author views their own posts and wants to see who liked them.
+// Best-effort: the remote only returns what it happens to hold.
+func (c *Client) FetchLikes(r io.Reader, w io.Writer, targetIDs []core.EventID) ([]core.SignedEvent, error) {
+	if err := WriteMsg(w, NewLikeRequest(targetIDs)); err != nil {
+		return nil, fmt.Errorf("write like request: %w", err)
+	}
+	var out []core.SignedEvent
+	for {
+		msg, err := ReadMsg(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+				return out, nil
+			}
+			return out, fmt.Errorf("read msg: %w", err)
+		}
+		switch msg.Kind {
+		case MsgEvents:
+			if msg.Events == nil {
+				continue
+			}
+			for _, se := range msg.Events.Items {
+				if err := se.Verify(); err != nil {
+					c.log.Warn("likes: rejected unverified event", "err", err)
+					continue
+				}
+				out = append(out, se)
+			}
+		case MsgDone:
+			return out, nil
+		default:
+			c.log.Warn("likes: unexpected message kind", "kind", msg.Kind)
+		}
+	}
+}
+
+// mergeEvent stores a synced event into the local store: own events go to
+// the own bucket, crawled events go to the crawl bucket keyed by author.
+// Returns true if the event was newly stored.
 func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 	ownID, _, err := c.store.Identity()
 	if err != nil {
@@ -359,7 +429,9 @@ func (s *Session) SetZenSink(fn func(ZenRef)) { s.onZen = fn }
 
 // SetCursorSource sets the function that returns the stored high-water
 // timestamp for (author, log). Without it, pulls request full logs.
-func (s *Session) SetCursorSource(fn func(core.Identity, core.LogName) (int64, error)) { s.cursorSource = fn }
+func (s *Session) SetCursorSource(fn func(core.Identity, core.LogName) (int64, error)) {
+	s.cursorSource = fn
+}
 
 // SetCursorSink sets the function that records a new high-water timestamp
 // for (author, log) after a successful pull.
@@ -608,6 +680,11 @@ func (s *Session) serve(r io.Reader, w io.Writer) (int, error) {
 				return served, err
 			}
 			served++
+		case MsgLikeRequest:
+			if err := srv.handleLikeRequest(msg.LikeRequest, w); err != nil {
+				return served, err
+			}
+			served++
 		case MsgReverse, MsgDone:
 			return served, nil
 		default:
@@ -638,6 +715,11 @@ func (s *Session) serveWithZens(r io.Reader, w io.Writer) (int, error) {
 			served++
 		case MsgFollowers:
 			if err := srv.handleFollowers(w); err != nil {
+				return served, err
+			}
+			served++
+		case MsgLikeRequest:
+			if err := srv.handleLikeRequest(msg.LikeRequest, w); err != nil {
 				return served, err
 			}
 			served++

@@ -339,3 +339,110 @@ func storeHasPost(s *store.Store, author core.Identity, text string) bool {
 	}
 	return false
 }
+
+// mustSignLike signs a Like event with the given keypair, target, and sequence.
+func mustSignLike(t *testing.T, kp *core.KeyPair, targetID core.EventID, seq uint64) *core.SignedEvent {
+	t.Helper()
+	se, err := kp.Sign(core.Event{
+		Kind:      core.KindLike,
+		Log:       core.PostLog,
+		Timestamp: core.Now64(),
+		Sequence:  seq,
+		Like:      &core.Like{TargetID: targetID},
+	})
+	if err != nil {
+		t.Fatalf("sign like: %v", err)
+	}
+	return se
+}
+
+// TestFollowedLikeShowsInFeed proves that a Like event arrives via the normal
+// sync path (following an author pulls their PostLog) and the like count
+// appears on the target post in the feed with no on-demand fetch. Alice
+// posts; Bob likes Alice's post (the Like lives in Bob's PostLog); Alice
+// follows Bob, syncs his PostLog, and her feed shows the like on her post.
+func TestFollowedLikeShowsInFeed(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	aliceStore := openTestStore(t)
+	bobStore := openTestStore(t)
+
+	aliceKP := initTestIdentityAt(t, aliceStore, "alicepass")
+	bobKP := initTestIdentityAt(t, bobStore, "bobpass")
+
+	// Alice posts.
+	d := New(aliceStore, logger)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "alicepass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	postResp, err := SendRequest(sock, "post", map[string]any{"text": "alice's post", "passphrase": "alicepass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	postResult, ok := postResp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("post result: %T", postResp.Result)
+	}
+	postIDStr, _ := postResult["event_id"].(string)
+	if postIDStr == "" {
+		t.Fatal("missing post event id")
+	}
+	alicePostID, err := core.ParseEventID(postIDStr)
+	if err != nil {
+		t.Fatalf("parse post id: %v", err)
+	}
+
+	// Bob likes Alice's post. The Like event lives in Bob's own PostLog.
+	bobLike := mustSignLike(t, bobKP, alicePostID, 1)
+	if err := bobStore.AppendOwnEvent(core.PostLog, bobLike); err != nil {
+		t.Fatalf("bob like: %v", err)
+	}
+
+	// Alice follows Bob; the normal sync pulls Bob's PostLog (the Like).
+	d.SetTransport(pipeTransport{serverStore: bobStore, serverKey: bobKP, logger: logger})
+	if _, err := SendRequest(sock, "follow", map[string]any{
+		"target":     "tctest-token-bob",
+		"passphrase": "alicepass",
+	}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+
+	// Wait for the sync to pull Bob's Like event into Alice's crawl bucket.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		crawled, _ := aliceStore.CrawledEvents(bobKP.Identity())
+		if len(crawled) > 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// The feed must show Alice's own post with the like from Bob, pulled
+	// automatically via sync (no FetchLikes).
+	resp, err := SendRequest(sock, "feed", nil)
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	items, ok := resp.Result.([]feedItem)
+	if !ok {
+		t.Fatalf("feed result type: %T", resp.Result)
+	}
+	var found bool
+	for _, it := range items {
+		if it.Text == "alice's post" {
+			if it.LikeCount != 1 {
+				t.Fatalf("like count: want 1, got %d", it.LikeCount)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("alice's post not in feed; items=%d", len(items))
+	}
+	_ = aliceKP
+}

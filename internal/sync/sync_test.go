@@ -429,3 +429,76 @@ func TestZensFromMsgBackwardCompat(t *testing.T) {
 		}
 	}
 }
+
+func TestSyncLikesForPosts(t *testing.T) {
+	serverStore := newTestStore(t)
+	clientStore := newTestStore(t)
+
+	authorA := makeKey(t)
+	authorB := makeKey(t)
+	likerA := makeKey(t)
+	likerB := makeKey(t)
+
+	postA, _ := authorA.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
+		Post: &core.Post{Text: "post a"},
+	})
+	postAID, _ := postA.ID()
+	postB, _ := authorB.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 200, Sequence: 1,
+		Post: &core.Post{Text: "post b"},
+	})
+	postBID, _ := postB.ID()
+
+	if _, err := serverStore.PutCrawledEvent(postA, 1); err != nil {
+		t.Fatalf("put postA: %v", err)
+	}
+	if _, err := serverStore.PutCrawledEvent(postB, 1); err != nil {
+		t.Fatalf("put postB: %v", err)
+	}
+
+	likeA1, _ := likerA.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 300, Sequence: 1,
+		Like: &core.Like{TargetID: postAID},
+	})
+	likeA2, _ := likerB.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 310, Sequence: 1,
+		Like: &core.Like{TargetID: postAID},
+	})
+	likeB, _ := likerB.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 320, Sequence: 2,
+		Like: &core.Like{TargetID: postBID},
+	})
+	for _, se := range []*core.SignedEvent{likeA1, likeA2, likeB} {
+		if _, err := serverStore.PutCrawledEvent(se, 1); err != nil {
+			t.Fatalf("PutCrawledEvent like: %v", err)
+		}
+	}
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+	srv := NewServer(serverStore, nil)
+	go func() {
+		defer serverW.Close()
+		srv.Serve(serverR, serverW)
+	}()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	cl := NewClient(clientStore, nil)
+	events, err := cl.FetchLikes(clientR, clientW, []core.EventID{postAID})
+	if err != nil {
+		t.Fatalf("FetchLikes: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("likes for postA: want 2, got %d", len(events))
+	}
+	for _, se := range events {
+		if se.Event.Kind != core.KindLike || se.Event.Like == nil {
+			t.Fatalf("non-like event: %+v", se.Event)
+		}
+		if se.Event.Like.TargetID != postAID {
+			t.Fatalf("like targets wrong post: want %v, got %v", postAID, se.Event.Like.TargetID)
+		}
+	}
+}

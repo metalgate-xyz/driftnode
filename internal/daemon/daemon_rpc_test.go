@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"io"
+	"log/slog"
 	"os"
 	"testing"
 	"time"
@@ -364,6 +365,222 @@ func TestPostWithPassphraseUnlocksImplicitly(t *testing.T) {
 	}
 	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "two"}); err != nil {
 		t.Fatalf("keyless post after implicit unlock: %v", err)
+	}
+}
+
+func TestPostReplyWithParentID(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+	// Create a top-level post first.
+	parent, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "parent", Passphrase: "pass"})
+	if err != nil {
+		t.Fatalf("parent post: %v", err)
+	}
+	if parent.EventId == "" {
+		t.Fatal("missing parent event id")
+	}
+	// Reply to it by parent id. The daemon should accept the parent id and
+	// produce a new event id for the reply.
+	reply, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "a reply", ParentId: parent.EventId})
+	if err != nil {
+		t.Fatalf("reply post: %v", err)
+	}
+	if reply.EventId == "" || reply.EventId == parent.EventId {
+		t.Fatalf("missing or duplicate reply event id: %v", reply)
+	}
+	// The reply event should have ParentID set in the stored PostLog.
+	events, err := s.OwnEvents(core.PostLog)
+	if err != nil {
+		t.Fatalf("OwnEvents: %v", err)
+	}
+	var foundReply bool
+	for _, se := range events {
+		if se.Event.Post == nil {
+			continue
+		}
+		if se.Event.Post.ParentID.IsZero() {
+			continue
+		}
+		if se.Event.Post.Text != "a reply" {
+			continue
+		}
+		parsed, err := core.ParseEventID(parent.EventId)
+		if err != nil {
+			t.Fatalf("ParseEventID: %v", err)
+		}
+		if se.Event.Post.ParentID != parsed {
+			t.Fatalf("parent id mismatch: got %v want %v", se.Event.Post.ParentID, parsed)
+		}
+		foundReply = true
+		break
+	}
+	if !foundReply {
+		t.Fatal("reply event with parent id not found in own PostLog")
+	}
+}
+
+func TestPostReplyRejectsBadParentID(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{
+		Text: "reply", ParentId: "not-valid-base32!!!", Passphrase: "pass",
+	}); err == nil {
+		t.Fatal("expected error for invalid parent id")
+	}
+}
+
+func TestLikeRPC(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	// Post something to like.
+	postResp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "like me", Passphrase: "pass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	if postResp.EventId == "" {
+		t.Fatal("missing post event id")
+	}
+
+	// Like it.
+	likeResp, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: postResp.EventId})
+	if err != nil {
+		t.Fatalf("like: %v", err)
+	}
+	if likeResp.EventId == "" {
+		t.Fatal("missing like event id")
+	}
+
+	// Liking a non-existent post id is fine (the event is still valid; it
+	// just references something we don't hold). But a bad format must fail.
+	if _, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: "not-valid!!!"}); err == nil {
+		t.Fatal("expected error for invalid post id")
+	}
+
+	// Verify the like event is in the store.
+	ownEvents, err := s.OwnEvents(core.PostLog)
+	if err != nil {
+		t.Fatalf("OwnEvents: %v", err)
+	}
+	var foundLike bool
+	for _, se := range ownEvents {
+		if se.Event.Kind == core.KindLike {
+			foundLike = true
+		}
+	}
+	if !foundLike {
+		t.Fatal("like event not found in own PostLog")
+	}
+}
+
+func TestLikeOwnPost(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	// Post and like it with the same identity.
+	postResp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "my post", Passphrase: "pass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	likeResp, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: postResp.EventId})
+	if err != nil {
+		t.Fatalf("like own post: %v", err)
+	}
+	if likeResp.EventId == "" {
+		t.Fatal("missing like event id")
+	}
+
+	// The feed must show the like on the post. A self-like is a valid
+	// signed event: the like count is observational, not authoritative
+	// (design §7.2), so counting the author's own like is consistent.
+	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if len(feed.Items) != 1 {
+		t.Fatalf("want 1 post, got %d", len(feed.Items))
+	}
+	if feed.Items[0].LikeCount != 1 {
+		t.Fatalf("like count: want 1, got %d", feed.Items[0].LikeCount)
+	}
+	if len(feed.Items[0].Likers) != 1 {
+		t.Fatalf("likers: want 1, got %d", len(feed.Items[0].Likers))
+	}
+}
+
+func TestFeedMineFilter(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	// Post two of our own posts.
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "mine one", Passphrase: "pass"}); err != nil {
+		t.Fatalf("post one: %v", err)
+	}
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "mine two"}); err != nil {
+		t.Fatalf("post two: %v", err)
+	}
+
+	// Feed with mine=true should return only our own posts.
+	resp, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	if err != nil {
+		t.Fatalf("feed mine: %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("want 2 own posts, got %d", len(resp.Items))
+	}
+	for _, item := range resp.Items {
+		if item.Text != "mine one" && item.Text != "mine two" {
+			t.Fatalf("unexpected post in mine feed: %q", item.Text)
+		}
+	}
+
+	// Feed without mine should also include our posts.
+	respAll, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{})
+	if err != nil {
+		t.Fatalf("feed all: %v", err)
+	}
+	if len(respAll.Items) < 2 {
+		t.Fatalf("want at least 2 posts in full feed, got %d", len(respAll.Items))
 	}
 }
 
@@ -810,3 +1027,98 @@ func TestZensRPCConcurrentStatusMutation(t *testing.T) {
 
 // Compile-time check that io is used (stream EOF handling).
 var _ = io.EOF
+
+// TestFetchLikesRPCOverTransport verifies the FetchLikes RPC dials a
+// connected zen over the transport, retrieves Like events targeting the
+// caller's posts, merges them into the local store, and the like count then
+// appears in the feed. This exercises the full --all-likes path
+// (gRPC FetchLikes -> handleFetchLikes -> Transport.Dial -> handshake ->
+// FetchLikes sync protocol -> store merge -> feed repopulate).
+func TestFetchLikesRPCOverTransport(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	aliceStore := openTestStore(t)
+	bobStore := openTestStore(t)
+	aliceKP := initTestIdentityAt(t, aliceStore, "alicepass")
+	bobKP := initTestIdentityAt(t, bobStore, "bobpass")
+
+	// Alice posts via gRPC so we get the canonical event ID back.
+	d := New(aliceStore, logger)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+	if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "alicepass"}); err != nil {
+		t.Fatalf("unlock: %v", err)
+	}
+	cl, _ := testClient(t, sock)
+	postResp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "like me remotely", Passphrase: "alicepass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	postID := postResp.EventId
+	if postID == "" {
+		t.Fatal("missing post event id")
+	}
+
+	// Bob likes Alice's post in his own PostLog.
+	alicePostID, err := core.ParseEventID(postID)
+	if err != nil {
+		t.Fatalf("parse alice post id: %v", err)
+	}
+	bobLike, err := bobKP.Sign(core.Event{
+		Kind:      core.KindLike,
+		Log:       core.PostLog,
+		Timestamp: core.Now64(),
+		Sequence:  1,
+		Like:      &core.Like{TargetID: alicePostID},
+	})
+	if err != nil {
+		t.Fatalf("bob sign like: %v", err)
+	}
+	if err := bobStore.AppendOwnEvent(core.PostLog, bobLike); err != nil {
+		t.Fatalf("bob append like: %v", err)
+	}
+
+	// Wire Bob behind the transport and teach the daemon his token.
+	bobTok := "tok-bob-likes"
+	d.SetTransport(multiPipeTransport{
+		servers: map[string]pipeTransport{
+			bobTok: {serverStore: bobStore, serverKey: bobKP, logger: logger},
+		},
+	})
+	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
+
+	// Before fetch: feed shows the post with zero likes.
+	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	if err != nil {
+		t.Fatalf("feed before: %v", err)
+	}
+	if len(feed.Items) != 1 || feed.Items[0].LikeCount != 0 {
+		t.Fatalf("feed before: want 1 item 0 likes, got %d items, first=%+v", len(feed.Items), feed.Items)
+	}
+
+	// FetchLikes dials Bob, pulls his like, and merges it into Alice's store.
+	fetchResp, err := cl.FetchLikes(context.Background(), &driftnodepb.FetchLikesReq{PostIds: []string{postID}})
+	if err != nil {
+		t.Fatalf("FetchLikes: %v", err)
+	}
+	if len(fetchResp.LikeEventIds) != 1 {
+		t.Fatalf("FetchLikes: want 1 like event id, got %d", len(fetchResp.LikeEventIds))
+	}
+
+	// After fetch: feed shows 1 like from bob.
+	feed, err = cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	if err != nil {
+		t.Fatalf("feed after: %v", err)
+	}
+	if len(feed.Items) != 1 {
+		t.Fatalf("feed after: want 1 item, got %d", len(feed.Items))
+	}
+	if feed.Items[0].LikeCount != 1 {
+		t.Fatalf("feed after: want 1 like, got %d", feed.Items[0].LikeCount)
+	}
+
+	_ = aliceKP
+}

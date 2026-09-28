@@ -73,6 +73,9 @@ SEED_US_ID=$(dn seed-us init -p seedpass)
 [[ "$SEED_EU_ID" == driftnode:* ]] && ok "S1 seed-eu init" || bad "S1 seed-eu init" "$SEED_EU_ID"
 [[ "$SEED_US_ID" == driftnode:* ]] && ok "S1 seed-us init" || bad "S1 seed-us init" "$SEED_US_ID"
 
+dnq seed-eu profile --name seed-eu -p seedpass
+dnq seed-us profile --name seed-us -p seedpass
+
 dnq seed-eu follow -p seedpass "$SEED_US_ID" && ok "S2 seed-eu follows seed-us" || bad "S2 seed-eu follows seed-us" "failed"
 dnq seed-us follow -p seedpass "$SEED_EU_ID" && ok "S2 seed-us follows seed-eu" || bad "S2 seed-us follows seed-eu" "failed"
 
@@ -125,6 +128,10 @@ EVE_ID=$(dn eve init -p evepass)
 [[ "$CAROL_ID" == driftnode:* ]] && ok "F1 carol init" || bad "F1 carol init" "$CAROL_ID"
 [[ "$DAVE_ID" == driftnode:* ]] && ok "F1 dave init" || bad "F1 dave init" "$DAVE_ID"
 [[ "$EVE_ID" == driftnode:* ]] && ok "F1 eve init" || bad "F1 eve init" "$EVE_ID"
+
+dnq carol profile --name carol -p carolpass
+dnq dave profile --name dave -p davepass
+dnq eve profile --name eve -p evepass
 
 start_daemon carol --bootstrap /bootstrap/bootstrap.yaml
 start_daemon dave --bootstrap /bootstrap/bootstrap.yaml
@@ -203,6 +210,23 @@ sleep 10
 CAROL_FEED3=$(dn carol feed)
 contains "$CAROL_FEED3" "dave posts here" && ok "P4.1 carol sees dave's post (followed)" || bad "P4.1 carol sees dave" "$CAROL_FEED3"
 
+printf "\n===== Phase 4.5: Like propagation via normal sync =====\n"
+# Dave posts a dedicated post for the like test. Carol, who follows Dave,
+# receives it via sync and likes it. Dave follows Carol, so his normal sync
+# round pulls Carol's PostLog (containing the Like) and the like appears on
+# his post with no on-demand fetch.
+dnq dave post "likeable post"
+sleep 10
+# Carol sees the post and extracts its event id from the feed.
+LIKEABLE_FEED=$(dn carol feed)
+LIKEABLE_POST_ID=$(echo "$LIKEABLE_FEED" | grep 'likeable post' | awk '{print $NF}' | tr -d '[]')
+[[ -n "$LIKEABLE_POST_ID" ]] && ok "P4.5.1 carol sees likeable post with id" || bad "P4.5.1 carol sees likeable post" "$LIKEABLE_FEED"
+dnq carol like "$LIKEABLE_POST_ID"
+sleep 10
+DAVE_MINE=$(dn dave feed --mine)
+contains "$DAVE_MINE" "likeable post" && ok "P4.5.2 dave sees liked post in feed --mine" || bad "P4.5.2 dave sees liked post" "$DAVE_MINE"
+contains "$DAVE_MINE" "(1 like: carol)" && ok "P4.5.3 like from carol visible via normal sync" || bad "P4.5.3 like via normal sync" "$DAVE_MINE"
+
 printf "\n===== Phase 5: Eve discovers the network =====\n"
 dnq eve post "eve checking in"
 dnq eve follow "$CAROL_ID"
@@ -211,6 +235,23 @@ dnq carol follow "$EVE_ID"
 sleep 10
 CAROL_FEED4=$(dn carol feed)
 contains "$CAROL_FEED4" "eve checking in" && ok "P5.1 carol sees eve's post" || bad "P5.1 carol sees eve" "$CAROL_FEED4"
+
+printf "\n===== Phase 5.5: Like fetch from a follower you don't follow back =====\n"
+# Eve follows Dave so she can discover his post. She likes it. Dave does NOT
+# follow Eve, so Eve's Like never arrives via normal sync. Dave uses
+# --all-likes to dial connected zens (including Eve, learned via zen
+# exchange) and fetch likes targeting his own posts.
+dnq eve follow "$DAVE_ID"
+sleep 10
+EVE_FEED=$(dn eve feed)
+EVE_LIKEABLE_ID=$(echo "$EVE_FEED" | grep 'likeable post' | awk '{print $NF}' | tr -d '[]')
+[[ -n "$EVE_LIKEABLE_ID" ]] && ok "P5.5.1 eve sees likeable post" || bad "P5.5.1 eve sees likeable post" "$EVE_FEED"
+dnq eve like "$EVE_LIKEABLE_ID"
+sleep 10
+DAVE_ALL=$(dn dave feed --mine --all-likes)
+contains "$DAVE_ALL" "likeable post" && ok "P5.5.2 dave sees liked post" || bad "P5.5.2 dave sees liked post" "$DAVE_ALL"
+contains "$DAVE_ALL" "eve" && ok "P5.5.3 eve's like visible via --all-likes" || bad "P5.5.3 eve's like via --all-likes" "$DAVE_ALL"
+contains "$DAVE_ALL" "carol" && ok "P5.5.4 carol's like still visible" || bad "P5.5.4 carol's like still visible" "$DAVE_ALL"
 
 printf "\n===== Phase 6: Persistent key stability =====\n"
 SEED_EU_TOKEN_BEFORE=$(dn seed-eu whoami | grep '^address:' | awk '{print $2}')
@@ -257,7 +298,7 @@ expect_count seed-eu follows 1
 expect_count seed-us follows 1
 expect_count carol   follows 4
 expect_count dave    follows 3
-expect_count eve     follows 2
+expect_count eve     follows 3
 
 expect_has dave  followers "$CAROL_ID"
 expect_has carol followers "$DAVE_ID"

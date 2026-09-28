@@ -118,8 +118,8 @@ type Daemon struct {
 	// when feedGen changes (a post is created or synced). Without it every
 	// subscribe snapshot reloads and re-sorts the full PostLog from disk,
 	// which is seconds for a large feed. feedMu guards the cache and gen.
-	feedMu   sync.Mutex
-	feedGen  uint64
+	feedMu    sync.Mutex
+	feedGen   uint64
 	feedCache []core.SignedEvent
 
 	// nameCache memoizes DisplayName per identity so the snapshot and feed
@@ -279,16 +279,60 @@ func (d *Daemon) removeSubscriber(s *subscriber) {
 // subscribe snapshot. It reads from the feed cache, which is rebuilt only
 // when the feed generation changes (a post is created or synced), so a
 // snapshot does not reload and re-sort the full PostLog from disk each time.
-func (d *Daemon) buildFeedItems(limit int) ([]feedItem, error) {
+func (d *Daemon) buildFeedItems(limit int, mine bool) ([]feedItem, error) {
 	posts := d.cachedPosts()
-	if limit > 0 && len(posts) > limit {
-		posts = posts[:limit]
-	}
+	ownID, _, _ := d.store.Identity()
 	items := make([]feedItem, 0, len(posts))
 	for _, p := range posts {
+		if mine && p.Author != ownID {
+			continue
+		}
 		items = append(items, d.feedItemFor(p))
 	}
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	d.populateLikes(items)
 	return items, nil
+}
+
+// populateLikes computes the liker set for each feed item from Like events
+// held locally (own PostLog plus synced PostLogs of followed identities).
+// Likes are observational: the count is "how many Like events this zen has
+// observed," never a global truth (section 7.2).
+func (d *Daemon) populateLikes(items []feedItem) {
+	if len(items) == 0 {
+		return
+	}
+	ids := make([]core.EventID, len(items))
+	idToIdx := make(map[core.EventID]int, len(items))
+	for i, it := range items {
+		id, err := core.ParseEventID(it.ID)
+		if err != nil {
+			continue
+		}
+		ids[i] = id
+		idToIdx[id] = i
+	}
+	likes, err := d.store.LikesForPosts(ids)
+	if err != nil {
+		return
+	}
+	for _, se := range likes {
+		if se.Event.Like == nil {
+			continue
+		}
+		idx, ok := idToIdx[se.Event.Like.TargetID]
+		if !ok {
+			continue
+		}
+		items[idx].LikeCount++
+		likerName := d.displayName(se.Author)
+		if likerName == "" {
+			likerName = se.Author.String()
+		}
+		items[idx].Likers = append(items[idx].Likers, likerName)
+	}
 }
 
 // cachedPosts returns the merged timeline sorted newest-first, rebuilding it
@@ -812,7 +856,7 @@ func (d *Daemon) snapshot() *driftnodepb.Snapshot {
 	for i := range src {
 		zens = append(zens, d.zenToProto(src[i]))
 	}
-	feed, _ := d.buildFeedItems(snapshotFeedLimit)
+	feed, _ := d.buildFeedItems(snapshotFeedLimit, false)
 	follows := d.followEntries()
 	followers := d.followerEntries()
 	return &driftnodepb.Snapshot{
@@ -907,28 +951,33 @@ func (d *Daemon) addSubscriberProto() *subscriber {
 
 // feedItem is one post in the merged feed, serialized to the CLI.
 type feedItem struct {
-	ID        string `json:"id"`
-	Timestamp int64  `json:"timestamp"`
-	Author    string `json:"author"`
-	Name      string `json:"name"`
-	Text      string `json:"text"`
+	ID        string   `json:"id"`
+	Timestamp int64    `json:"timestamp"`
+	Author    string   `json:"author"`
+	Name      string   `json:"name"`
+	Text      string   `json:"text"`
+	LikeCount int      `json:"like_count"`
+	Likers    []string `json:"likers"`
 }
 
 // handleFeed returns the merged timeline (own PostLog plus synced PostLogs
 // from followed identities), reverse-chronological, up to limit entries.
-func (d *Daemon) handleFeed(limit int) Response {
-	items, err := d.buildFeedItems(limit)
+// When mine is set, only the user's own posts are returned.
+func (d *Daemon) handleFeed(limit int, mine bool) Response {
+	items, err := d.buildFeedItems(limit, mine)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("read posts: %s", err)}
 	}
 	return Response{Result: items}
 }
 
-// feedItemFor builds a feedItem from one signed post/reply event.
+// feedItemFor builds a feedItem from one signed post event. A post with a
+// non-zero ParentID is a reply; the feed prefixes it so replies are visually
+// distinguishable from top-level posts.
 func (d *Daemon) feedItemFor(p core.SignedEvent) feedItem {
 	text := p.Event.Post.Text
-	if p.Event.Reply != nil {
-		text = "(reply) " + p.Event.Reply.Text
+	if p.Event.Post != nil && !p.Event.Post.ParentID.IsZero() {
+		text = "(reply) " + text
 	}
 	name := d.displayName(p.Author)
 	id, _ := p.ID()
@@ -1022,18 +1071,31 @@ func (u unlockResult) key() (*core.KeyPair, error) {
 }
 
 // handlePost signs a Post event with the given key and appends it to the
-// local PostLog.
-func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
+// local PostLog. When parentID is non-empty, the post is a reply to the
+// referenced event.
+func (d *Daemon) handlePost(text, parentID string, kp *core.KeyPair) Response {
+	var parent core.EventID
+	if parentID != "" {
+		p, err := core.ParseEventID(parentID)
+		if err != nil {
+			return Response{Error: fmt.Sprintf("parent id: %s", err)}
+		}
+		parent = p
+	}
 	seq, err := d.store.OwnEventCount(core.PostLog)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("sequence: %s", err)}
+	}
+	post := &core.Post{Text: text}
+	if !parent.IsZero() {
+		post.ParentID = parent
 	}
 	se, err := kp.Sign(core.Event{
 		Kind:      core.KindPost,
 		Log:       core.PostLog,
 		Timestamp: core.Now64(),
 		Sequence:  seq + 1,
-		Post:      &core.Post{Text: text},
+		Post:      post,
 	})
 	if err != nil {
 		return Response{Error: fmt.Sprintf("sign: %s", err)}
@@ -1055,6 +1117,113 @@ func (d *Daemon) handlePost(text string, kp *core.KeyPair) Response {
 		Text:      text,
 	}})
 	return Response{Result: map[string]string{"event_id": id.String()}}
+}
+
+// handleLike signs a Like event targeting the given post event ID and
+// appends it to the local PostLog. The like is recorded in the liker's own
+// log, never the target's (section 7.2): nobody can write into someone
+// else's log without a valid signature from that identity's key.
+func (d *Daemon) handleLike(postID string, kp *core.KeyPair) Response {
+	target, err := core.ParseEventID(postID)
+	if err != nil {
+		return Response{Error: fmt.Sprintf("post id: %s", err)}
+	}
+	if target.IsZero() {
+		return Response{Error: "post id required"}
+	}
+	seq, err := d.store.OwnEventCount(core.PostLog)
+	if err != nil {
+		return Response{Error: fmt.Sprintf("sequence: %s", err)}
+	}
+	se, err := kp.Sign(core.Event{
+		Kind:      core.KindLike,
+		Log:       core.PostLog,
+		Timestamp: core.Now64(),
+		Sequence:  seq + 1,
+		Like:      &core.Like{TargetID: target},
+	})
+	if err != nil {
+		return Response{Error: fmt.Sprintf("sign: %s", err)}
+	}
+	if err := d.store.AppendOwnEvent(core.PostLog, se); err != nil {
+		return Response{Error: fmt.Sprintf("append: %s", err)}
+	}
+	d.invalidateFeed()
+	id, _ := se.ID()
+	d.touchSignAt()
+	d.triggerSyncNow()
+	return Response{Result: map[string]string{"event_id": id.String()}}
+}
+
+// handleFetchLikes dials each known zen and requests Like events targeting
+// the given post IDs. Best-effort: only zens currently reachable respond,
+// and each returns only what it happens to hold. Received like events are
+// stored as crawled events (merged into the feed's source set by dedup).
+// Returns all newly-received like events.
+func (d *Daemon) handleFetchLikes(targetIDs []core.EventID) ([]core.SignedEvent, error) {
+	d.mu.Lock()
+	transport := d.transport
+	kp := d.unlocked
+	d.mu.Unlock()
+	refs := d.knownRefsList()
+	if transport == nil {
+		return nil, errors.New("no transport configured")
+	}
+	if kp == nil {
+		return nil, errors.New("key is locked; run 'driftnode daemon unlock'")
+	}
+	type result struct {
+		events []core.SignedEvent
+		err    error
+	}
+	results := make(chan result, len(refs))
+	for _, ref := range refs {
+		go func(ref syncproto.ZenRef) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			conn, err := transport.Dial(ctx, ref.Token)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			defer conn.Close()
+			sess := syncproto.NewSession(d.store, d.logger)
+			sess.SetKey(kp)
+			if _, err := sess.Handshake(conn, conn); err != nil {
+				results <- result{err: err}
+				return
+			}
+			cl := syncproto.NewClient(d.store, d.logger)
+			likes, err := cl.FetchLikes(conn, conn, targetIDs)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{events: likes}
+		}(ref)
+	}
+	var all []core.SignedEvent
+	for range refs {
+		r := <-results
+		if r.err != nil {
+			d.logger.Debug("fetch likes: zen error", "err", r.err)
+			continue
+		}
+		for _, se := range r.events {
+			inserted, err := d.store.PutCrawledEvent(&se, uint64(se.Event.Sequence))
+			if err != nil {
+				d.logger.Warn("fetch likes: store", "err", err)
+				continue
+			}
+			if inserted {
+				all = append(all, se)
+			}
+		}
+	}
+	if len(all) > 0 {
+		d.invalidateFeed()
+	}
+	return all, nil
 }
 
 // handleWhoami returns the local identity plus the current profile and
@@ -1921,7 +2090,7 @@ func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity)
 		}
 		switch se.Event.Log {
 		case core.PostLog:
-			if se.Event.Kind != core.KindPost && se.Event.Kind != core.KindReply {
+			if se.Event.Kind != core.KindPost {
 				return
 			}
 			mergedPosts = append(mergedPosts, *se)
@@ -2143,7 +2312,15 @@ func identitiesFromProto(ids []*driftnodepb.Identity) []map[string]string {
 func feedItemsFromProto(items []*driftnodepb.FeedItem) []feedItem {
 	out := make([]feedItem, 0, len(items))
 	for _, it := range items {
-		out = append(out, feedItem{ID: it.Id, Timestamp: it.Timestamp, Author: it.Author, Name: it.Name, Text: it.Text})
+		out = append(out, feedItem{
+			ID:        it.Id,
+			Timestamp: it.Timestamp,
+			Author:    it.Author,
+			Name:      it.Name,
+			Text:      it.Text,
+			LikeCount: int(it.LikeCount),
+			Likers:    it.Likers,
+		})
 	}
 	return out
 }

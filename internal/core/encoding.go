@@ -43,9 +43,9 @@ func CanonicalDecode(b []byte, v any) error {
 const HashSize = 32
 
 // EventID is the BLAKE3-256 of an event's canonical bytes (§7.2). References
-// between events (Reply.parent_id, Like.target_id, Delete.target_id) point at
-// this value; a reference is only resolvable once the referenced author's log
-// has been synced.
+// between events (Post.parent_id for replies, Like.target_id, Delete.target_id)
+// point at this value; a reference is only resolvable once the referenced
+// author's log has been synced.
 type EventID [HashSize]byte
 
 // String returns the lowercase base32 encoding of the ID, matching the
@@ -54,6 +54,21 @@ func (id EventID) String() string { return base32NoPadLower(id[:]) }
 
 // IsZero reports whether the ID is the zero value.
 func (id EventID) IsZero() bool { return id == EventID{} }
+
+// ParseEventID decodes a base32 string into an EventID. Accepts any-case input.
+// Used wherever an event ID is supplied as text (reply parent, like target).
+func ParseEventID(s string) (EventID, error) {
+	b, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(s))
+	if err != nil {
+		return EventID{}, fmt.Errorf("base32 decode: %w", err)
+	}
+	if len(b) != HashSize {
+		return EventID{}, fmt.Errorf("event id: want %d bytes, got %d", HashSize, len(b))
+	}
+	var id EventID
+	copy(id[:], b)
+	return id, nil
+}
 
 // ContentHash is the BLAKE3-256 of a media blob (§7.2). Attachments are
 // content-addressed and fetched lazily, never inlined into events.

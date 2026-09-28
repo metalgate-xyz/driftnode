@@ -42,4 +42,3 @@ func TestRunRendersSomething(t *testing.T) {
 		t.Fatal("program produced no output")
 	}
 }
-

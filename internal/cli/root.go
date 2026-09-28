@@ -83,6 +83,7 @@ func Root() *cobra.Command {
 		initCmd(),
 		whoamiCmd(),
 		postCmd(),
+		likeCmd(),
 		feedCmd(),
 		followCmd(),
 		unfollowCmd(),
@@ -243,6 +244,7 @@ func printWhoami(cmd *cobra.Command, r *driftnodepb.WhoamiResp) {
 
 func postCmd() *cobra.Command {
 	var passphrase string
+	var parentID string
 	c := &cobra.Command{
 		Use:   "post <text>",
 		Short: "Append a signed Post event to the local PostLog",
@@ -253,7 +255,7 @@ func postCmd() *cobra.Command {
 			// after `driftnode daemon unlock`.
 			if cl, cc, derr := dialDaemon(); derr == nil {
 				defer cc.Close()
-				resp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: args[0], Passphrase: passphrase})
+				resp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: args[0], Passphrase: passphrase, ParentId: parentID})
 				if err == nil {
 					cmd.Println(resp.EventId)
 					return nil
@@ -278,12 +280,85 @@ func postCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("get sequence: %w", err)
 			}
+			post := &core.Post{Text: args[0]}
+			if parentID != "" {
+				pid, err := core.ParseEventID(parentID)
+				if err != nil {
+					return fmt.Errorf("parent id: %w", err)
+				}
+				post.ParentID = pid
+			}
 			se, err := kp.Sign(core.Event{
 				Kind:      core.KindPost,
 				Log:       core.PostLog,
 				Timestamp: core.Now64(),
 				Sequence:  seq + 1,
-				Post:      &core.Post{Text: args[0]},
+				Post:      post,
+			})
+			if err != nil {
+				return fmt.Errorf("sign: %w", err)
+			}
+			if err := s.AppendOwnEvent(core.PostLog, se); err != nil {
+				return fmt.Errorf("append: %w", err)
+			}
+			id, _ := se.ID()
+			cmd.Println(id)
+			return nil
+		},
+	}
+	addDBFlag(c)
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to unlock the private key (optional when the daemon is unlocked)")
+	c.Flags().StringVar(&parentID, "parent", "", "event ID of the post to reply to (creates a reply)")
+	return c
+}
+
+func likeCmd() *cobra.Command {
+	var passphrase string
+	c := &cobra.Command{
+		Use:   "like <post-id>",
+		Short: "Like a post (append a signed Like event to the local PostLog)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: args[0], Passphrase: passphrase})
+				if err == nil {
+					cmd.Println(resp.EventId)
+					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required when the daemon is not running")
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			kp, err := loadKey(s, passphrase)
+			if err != nil {
+				return err
+			}
+			target, err := core.ParseEventID(args[0])
+			if err != nil {
+				return fmt.Errorf("post id: %w", err)
+			}
+			if target.IsZero() {
+				return fmt.Errorf("post id required")
+			}
+			seq, err := s.OwnEventCount(core.PostLog)
+			if err != nil {
+				return fmt.Errorf("get sequence: %w", err)
+			}
+			se, err := kp.Sign(core.Event{
+				Kind:      core.KindLike,
+				Log:       core.PostLog,
+				Timestamp: core.Now64(),
+				Sequence:  seq + 1,
+				Like:      &core.Like{TargetID: target},
 			})
 			if err != nil {
 				return fmt.Errorf("sign: %w", err)
@@ -303,11 +378,19 @@ func postCmd() *cobra.Command {
 
 func feedCmd() *cobra.Command {
 	var limit int
+	var mine bool
+	var allLikes bool
 	c := &cobra.Command{
 		Use:   "feed",
 		Short: "Print the merged timeline from local state (no network)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if allLikes && !mine {
+				return fmt.Errorf("--all-likes requires --mine")
+			}
+			if allLikes {
+				return feedWithAllLikes(cmd, limit)
+			}
 			// When the daemon is running (it holds the store lock),
 			// read the feed via the subscribe stream. The snapshot is capped
 			// server-side, so a large feed does not blow the gRPC message
@@ -315,6 +398,16 @@ func feedCmd() *cobra.Command {
 			// directly for offline use.
 			if cl, cc, derr := dialDaemon(); derr == nil {
 				defer cc.Close()
+				if mine {
+					resp, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Limit: int32(limit), Mine: true})
+					if err == nil {
+						printFeedItems(cmd, resp.Items)
+						return nil
+					}
+					if !errors.Is(err, daemon.ErrNotRunning) {
+						return err
+					}
+				}
 				snap, err := subscribeSnapshot(cl)
 				if err == nil {
 					printFeedSnapshot(cmd, snap, limit)
@@ -329,6 +422,7 @@ func feedCmd() *cobra.Command {
 				return err
 			}
 			defer s.Close()
+			ownID, _, _ := s.Identity()
 			allPosts, err := s.AllPosts()
 			if err != nil {
 				return fmt.Errorf("read posts: %w", err)
@@ -338,7 +432,22 @@ func feedCmd() *cobra.Command {
 			if limit > 0 && len(posts) > limit {
 				posts = posts[:limit]
 			}
+			// Build like counts per post from Like events in the held PostLogs.
+			postLikes := make(map[core.EventID][]string)
+			for _, se := range allPosts {
+				if se.Event.Kind != core.KindLike || se.Event.Like == nil {
+					continue
+				}
+				likerName, _ := s.DisplayName(se.Author)
+				if likerName == "" {
+					likerName = se.Author.String()
+				}
+				postLikes[se.Event.Like.TargetID] = append(postLikes[se.Event.Like.TargetID], likerName)
+			}
 			for _, p := range posts {
+				if mine && p.Author != ownID {
+					continue
+				}
 				ts := core.FormatTime(p.Event.Timestamp)
 				name, _ := s.DisplayName(p.Author)
 				author := name
@@ -349,17 +458,87 @@ func feedCmd() *cobra.Command {
 					}
 				}
 				text := p.Event.Post.Text
-				if p.Event.Reply != nil {
-					text = "(reply) " + p.Event.Reply.Text
+				if p.Event.Post != nil && !p.Event.Post.ParentID.IsZero() {
+					text = "(reply) " + text
 				}
-				cmd.Printf("%s  %s> %s\n", ts, author, text)
+				line := fmt.Sprintf("%s  %s> %s", ts, author, text)
+				pid, _ := p.ID()
+				if likers, ok := postLikes[pid]; ok && len(likers) > 0 {
+					line += fmt.Sprintf("  (%d like%s: %s)", len(likers), pluralS(len(likers)), strings.Join(likers, ", "))
+				}
+				line += "  [" + pid.String() + "]"
+				cmd.Println(line)
 			}
 			return nil
 		},
 	}
 	addDBFlag(c)
 	c.Flags().IntVarP(&limit, "limit", "n", 0, "maximum number of posts to show (0 = all)")
+	c.Flags().BoolVar(&mine, "mine", false, "show only your own posts")
+	c.Flags().BoolVar(&allLikes, "all-likes", false, "fetch likes from connected zens for your own posts (requires --mine, requires daemon)")
 	return c
+}
+
+// printFeedItems prints proto feed items with like counts and liker names.
+func printFeedItems(cmd *cobra.Command, items []*driftnodepb.FeedItem) {
+	for _, item := range items {
+		author := item.Name
+		if author == "" {
+			author = item.Author
+			if len(author) > 16 {
+				author = author[:16]
+			}
+		}
+		line := fmt.Sprintf("%s  %s> %s", core.FormatTime(item.Timestamp), author, item.Text)
+		if item.LikeCount > 0 {
+			line += fmt.Sprintf("  (%d like%s: %s)", item.LikeCount, pluralS(int(item.LikeCount)), strings.Join(item.Likers, ", "))
+		}
+		if item.Id != "" {
+			line += "  [" + item.Id + "]"
+		}
+		cmd.Println(line)
+	}
+}
+
+// feedWithAllLikes fetches the user's own posts, triggers a remote like fetch
+// for those posts, then re-queries the feed to display like counts. Requires
+// the daemon because it dials connected zens.
+func feedWithAllLikes(cmd *cobra.Command, limit int) error {
+	cl, cc, err := dialDaemon()
+	if err != nil {
+		return fmt.Errorf("--all-likes requires the daemon: %w", err)
+	}
+	defer cc.Close()
+	resp, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Limit: int32(limit), Mine: true})
+	if err != nil {
+		return fmt.Errorf("feed: %w", err)
+	}
+	if len(resp.Items) == 0 {
+		return nil
+	}
+	postIDs := make([]string, len(resp.Items))
+	for i, item := range resp.Items {
+		postIDs[i] = item.Id
+	}
+	fetchResp, err := cl.FetchLikes(context.Background(), &driftnodepb.FetchLikesReq{PostIds: postIDs})
+	if err != nil {
+		return fmt.Errorf("fetch likes: %w", err)
+	}
+	if len(fetchResp.LikeEventIds) > 0 {
+		resp, err = cl.Feed(context.Background(), &driftnodepb.FeedReq{Limit: int32(limit), Mine: true})
+		if err != nil {
+			return fmt.Errorf("re-read feed: %w", err)
+		}
+	}
+	printFeedItems(cmd, resp.Items)
+	return nil
+}
+
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // subscribeSnapshot opens a subscribe stream, reads the initial snapshot,
@@ -391,16 +570,7 @@ func printFeedSnapshot(cmd *cobra.Command, snap *driftnodepb.Snapshot, limit int
 	if limit > 0 && len(items) > limit {
 		items = items[:limit]
 	}
-	for _, item := range items {
-		author := item.Name
-		if author == "" {
-			author = item.Author
-			if len(author) > 16 {
-				author = author[:16]
-			}
-		}
-		cmd.Printf("%s  %s> %s\n", core.FormatTime(item.Timestamp), author, item.Text)
-	}
+	printFeedItems(cmd, items)
 }
 
 func followCmd() *cobra.Command {

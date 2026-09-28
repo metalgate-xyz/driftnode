@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 
@@ -109,12 +110,56 @@ func (s *grpcServer) Followers(ctx context.Context, _ *driftnodepb.Empty) (*drif
 }
 
 func (s *grpcServer) Feed(ctx context.Context, req *driftnodepb.FeedReq) (*driftnodepb.FeedResp, error) {
-	r := s.d.handleFeed(int(req.Limit))
+	r := s.d.handleFeed(int(req.Limit), req.Mine)
 	if r.Error != "" {
 		return nil, statusErr(r.Error)
 	}
 	items, _ := r.Result.([]feedItem)
 	return &driftnodepb.FeedResp{Items: toFeedItems(items)}, nil
+}
+
+func (s *grpcServer) Like(ctx context.Context, req *driftnodepb.LikeReq) (*driftnodepb.LikeResp, error) {
+	if req.PostId == "" {
+		return nil, statusErr("post id required")
+	}
+	kp, err := s.d.signingKey(req.Passphrase)
+	if err != nil {
+		return nil, statusErr(err.Error())
+	}
+	r := s.d.handleLike(req.PostId, kp)
+	if r.Error != "" {
+		return nil, statusErr(r.Error)
+	}
+	m, _ := r.Result.(map[string]string)
+	resp := &driftnodepb.LikeResp{}
+	if m != nil {
+		resp.EventId = m["event_id"]
+	}
+	return resp, nil
+}
+
+func (s *grpcServer) FetchLikes(ctx context.Context, req *driftnodepb.FetchLikesReq) (*driftnodepb.FetchLikesResp, error) {
+	if len(req.PostIds) == 0 {
+		return nil, statusErr("at least one post id required")
+	}
+	ids := make([]core.EventID, 0, len(req.PostIds))
+	for _, s := range req.PostIds {
+		id, err := core.ParseEventID(s)
+		if err != nil {
+			return nil, statusErr(fmt.Sprintf("post id %q: %s", s, err))
+		}
+		ids = append(ids, id)
+	}
+	got, err := s.d.handleFetchLikes(ids)
+	if err != nil {
+		return nil, statusErr(err.Error())
+	}
+	out := make([]string, 0, len(got))
+	for _, se := range got {
+		id, _ := se.ID()
+		out = append(out, id.String())
+	}
+	return &driftnodepb.FetchLikesResp{LikeEventIds: out}, nil
 }
 
 func (s *grpcServer) Post(ctx context.Context, req *driftnodepb.PostReq) (*driftnodepb.PostResp, error) {
@@ -125,7 +170,7 @@ func (s *grpcServer) Post(ctx context.Context, req *driftnodepb.PostReq) (*drift
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handlePost(req.Text, kp)
+	r := s.d.handlePost(req.Text, req.ParentId, kp)
 	if r.Error != "" {
 		return nil, statusErr(r.Error)
 	}
@@ -304,7 +349,7 @@ func (s *grpcServer) Status(ctx context.Context, _ *driftnodepb.Empty) (*driftno
 		Zens:      zenCount,
 		Socket:    socket,
 		Transport: tcUp,
-		Unlocked:   unlocked,
+		Unlocked:  unlocked,
 	}, nil
 }
 
@@ -355,6 +400,8 @@ func toFeedItems(items []feedItem) []*driftnodepb.FeedItem {
 			Author:    it.Author,
 			Name:      it.Name,
 			Text:      it.Text,
+			LikeCount: int32(it.LikeCount),
+			Likers:    it.Likers,
 		})
 	}
 	return out

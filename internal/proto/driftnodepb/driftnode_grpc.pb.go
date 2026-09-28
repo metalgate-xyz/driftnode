@@ -19,25 +19,27 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Driftnode_Whoami_FullMethodName    = "/driftnode.v1.Driftnode/Whoami"
-	Driftnode_Follows_FullMethodName   = "/driftnode.v1.Driftnode/Follows"
-	Driftnode_Followers_FullMethodName = "/driftnode.v1.Driftnode/Followers"
-	Driftnode_Feed_FullMethodName      = "/driftnode.v1.Driftnode/Feed"
-	Driftnode_Post_FullMethodName      = "/driftnode.v1.Driftnode/Post"
-	Driftnode_Profile_FullMethodName   = "/driftnode.v1.Driftnode/Profile"
-	Driftnode_Detail_FullMethodName    = "/driftnode.v1.Driftnode/Detail"
-	Driftnode_Zens_FullMethodName      = "/driftnode.v1.Driftnode/Zens"
-	Driftnode_Verify_FullMethodName    = "/driftnode.v1.Driftnode/Verify"
-	Driftnode_Unverify_FullMethodName  = "/driftnode.v1.Driftnode/Unverify"
-	Driftnode_Follow_FullMethodName    = "/driftnode.v1.Driftnode/Follow"
-	Driftnode_Unfollow_FullMethodName  = "/driftnode.v1.Driftnode/Unfollow"
-	Driftnode_Unlock_FullMethodName    = "/driftnode.v1.Driftnode/Unlock"
-	Driftnode_Lock_FullMethodName      = "/driftnode.v1.Driftnode/Lock"
-	Driftnode_Sync_FullMethodName      = "/driftnode.v1.Driftnode/Sync"
-	Driftnode_Stop_FullMethodName      = "/driftnode.v1.Driftnode/Stop"
-	Driftnode_Status_FullMethodName    = "/driftnode.v1.Driftnode/Status"
-	Driftnode_RotateKey_FullMethodName = "/driftnode.v1.Driftnode/RotateKey"
-	Driftnode_Subscribe_FullMethodName = "/driftnode.v1.Driftnode/Subscribe"
+	Driftnode_Whoami_FullMethodName     = "/driftnode.v1.Driftnode/Whoami"
+	Driftnode_Follows_FullMethodName    = "/driftnode.v1.Driftnode/Follows"
+	Driftnode_Followers_FullMethodName  = "/driftnode.v1.Driftnode/Followers"
+	Driftnode_Feed_FullMethodName       = "/driftnode.v1.Driftnode/Feed"
+	Driftnode_Post_FullMethodName       = "/driftnode.v1.Driftnode/Post"
+	Driftnode_Like_FullMethodName       = "/driftnode.v1.Driftnode/Like"
+	Driftnode_FetchLikes_FullMethodName = "/driftnode.v1.Driftnode/FetchLikes"
+	Driftnode_Profile_FullMethodName    = "/driftnode.v1.Driftnode/Profile"
+	Driftnode_Detail_FullMethodName     = "/driftnode.v1.Driftnode/Detail"
+	Driftnode_Zens_FullMethodName       = "/driftnode.v1.Driftnode/Zens"
+	Driftnode_Verify_FullMethodName     = "/driftnode.v1.Driftnode/Verify"
+	Driftnode_Unverify_FullMethodName   = "/driftnode.v1.Driftnode/Unverify"
+	Driftnode_Follow_FullMethodName     = "/driftnode.v1.Driftnode/Follow"
+	Driftnode_Unfollow_FullMethodName   = "/driftnode.v1.Driftnode/Unfollow"
+	Driftnode_Unlock_FullMethodName     = "/driftnode.v1.Driftnode/Unlock"
+	Driftnode_Lock_FullMethodName       = "/driftnode.v1.Driftnode/Lock"
+	Driftnode_Sync_FullMethodName       = "/driftnode.v1.Driftnode/Sync"
+	Driftnode_Stop_FullMethodName       = "/driftnode.v1.Driftnode/Stop"
+	Driftnode_Status_FullMethodName     = "/driftnode.v1.Driftnode/Status"
+	Driftnode_RotateKey_FullMethodName  = "/driftnode.v1.Driftnode/RotateKey"
+	Driftnode_Subscribe_FullMethodName  = "/driftnode.v1.Driftnode/Subscribe"
 )
 
 // DriftnodeClient is the client API for Driftnode service.
@@ -53,6 +55,8 @@ type DriftnodeClient interface {
 	Followers(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*IdentitiesResp, error)
 	Feed(ctx context.Context, in *FeedReq, opts ...grpc.CallOption) (*FeedResp, error)
 	Post(ctx context.Context, in *PostReq, opts ...grpc.CallOption) (*PostResp, error)
+	Like(ctx context.Context, in *LikeReq, opts ...grpc.CallOption) (*LikeResp, error)
+	FetchLikes(ctx context.Context, in *FetchLikesReq, opts ...grpc.CallOption) (*FetchLikesResp, error)
 	Profile(ctx context.Context, in *ProfileReq, opts ...grpc.CallOption) (*EmptyResp, error)
 	Detail(ctx context.Context, in *DetailReq, opts ...grpc.CallOption) (*EmptyResp, error)
 	Zens(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ZensResp, error)
@@ -121,6 +125,26 @@ func (c *driftnodeClient) Post(ctx context.Context, in *PostReq, opts ...grpc.Ca
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PostResp)
 	err := c.cc.Invoke(ctx, Driftnode_Post_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *driftnodeClient) Like(ctx context.Context, in *LikeReq, opts ...grpc.CallOption) (*LikeResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LikeResp)
+	err := c.cc.Invoke(ctx, Driftnode_Like_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *driftnodeClient) FetchLikes(ctx context.Context, in *FetchLikesReq, opts ...grpc.CallOption) (*FetchLikesResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FetchLikesResp)
+	err := c.cc.Invoke(ctx, Driftnode_FetchLikes_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -289,6 +313,8 @@ type DriftnodeServer interface {
 	Followers(context.Context, *Empty) (*IdentitiesResp, error)
 	Feed(context.Context, *FeedReq) (*FeedResp, error)
 	Post(context.Context, *PostReq) (*PostResp, error)
+	Like(context.Context, *LikeReq) (*LikeResp, error)
+	FetchLikes(context.Context, *FetchLikesReq) (*FetchLikesResp, error)
 	Profile(context.Context, *ProfileReq) (*EmptyResp, error)
 	Detail(context.Context, *DetailReq) (*EmptyResp, error)
 	Zens(context.Context, *Empty) (*ZensResp, error)
@@ -327,6 +353,12 @@ func (UnimplementedDriftnodeServer) Feed(context.Context, *FeedReq) (*FeedResp, 
 }
 func (UnimplementedDriftnodeServer) Post(context.Context, *PostReq) (*PostResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Post not implemented")
+}
+func (UnimplementedDriftnodeServer) Like(context.Context, *LikeReq) (*LikeResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Like not implemented")
+}
+func (UnimplementedDriftnodeServer) FetchLikes(context.Context, *FetchLikesReq) (*FetchLikesResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method FetchLikes not implemented")
 }
 func (UnimplementedDriftnodeServer) Profile(context.Context, *ProfileReq) (*EmptyResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Profile not implemented")
@@ -477,6 +509,42 @@ func _Driftnode_Post_Handler(srv interface{}, ctx context.Context, dec func(inte
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DriftnodeServer).Post(ctx, req.(*PostReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Driftnode_Like_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LikeReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DriftnodeServer).Like(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Driftnode_Like_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DriftnodeServer).Like(ctx, req.(*LikeReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Driftnode_FetchLikes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FetchLikesReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DriftnodeServer).FetchLikes(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Driftnode_FetchLikes_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DriftnodeServer).FetchLikes(ctx, req.(*FetchLikesReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -752,6 +820,14 @@ var Driftnode_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Post",
 			Handler:    _Driftnode_Post_Handler,
+		},
+		{
+			MethodName: "Like",
+			Handler:    _Driftnode_Like_Handler,
+		},
+		{
+			MethodName: "FetchLikes",
+			Handler:    _Driftnode_FetchLikes_Handler,
 		},
 		{
 			MethodName: "Profile",

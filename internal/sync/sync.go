@@ -47,19 +47,27 @@ const (
 	// relaying zen. This is how the crawler walks the in-edge of the
 	// follow graph (section 9.3) by asking the followed zen directly.
 	MsgFollowers MsgKind = 8
+	// MsgLikeRequest asks the receiving zen for Like events it holds whose
+	// target_id matches any of the given event IDs. The response reuses
+	// Events to carry matching Like events, each self-certifying. This is
+	// the on-demand like fetch for an author's own posts: the author asks
+	// connected zens "who liked my posts?" and receives best-effort
+	// results from whatever each zen happens to hold (section 7.2).
+	MsgLikeRequest MsgKind = 9
 )
 
 // Message is the wire envelope. The Kind field determines which payload
 // field is set. This single type lets the receiver decode the Kind before
 // committing to a specific payload struct.
 type Message struct {
-	Kind    MsgKind  `cbor:"k"`
-	Request *Request `cbor:"r,omitempty"`
-	Events  *Events  `cbor:"e,omitempty"`
-	Done    *Done    `cbor:"d,omitempty"`
-	Zens    *Zens    `cbor:"p,omitempty"`
-	Hello   *Hello   `cbor:"h,omitempty"`
-	Auth    *Auth    `cbor:"a,omitempty"`
+	Kind        MsgKind      `cbor:"k"`
+	Request     *Request     `cbor:"r,omitempty"`
+	Events      *Events      `cbor:"e,omitempty"`
+	Done        *Done        `cbor:"d,omitempty"`
+	Zens        *Zens        `cbor:"p,omitempty"`
+	Hello       *Hello       `cbor:"h,omitempty"`
+	Auth        *Auth        `cbor:"a,omitempty"`
+	LikeRequest *LikeRequest `cbor:"q,omitempty"`
 }
 
 // Request asks the zen to send events in the named log after the given
@@ -94,9 +102,18 @@ type Zens struct {
 // the name is only authoritative once the crawler fetches that identity's
 // signed ProfileLog.
 type ZenRef struct {
-	Token    string          `cbor:"t"`
-	Identity core.Identity   `cbor:"i,omitempty"`
-	Name     string          `cbor:"n,omitempty"`
+	Token    string        `cbor:"t"`
+	Identity core.Identity `cbor:"i,omitempty"`
+	Name     string        `cbor:"n,omitempty"`
+}
+
+// LikeRequest asks the receiving zen for Like events targeting any of the
+// given event IDs. The responder scans its synced PostLogs for Like events
+// whose target_id matches and returns them as Events. Each returned event
+// is self-certifying (signed by the liker), so the requester verifies
+// authenticity without trusting the relaying zen.
+type LikeRequest struct {
+	TargetIDs []core.EventID `cbor:"t"`
 }
 
 // Hello is the first handshake message: the sender's driftnode identity and a
@@ -208,4 +225,11 @@ func NewAuth(sig []byte) *Message {
 // Follow events, terminated by MsgDone.
 func NewFollowers() *Message {
 	return &Message{Kind: MsgFollowers}
+}
+
+// NewLikeRequest builds a LikeRequest: ask the receiving zen for Like events
+// targeting any of the given event IDs. The response is a sequence of
+// MsgEvents carrying matching Like events, terminated by MsgDone.
+func NewLikeRequest(targetIDs []core.EventID) *Message {
+	return &Message{Kind: MsgLikeRequest, LikeRequest: &LikeRequest{TargetIDs: targetIDs}}
 }

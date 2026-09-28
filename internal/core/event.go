@@ -37,10 +37,9 @@ const (
 	KindFollow   Kind = 2
 	KindUnfollow Kind = 3
 	KindPost     Kind = 4
-	KindReply    Kind = 5
-	KindLike     Kind = 6
-	KindDelete   Kind = 7
-	KindDetail   Kind = 8
+	KindLike     Kind = 5
+	KindDelete   Kind = 6
+	KindDetail   Kind = 7
 )
 
 // Event is an unsigned event. Its canonical CBOR encoding is what the signature
@@ -54,7 +53,6 @@ type Event struct {
 	Profile   *Profile `cbor:"p,omitempty"`
 	Follow    *Follow  `cbor:"f,omitempty"`
 	Post      *Post    `cbor:"P,omitempty"`
-	Reply     *Reply   `cbor:"R,omitempty"`
 	Like      *Like    `cbor:"L,omitempty"`
 	Delete    *Delete  `cbor:"D,omitempty"`
 	Detail    *Detail  `cbor:"x,omitempty"`
@@ -89,17 +87,14 @@ type Follow struct {
 	TargetPubkey [32]byte `cbor:"t"` // raw public key of the followed identity
 }
 
-// Post is a top-level content event in the PostLog.
+// Post is a content event in the PostLog. A reply is a Post with ParentID set:
+// it references the parent event by ID, and the parent is only resolvable
+// once the referenced author's PostLog has been synced (§7.2). A zero
+// ParentID means a top-level post.
 type Post struct {
 	Text        string        `cbor:"t,omitempty"`
 	MediaHashes []ContentHash `cbor:"m,omitempty"`
-}
-
-// Reply is a Post that references a parent event by ID. The parent is only
-// resolvable once the referenced author's PostLog has been synced (§7.2).
-type Reply struct {
-	Post
-	ParentID EventID `cbor:"p"`
+	ParentID    EventID       `cbor:"r,omitempty"`
 }
 
 // Like is recorded in the liker's own PostLog, never the target's: nobody can
@@ -200,7 +195,7 @@ func validateEvent(ev Event) error {
 		}
 	case PostLog:
 		switch ev.Kind {
-		case KindPost, KindReply, KindLike, KindDelete:
+		case KindPost, KindLike, KindDelete:
 			return nil
 		}
 	}

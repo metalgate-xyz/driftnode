@@ -246,11 +246,11 @@ Each identity maintains two independent event logs, so that discovering someone 
 |---|---|---|
 | **Profile log** | `Profile` (zen name, avatar hash — last-write-wins by timestamp), `Follow`/`Unfollow` events — small, low-churn | Anyone; this is what the built-in crawler (§9.3) fetches and caches durably |
 | **Detail log** | `Detail` (bio, first name, last name, location — last-write-wins by timestamp) | Anyone who asks, but **never crawled and never cached durably**: a peer fetches it on demand to display someone's full profile and discards the events afterwards. The owner's own Detail log is backup-critical like the other own logs. |
-| **PostLog** | `Post`, `Reply`, `Like`, `Delete` events — the content stream, potentially large and long-lived | Only zens who follow this identity (§9.1) |
+| **PostLog** | `Post` (including replies, which are posts with a `parent_id`), `Like`, `Delete` events — the content stream, potentially large and long-lived | Only zens who follow this identity (§9.1) |
 
 Because each log is just a named, independently-requestable stream of signed events, a zen can ask for "give me `driftnode:<pubkey>`'s Profile log" without ever touching their PostLog or Detail log. This is what makes the crawler's low cost an architectural property rather than a policy: a crawl of thousands of accounts never requests, and therefore never receives, anyone's post history or personal details.
 
-**Current state is a deterministic projection over the log**, computed independently by every zen from whatever subset of events it has: the current profile is the latest `Profile` event by timestamp; the current details are the latest `Detail` event by timestamp; the current follow set is the result of replaying `Follow`/`Unfollow` events in order; the current post list is every non-tombstoned `Post`/`Reply` event. Because projection is a pure function of the event set, two zens with different partial views only ever differ in *completeness*, never in *disagreement* about what a given event means.
+**Current state is a deterministic projection over the log**, computed independently by every zen from whatever subset of events it has: the current profile is the latest `Profile` event by timestamp; the current details are the latest `Detail` event by timestamp; the current follow set is the result of replaying `Follow`/`Unfollow` events in order; the current post list is every non-tombstoned `Post` event (a reply is a `Post` with `parent_id` set). Because projection is a pure function of the event set, two zens with different partial views only ever differ in *completeness*, never in *disagreement* about what a given event means.
 
 ### 7.2 Event Types & Post Addressing
 
@@ -260,13 +260,13 @@ Because each log is just a named, independently-requestable stream of signed eve
 | `Detail` (upsert) | Detail log | `bio`, `first_name`, `last_name`, `location`, `timestamp` |
 | `Follow` / `Unfollow` | Profile log | `target_pubkey`, `timestamp` |
 | `Post` | PostLog | `text`, `media_hashes[]`, `timestamp` |
-| `Reply` | PostLog | same as `Post`, plus `parent_id` |
+| `Post` (reply) | PostLog | same as a top-level `Post`, plus `parent_id` referencing the replied-to event |
 | `Like` | PostLog of the **liker**, not the target | `target_id` |
 | `Delete` | Any log | `target_id` (tombstone) |
 
 **Every event has a canonical serialized form** — a fixed field order, deterministic CBOR encoding — produced by the shared `fxamacker/cbor`-based encoding code in the core module (§3). Because both targets run this same code, there is no cross-implementation encoding drift to guard against; the canonical form is simply whatever the shared function produces. It is still worth a short written spec plus test vectors as living documentation and a regression guard, but not as a mechanism to keep two implementations in agreement.
 
-**Post/event IDs** are the BLAKE3 hash of an event's canonical signed, serialized bytes. `Reply.parent_id` and `Like.target_id` both point to this hash; a reference is only resolvable once the referenced author's PostLog has actually been synced.
+**Post/event IDs** are the BLAKE3 hash of an event's canonical signed, serialized bytes. A reply's `parent_id` and `Like.target_id` both point to this hash; a reference is only resolvable once the referenced author's PostLog has actually been synced.
 
 **Likes and counts are observational, not authoritative.** Because a `Like` lives in the liker's own log — nobody can write into someone else's log without a valid signature from that identity's own key — a "like count" on a post is always "the number of `Like` events this particular zen has observed referencing this ID," never a true global count. The same caveat applies to follow-counts surfaced by the crawler (§9.3).
 
@@ -318,7 +318,7 @@ These are `driftnode config` knobs (§12.2) rather than architectural exceptions
 
 Entirely client-side, with no ranking server:
 1. The client holds the PostLogs (§7.1) of everyone the user follows, synced via gossip (§7.3).
-2. The timeline is a merge-sort by timestamp across those logs, resolving `Reply.parent_id` references where the parent event has also been synced (surfacing "reply to a post you haven't synced" otherwise). Reverse-chronological by default, with a pluggable local scoring function available on top.
+2. The timeline is a merge-sort by timestamp across those logs, resolving a reply's `parent_id` references where the parent event has also been synced (surfacing "reply to a post you haven't synced" otherwise). Reverse-chronological by default, with a pluggable local scoring function available on top.
 
 ### 9.2 Why Search Cannot Be Global
 

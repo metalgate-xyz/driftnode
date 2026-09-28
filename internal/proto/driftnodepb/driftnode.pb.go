@@ -303,10 +303,12 @@ func (x *VerifyResp) GetIdentity() string {
 	return ""
 }
 
-// FeedReq limits the returned timeline. limit <= 0 means all.
+// FeedReq limits the returned timeline. limit <= 0 means all. When mine is
+// set, the feed is filtered to the user's own posts only.
 type FeedReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
+	Mine          bool                   `protobuf:"varint,2,opt,name=mine,proto3" json:"mine,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -346,6 +348,13 @@ func (x *FeedReq) GetLimit() int32 {
 		return x.Limit
 	}
 	return 0
+}
+
+func (x *FeedReq) GetMine() bool {
+	if x != nil {
+		return x.Mine
+	}
+	return false
 }
 
 // FeedResp is a slice of merged-timeline posts, newest-first.
@@ -401,6 +410,8 @@ type FeedItem struct {
 	Author        string                 `protobuf:"bytes,3,opt,name=author,proto3" json:"author,omitempty"`
 	Name          string                 `protobuf:"bytes,4,opt,name=name,proto3" json:"name,omitempty"`
 	Text          string                 `protobuf:"bytes,5,opt,name=text,proto3" json:"text,omitempty"`
+	LikeCount     int32                  `protobuf:"varint,6,opt,name=like_count,json=likeCount,proto3" json:"like_count,omitempty"`
+	Likers        []string               `protobuf:"bytes,7,rep,name=likers,proto3" json:"likers,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -470,12 +481,28 @@ func (x *FeedItem) GetText() string {
 	return ""
 }
 
+func (x *FeedItem) GetLikeCount() int32 {
+	if x != nil {
+		return x.LikeCount
+	}
+	return 0
+}
+
+func (x *FeedItem) GetLikers() []string {
+	if x != nil {
+		return x.Likers
+	}
+	return nil
+}
+
 // PostReq creates a post. Passphrase unlocks the signing key; omit when the
-// daemon is already unlocked.
+// daemon is already unlocked. ParentId, when non-empty, is the event ID of the
+// post being replied to; a reply is a post with a parent.
 type PostReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
 	Passphrase    string                 `protobuf:"bytes,2,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
+	ParentId      string                 `protobuf:"bytes,3,opt,name=parent_id,json=parentId,proto3" json:"parent_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -520,6 +547,13 @@ func (x *PostReq) GetText() string {
 func (x *PostReq) GetPassphrase() string {
 	if x != nil {
 		return x.Passphrase
+	}
+	return ""
+}
+
+func (x *PostReq) GetParentId() string {
+	if x != nil {
+		return x.ParentId
 	}
 	return ""
 }
@@ -569,6 +603,198 @@ func (x *PostResp) GetEventId() string {
 	return ""
 }
 
+// LikeReq creates a Like event targeting the given post event id. Passphrase
+// unlocks the signing key; omit when the daemon is already unlocked.
+type LikeReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PostId        string                 `protobuf:"bytes,1,opt,name=post_id,json=postId,proto3" json:"post_id,omitempty"`
+	Passphrase    string                 `protobuf:"bytes,2,opt,name=passphrase,proto3" json:"passphrase,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LikeReq) Reset() {
+	*x = LikeReq{}
+	mi := &file_driftnode_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LikeReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LikeReq) ProtoMessage() {}
+
+func (x *LikeReq) ProtoReflect() protoreflect.Message {
+	mi := &file_driftnode_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LikeReq.ProtoReflect.Descriptor instead.
+func (*LikeReq) Descriptor() ([]byte, []int) {
+	return file_driftnode_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *LikeReq) GetPostId() string {
+	if x != nil {
+		return x.PostId
+	}
+	return ""
+}
+
+func (x *LikeReq) GetPassphrase() string {
+	if x != nil {
+		return x.Passphrase
+	}
+	return ""
+}
+
+// LikeResp reports the created event id.
+type LikeResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	EventId       string                 `protobuf:"bytes,1,opt,name=event_id,json=eventId,proto3" json:"event_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *LikeResp) Reset() {
+	*x = LikeResp{}
+	mi := &file_driftnode_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *LikeResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*LikeResp) ProtoMessage() {}
+
+func (x *LikeResp) ProtoReflect() protoreflect.Message {
+	mi := &file_driftnode_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use LikeResp.ProtoReflect.Descriptor instead.
+func (*LikeResp) Descriptor() ([]byte, []int) {
+	return file_driftnode_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *LikeResp) GetEventId() string {
+	if x != nil {
+		return x.EventId
+	}
+	return ""
+}
+
+// FetchLikesReq asks the daemon to query connected zens for Like events
+// targeting the given post ids. This is an on-demand, best-effort fetch:
+// the daemon dials each connected zen and requests any Like events it holds
+// whose target_id matches one of the requested ids. Expensive, user-triggered.
+type FetchLikesReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PostIds       []string               `protobuf:"bytes,1,rep,name=post_ids,json=postIds,proto3" json:"post_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchLikesReq) Reset() {
+	*x = FetchLikesReq{}
+	mi := &file_driftnode_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchLikesReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchLikesReq) ProtoMessage() {}
+
+func (x *FetchLikesReq) ProtoReflect() protoreflect.Message {
+	mi := &file_driftnode_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchLikesReq.ProtoReflect.Descriptor instead.
+func (*FetchLikesReq) Descriptor() ([]byte, []int) {
+	return file_driftnode_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *FetchLikesReq) GetPostIds() []string {
+	if x != nil {
+		return x.PostIds
+	}
+	return nil
+}
+
+// FetchLikesResp reports the like events received from connected zens.
+type FetchLikesResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	LikeEventIds  []string               `protobuf:"bytes,1,rep,name=like_event_ids,json=likeEventIds,proto3" json:"like_event_ids,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FetchLikesResp) Reset() {
+	*x = FetchLikesResp{}
+	mi := &file_driftnode_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FetchLikesResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FetchLikesResp) ProtoMessage() {}
+
+func (x *FetchLikesResp) ProtoReflect() protoreflect.Message {
+	mi := &file_driftnode_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FetchLikesResp.ProtoReflect.Descriptor instead.
+func (*FetchLikesResp) Descriptor() ([]byte, []int) {
+	return file_driftnode_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *FetchLikesResp) GetLikeEventIds() []string {
+	if x != nil {
+		return x.LikeEventIds
+	}
+	return nil
+}
+
 // ProfileReq sets the display name. Passphrase unlocks the signing key.
 type ProfileReq struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -580,7 +806,7 @@ type ProfileReq struct {
 
 func (x *ProfileReq) Reset() {
 	*x = ProfileReq{}
-	mi := &file_driftnode_proto_msgTypes[10]
+	mi := &file_driftnode_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -592,7 +818,7 @@ func (x *ProfileReq) String() string {
 func (*ProfileReq) ProtoMessage() {}
 
 func (x *ProfileReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[10]
+	mi := &file_driftnode_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -605,7 +831,7 @@ func (x *ProfileReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ProfileReq.ProtoReflect.Descriptor instead.
 func (*ProfileReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{10}
+	return file_driftnode_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *ProfileReq) GetName() string {
@@ -636,7 +862,7 @@ type DetailReq struct {
 
 func (x *DetailReq) Reset() {
 	*x = DetailReq{}
-	mi := &file_driftnode_proto_msgTypes[11]
+	mi := &file_driftnode_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -648,7 +874,7 @@ func (x *DetailReq) String() string {
 func (*DetailReq) ProtoMessage() {}
 
 func (x *DetailReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[11]
+	mi := &file_driftnode_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -661,7 +887,7 @@ func (x *DetailReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetailReq.ProtoReflect.Descriptor instead.
 func (*DetailReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{11}
+	return file_driftnode_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *DetailReq) GetBio() string {
@@ -714,7 +940,7 @@ type Zen struct {
 
 func (x *Zen) Reset() {
 	*x = Zen{}
-	mi := &file_driftnode_proto_msgTypes[12]
+	mi := &file_driftnode_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +952,7 @@ func (x *Zen) String() string {
 func (*Zen) ProtoMessage() {}
 
 func (x *Zen) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[12]
+	mi := &file_driftnode_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +965,7 @@ func (x *Zen) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Zen.ProtoReflect.Descriptor instead.
 func (*Zen) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{12}
+	return file_driftnode_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Zen) GetId() string {
@@ -794,7 +1020,7 @@ type ZensResp struct {
 
 func (x *ZensResp) Reset() {
 	*x = ZensResp{}
-	mi := &file_driftnode_proto_msgTypes[13]
+	mi := &file_driftnode_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -806,7 +1032,7 @@ func (x *ZensResp) String() string {
 func (*ZensResp) ProtoMessage() {}
 
 func (x *ZensResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[13]
+	mi := &file_driftnode_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -819,7 +1045,7 @@ func (x *ZensResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZensResp.ProtoReflect.Descriptor instead.
 func (*ZensResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{13}
+	return file_driftnode_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *ZensResp) GetZens() []*Zen {
@@ -840,7 +1066,7 @@ type Identity struct {
 
 func (x *Identity) Reset() {
 	*x = Identity{}
-	mi := &file_driftnode_proto_msgTypes[14]
+	mi := &file_driftnode_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -852,7 +1078,7 @@ func (x *Identity) String() string {
 func (*Identity) ProtoMessage() {}
 
 func (x *Identity) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[14]
+	mi := &file_driftnode_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -865,7 +1091,7 @@ func (x *Identity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Identity.ProtoReflect.Descriptor instead.
 func (*Identity) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{14}
+	return file_driftnode_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Identity) GetIdentity() string {
@@ -892,7 +1118,7 @@ type IdentitiesResp struct {
 
 func (x *IdentitiesResp) Reset() {
 	*x = IdentitiesResp{}
-	mi := &file_driftnode_proto_msgTypes[15]
+	mi := &file_driftnode_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -904,7 +1130,7 @@ func (x *IdentitiesResp) String() string {
 func (*IdentitiesResp) ProtoMessage() {}
 
 func (x *IdentitiesResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[15]
+	mi := &file_driftnode_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -917,7 +1143,7 @@ func (x *IdentitiesResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IdentitiesResp.ProtoReflect.Descriptor instead.
 func (*IdentitiesResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{15}
+	return file_driftnode_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *IdentitiesResp) GetIdentities() []*Identity {
@@ -938,7 +1164,7 @@ type FollowReq struct {
 
 func (x *FollowReq) Reset() {
 	*x = FollowReq{}
-	mi := &file_driftnode_proto_msgTypes[16]
+	mi := &file_driftnode_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -950,7 +1176,7 @@ func (x *FollowReq) String() string {
 func (*FollowReq) ProtoMessage() {}
 
 func (x *FollowReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[16]
+	mi := &file_driftnode_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -963,7 +1189,7 @@ func (x *FollowReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowReq.ProtoReflect.Descriptor instead.
 func (*FollowReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{16}
+	return file_driftnode_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *FollowReq) GetTarget() string {
@@ -990,7 +1216,7 @@ type FollowResp struct {
 
 func (x *FollowResp) Reset() {
 	*x = FollowResp{}
-	mi := &file_driftnode_proto_msgTypes[17]
+	mi := &file_driftnode_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1002,7 +1228,7 @@ func (x *FollowResp) String() string {
 func (*FollowResp) ProtoMessage() {}
 
 func (x *FollowResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[17]
+	mi := &file_driftnode_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1015,7 +1241,7 @@ func (x *FollowResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowResp.ProtoReflect.Descriptor instead.
 func (*FollowResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{17}
+	return file_driftnode_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *FollowResp) GetFollowed() string {
@@ -1036,7 +1262,7 @@ type UnfollowReq struct {
 
 func (x *UnfollowReq) Reset() {
 	*x = UnfollowReq{}
-	mi := &file_driftnode_proto_msgTypes[18]
+	mi := &file_driftnode_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1048,7 +1274,7 @@ func (x *UnfollowReq) String() string {
 func (*UnfollowReq) ProtoMessage() {}
 
 func (x *UnfollowReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[18]
+	mi := &file_driftnode_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1061,7 +1287,7 @@ func (x *UnfollowReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnfollowReq.ProtoReflect.Descriptor instead.
 func (*UnfollowReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{18}
+	return file_driftnode_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *UnfollowReq) GetTarget() string {
@@ -1088,7 +1314,7 @@ type UnfollowResp struct {
 
 func (x *UnfollowResp) Reset() {
 	*x = UnfollowResp{}
-	mi := &file_driftnode_proto_msgTypes[19]
+	mi := &file_driftnode_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1100,7 +1326,7 @@ func (x *UnfollowResp) String() string {
 func (*UnfollowResp) ProtoMessage() {}
 
 func (x *UnfollowResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[19]
+	mi := &file_driftnode_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1113,7 +1339,7 @@ func (x *UnfollowResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnfollowResp.ProtoReflect.Descriptor instead.
 func (*UnfollowResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{19}
+	return file_driftnode_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *UnfollowResp) GetUnfollowed() string {
@@ -1133,7 +1359,7 @@ type UnlockReq struct {
 
 func (x *UnlockReq) Reset() {
 	*x = UnlockReq{}
-	mi := &file_driftnode_proto_msgTypes[20]
+	mi := &file_driftnode_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1145,7 +1371,7 @@ func (x *UnlockReq) String() string {
 func (*UnlockReq) ProtoMessage() {}
 
 func (x *UnlockReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[20]
+	mi := &file_driftnode_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,7 +1384,7 @@ func (x *UnlockReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnlockReq.ProtoReflect.Descriptor instead.
 func (*UnlockReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{20}
+	return file_driftnode_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *UnlockReq) GetPassphrase() string {
@@ -1179,7 +1405,7 @@ type UnlockResp struct {
 
 func (x *UnlockResp) Reset() {
 	*x = UnlockResp{}
-	mi := &file_driftnode_proto_msgTypes[21]
+	mi := &file_driftnode_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1191,7 +1417,7 @@ func (x *UnlockResp) String() string {
 func (*UnlockResp) ProtoMessage() {}
 
 func (x *UnlockResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[21]
+	mi := &file_driftnode_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1204,7 +1430,7 @@ func (x *UnlockResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use UnlockResp.ProtoReflect.Descriptor instead.
 func (*UnlockResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{21}
+	return file_driftnode_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *UnlockResp) GetStatus() string {
@@ -1235,7 +1461,7 @@ type StatusResp struct {
 
 func (x *StatusResp) Reset() {
 	*x = StatusResp{}
-	mi := &file_driftnode_proto_msgTypes[22]
+	mi := &file_driftnode_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1247,7 +1473,7 @@ func (x *StatusResp) String() string {
 func (*StatusResp) ProtoMessage() {}
 
 func (x *StatusResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[22]
+	mi := &file_driftnode_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1260,7 +1486,7 @@ func (x *StatusResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusResp.ProtoReflect.Descriptor instead.
 func (*StatusResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{22}
+	return file_driftnode_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *StatusResp) GetRunning() bool {
@@ -1308,7 +1534,7 @@ type RotateKeyResp struct {
 
 func (x *RotateKeyResp) Reset() {
 	*x = RotateKeyResp{}
-	mi := &file_driftnode_proto_msgTypes[23]
+	mi := &file_driftnode_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1320,7 +1546,7 @@ func (x *RotateKeyResp) String() string {
 func (*RotateKeyResp) ProtoMessage() {}
 
 func (x *RotateKeyResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[23]
+	mi := &file_driftnode_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1333,7 +1559,7 @@ func (x *RotateKeyResp) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RotateKeyResp.ProtoReflect.Descriptor instead.
 func (*RotateKeyResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{23}
+	return file_driftnode_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *RotateKeyResp) GetToken() string {
@@ -1353,7 +1579,7 @@ type SubscribeReq struct {
 
 func (x *SubscribeReq) Reset() {
 	*x = SubscribeReq{}
-	mi := &file_driftnode_proto_msgTypes[24]
+	mi := &file_driftnode_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1365,7 +1591,7 @@ func (x *SubscribeReq) String() string {
 func (*SubscribeReq) ProtoMessage() {}
 
 func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[24]
+	mi := &file_driftnode_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1378,7 +1604,7 @@ func (x *SubscribeReq) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeReq.ProtoReflect.Descriptor instead.
 func (*SubscribeReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{24}
+	return file_driftnode_proto_rawDescGZIP(), []int{28}
 }
 
 // Event is one message on the subscribe stream. The first is always a
@@ -1401,7 +1627,7 @@ type Event struct {
 
 func (x *Event) Reset() {
 	*x = Event{}
-	mi := &file_driftnode_proto_msgTypes[25]
+	mi := &file_driftnode_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1413,7 +1639,7 @@ func (x *Event) String() string {
 func (*Event) ProtoMessage() {}
 
 func (x *Event) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[25]
+	mi := &file_driftnode_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1426,7 +1652,7 @@ func (x *Event) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Event.ProtoReflect.Descriptor instead.
 func (*Event) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{25}
+	return file_driftnode_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *Event) GetKind() isEvent_Kind {
@@ -1559,7 +1785,7 @@ type Snapshot struct {
 
 func (x *Snapshot) Reset() {
 	*x = Snapshot{}
-	mi := &file_driftnode_proto_msgTypes[26]
+	mi := &file_driftnode_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1571,7 +1797,7 @@ func (x *Snapshot) String() string {
 func (*Snapshot) ProtoMessage() {}
 
 func (x *Snapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[26]
+	mi := &file_driftnode_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1584,7 +1810,7 @@ func (x *Snapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Snapshot.ProtoReflect.Descriptor instead.
 func (*Snapshot) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{26}
+	return file_driftnode_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Snapshot) GetFeed() []*FeedItem {
@@ -1632,7 +1858,7 @@ type FeedDiff struct {
 
 func (x *FeedDiff) Reset() {
 	*x = FeedDiff{}
-	mi := &file_driftnode_proto_msgTypes[27]
+	mi := &file_driftnode_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1644,7 +1870,7 @@ func (x *FeedDiff) String() string {
 func (*FeedDiff) ProtoMessage() {}
 
 func (x *FeedDiff) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[27]
+	mi := &file_driftnode_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1657,7 +1883,7 @@ func (x *FeedDiff) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedDiff.ProtoReflect.Descriptor instead.
 func (*FeedDiff) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{27}
+	return file_driftnode_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *FeedDiff) GetAdd() []*FeedItem {
@@ -1677,7 +1903,7 @@ type ZenUpsert struct {
 
 func (x *ZenUpsert) Reset() {
 	*x = ZenUpsert{}
-	mi := &file_driftnode_proto_msgTypes[28]
+	mi := &file_driftnode_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1689,7 +1915,7 @@ func (x *ZenUpsert) String() string {
 func (*ZenUpsert) ProtoMessage() {}
 
 func (x *ZenUpsert) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[28]
+	mi := &file_driftnode_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1702,7 +1928,7 @@ func (x *ZenUpsert) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZenUpsert.ProtoReflect.Descriptor instead.
 func (*ZenUpsert) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{28}
+	return file_driftnode_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *ZenUpsert) GetZen() *Zen {
@@ -1722,7 +1948,7 @@ type ZenRemove struct {
 
 func (x *ZenRemove) Reset() {
 	*x = ZenRemove{}
-	mi := &file_driftnode_proto_msgTypes[29]
+	mi := &file_driftnode_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1734,7 +1960,7 @@ func (x *ZenRemove) String() string {
 func (*ZenRemove) ProtoMessage() {}
 
 func (x *ZenRemove) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[29]
+	mi := &file_driftnode_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1747,7 +1973,7 @@ func (x *ZenRemove) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZenRemove.ProtoReflect.Descriptor instead.
 func (*ZenRemove) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{29}
+	return file_driftnode_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *ZenRemove) GetId() string {
@@ -1768,7 +1994,7 @@ type FollowsDiff struct {
 
 func (x *FollowsDiff) Reset() {
 	*x = FollowsDiff{}
-	mi := &file_driftnode_proto_msgTypes[30]
+	mi := &file_driftnode_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1780,7 +2006,7 @@ func (x *FollowsDiff) String() string {
 func (*FollowsDiff) ProtoMessage() {}
 
 func (x *FollowsDiff) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[30]
+	mi := &file_driftnode_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1793,7 +2019,7 @@ func (x *FollowsDiff) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowsDiff.ProtoReflect.Descriptor instead.
 func (*FollowsDiff) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{30}
+	return file_driftnode_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *FollowsDiff) GetAdd() []*Identity {
@@ -1821,7 +2047,7 @@ type FollowersDiff struct {
 
 func (x *FollowersDiff) Reset() {
 	*x = FollowersDiff{}
-	mi := &file_driftnode_proto_msgTypes[31]
+	mi := &file_driftnode_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1833,7 +2059,7 @@ func (x *FollowersDiff) String() string {
 func (*FollowersDiff) ProtoMessage() {}
 
 func (x *FollowersDiff) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[31]
+	mi := &file_driftnode_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1846,7 +2072,7 @@ func (x *FollowersDiff) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowersDiff.ProtoReflect.Descriptor instead.
 func (*FollowersDiff) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{31}
+	return file_driftnode_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *FollowersDiff) GetAdd() []*Identity {
@@ -1876,7 +2102,7 @@ type StatusDiff struct {
 
 func (x *StatusDiff) Reset() {
 	*x = StatusDiff{}
-	mi := &file_driftnode_proto_msgTypes[32]
+	mi := &file_driftnode_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1888,7 +2114,7 @@ func (x *StatusDiff) String() string {
 func (*StatusDiff) ProtoMessage() {}
 
 func (x *StatusDiff) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[32]
+	mi := &file_driftnode_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1901,7 +2127,7 @@ func (x *StatusDiff) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatusDiff.ProtoReflect.Descriptor instead.
 func (*StatusDiff) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{32}
+	return file_driftnode_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *StatusDiff) GetRunning() bool {
@@ -1957,24 +2183,40 @@ const file_driftnode_proto_rawDesc = "" +
 	"\bidentity\x18\x01 \x01(\tR\bidentity\"(\n" +
 	"\n" +
 	"VerifyResp\x12\x1a\n" +
-	"\bidentity\x18\x01 \x01(\tR\bidentity\"\x1f\n" +
+	"\bidentity\x18\x01 \x01(\tR\bidentity\"3\n" +
 	"\aFeedReq\x12\x14\n" +
-	"\x05limit\x18\x01 \x01(\x05R\x05limit\"8\n" +
+	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12\x12\n" +
+	"\x04mine\x18\x02 \x01(\bR\x04mine\"8\n" +
 	"\bFeedResp\x12,\n" +
-	"\x05items\x18\x01 \x03(\v2\x16.driftnode.v1.FeedItemR\x05items\"x\n" +
+	"\x05items\x18\x01 \x03(\v2\x16.driftnode.v1.FeedItemR\x05items\"\xaf\x01\n" +
 	"\bFeedItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x16\n" +
 	"\x06author\x18\x03 \x01(\tR\x06author\x12\x12\n" +
 	"\x04name\x18\x04 \x01(\tR\x04name\x12\x12\n" +
-	"\x04text\x18\x05 \x01(\tR\x04text\"=\n" +
+	"\x04text\x18\x05 \x01(\tR\x04text\x12\x1d\n" +
+	"\n" +
+	"like_count\x18\x06 \x01(\x05R\tlikeCount\x12\x16\n" +
+	"\x06likers\x18\a \x03(\tR\x06likers\"Z\n" +
 	"\aPostReq\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x1e\n" +
 	"\n" +
 	"passphrase\x18\x02 \x01(\tR\n" +
-	"passphrase\"%\n" +
+	"passphrase\x12\x1b\n" +
+	"\tparent_id\x18\x03 \x01(\tR\bparentId\"%\n" +
 	"\bPostResp\x12\x19\n" +
-	"\bevent_id\x18\x01 \x01(\tR\aeventId\"@\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\"B\n" +
+	"\aLikeReq\x12\x17\n" +
+	"\apost_id\x18\x01 \x01(\tR\x06postId\x12\x1e\n" +
+	"\n" +
+	"passphrase\x18\x02 \x01(\tR\n" +
+	"passphrase\"%\n" +
+	"\bLikeResp\x12\x19\n" +
+	"\bevent_id\x18\x01 \x01(\tR\aeventId\"*\n" +
+	"\rFetchLikesReq\x12\x19\n" +
+	"\bpost_ids\x18\x01 \x03(\tR\apostIds\"6\n" +
+	"\x0eFetchLikesResp\x12$\n" +
+	"\x0elike_event_ids\x18\x01 \x03(\tR\flikeEventIds\"@\n" +
 	"\n" +
 	"ProfileReq\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1e\n" +
@@ -2076,13 +2318,16 @@ const file_driftnode_proto_rawDesc = "" +
 	"\arunning\x18\x01 \x01(\bR\arunning\x12\x12\n" +
 	"\x04zens\x18\x02 \x01(\x05R\x04zens\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\bR\ttransport\x12\x1a\n" +
-	"\bunlocked\x18\x04 \x01(\bR\bunlocked2\xf6\b\n" +
+	"\bunlocked\x18\x04 \x01(\bR\bunlocked2\xf6\t\n" +
 	"\tDriftnode\x127\n" +
 	"\x06Whoami\x12\x13.driftnode.v1.Empty\x1a\x18.driftnode.v1.WhoamiResp\x12<\n" +
 	"\aFollows\x12\x13.driftnode.v1.Empty\x1a\x1c.driftnode.v1.IdentitiesResp\x12>\n" +
 	"\tFollowers\x12\x13.driftnode.v1.Empty\x1a\x1c.driftnode.v1.IdentitiesResp\x125\n" +
 	"\x04Feed\x12\x15.driftnode.v1.FeedReq\x1a\x16.driftnode.v1.FeedResp\x125\n" +
-	"\x04Post\x12\x15.driftnode.v1.PostReq\x1a\x16.driftnode.v1.PostResp\x12<\n" +
+	"\x04Post\x12\x15.driftnode.v1.PostReq\x1a\x16.driftnode.v1.PostResp\x125\n" +
+	"\x04Like\x12\x15.driftnode.v1.LikeReq\x1a\x16.driftnode.v1.LikeResp\x12G\n" +
+	"\n" +
+	"FetchLikes\x12\x1b.driftnode.v1.FetchLikesReq\x1a\x1c.driftnode.v1.FetchLikesResp\x12<\n" +
 	"\aProfile\x12\x18.driftnode.v1.ProfileReq\x1a\x17.driftnode.v1.EmptyResp\x12:\n" +
 	"\x06Detail\x12\x17.driftnode.v1.DetailReq\x1a\x17.driftnode.v1.EmptyResp\x123\n" +
 	"\x04Zens\x12\x13.driftnode.v1.Empty\x1a\x16.driftnode.v1.ZensResp\x12=\n" +
@@ -2110,7 +2355,7 @@ func file_driftnode_proto_rawDescGZIP() []byte {
 	return file_driftnode_proto_rawDescData
 }
 
-var file_driftnode_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_driftnode_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_driftnode_proto_goTypes = []any{
 	(*Empty)(nil),          // 0: driftnode.v1.Empty
 	(*EmptyResp)(nil),      // 1: driftnode.v1.EmptyResp
@@ -2122,90 +2367,98 @@ var file_driftnode_proto_goTypes = []any{
 	(*FeedItem)(nil),       // 7: driftnode.v1.FeedItem
 	(*PostReq)(nil),        // 8: driftnode.v1.PostReq
 	(*PostResp)(nil),       // 9: driftnode.v1.PostResp
-	(*ProfileReq)(nil),     // 10: driftnode.v1.ProfileReq
-	(*DetailReq)(nil),      // 11: driftnode.v1.DetailReq
-	(*Zen)(nil),            // 12: driftnode.v1.Zen
-	(*ZensResp)(nil),       // 13: driftnode.v1.ZensResp
-	(*Identity)(nil),       // 14: driftnode.v1.Identity
-	(*IdentitiesResp)(nil), // 15: driftnode.v1.IdentitiesResp
-	(*FollowReq)(nil),      // 16: driftnode.v1.FollowReq
-	(*FollowResp)(nil),     // 17: driftnode.v1.FollowResp
-	(*UnfollowReq)(nil),    // 18: driftnode.v1.UnfollowReq
-	(*UnfollowResp)(nil),   // 19: driftnode.v1.UnfollowResp
-	(*UnlockReq)(nil),      // 20: driftnode.v1.UnlockReq
-	(*UnlockResp)(nil),     // 21: driftnode.v1.UnlockResp
-	(*StatusResp)(nil),     // 22: driftnode.v1.StatusResp
-	(*RotateKeyResp)(nil),  // 23: driftnode.v1.RotateKeyResp
-	(*SubscribeReq)(nil),   // 24: driftnode.v1.SubscribeReq
-	(*Event)(nil),          // 25: driftnode.v1.Event
-	(*Snapshot)(nil),       // 26: driftnode.v1.Snapshot
-	(*FeedDiff)(nil),       // 27: driftnode.v1.FeedDiff
-	(*ZenUpsert)(nil),      // 28: driftnode.v1.ZenUpsert
-	(*ZenRemove)(nil),      // 29: driftnode.v1.ZenRemove
-	(*FollowsDiff)(nil),    // 30: driftnode.v1.FollowsDiff
-	(*FollowersDiff)(nil),  // 31: driftnode.v1.FollowersDiff
-	(*StatusDiff)(nil),     // 32: driftnode.v1.StatusDiff
+	(*LikeReq)(nil),        // 10: driftnode.v1.LikeReq
+	(*LikeResp)(nil),       // 11: driftnode.v1.LikeResp
+	(*FetchLikesReq)(nil),  // 12: driftnode.v1.FetchLikesReq
+	(*FetchLikesResp)(nil), // 13: driftnode.v1.FetchLikesResp
+	(*ProfileReq)(nil),     // 14: driftnode.v1.ProfileReq
+	(*DetailReq)(nil),      // 15: driftnode.v1.DetailReq
+	(*Zen)(nil),            // 16: driftnode.v1.Zen
+	(*ZensResp)(nil),       // 17: driftnode.v1.ZensResp
+	(*Identity)(nil),       // 18: driftnode.v1.Identity
+	(*IdentitiesResp)(nil), // 19: driftnode.v1.IdentitiesResp
+	(*FollowReq)(nil),      // 20: driftnode.v1.FollowReq
+	(*FollowResp)(nil),     // 21: driftnode.v1.FollowResp
+	(*UnfollowReq)(nil),    // 22: driftnode.v1.UnfollowReq
+	(*UnfollowResp)(nil),   // 23: driftnode.v1.UnfollowResp
+	(*UnlockReq)(nil),      // 24: driftnode.v1.UnlockReq
+	(*UnlockResp)(nil),     // 25: driftnode.v1.UnlockResp
+	(*StatusResp)(nil),     // 26: driftnode.v1.StatusResp
+	(*RotateKeyResp)(nil),  // 27: driftnode.v1.RotateKeyResp
+	(*SubscribeReq)(nil),   // 28: driftnode.v1.SubscribeReq
+	(*Event)(nil),          // 29: driftnode.v1.Event
+	(*Snapshot)(nil),       // 30: driftnode.v1.Snapshot
+	(*FeedDiff)(nil),       // 31: driftnode.v1.FeedDiff
+	(*ZenUpsert)(nil),      // 32: driftnode.v1.ZenUpsert
+	(*ZenRemove)(nil),      // 33: driftnode.v1.ZenRemove
+	(*FollowsDiff)(nil),    // 34: driftnode.v1.FollowsDiff
+	(*FollowersDiff)(nil),  // 35: driftnode.v1.FollowersDiff
+	(*StatusDiff)(nil),     // 36: driftnode.v1.StatusDiff
 }
 var file_driftnode_proto_depIdxs = []int32{
 	7,  // 0: driftnode.v1.FeedResp.items:type_name -> driftnode.v1.FeedItem
-	12, // 1: driftnode.v1.ZensResp.zens:type_name -> driftnode.v1.Zen
-	14, // 2: driftnode.v1.IdentitiesResp.identities:type_name -> driftnode.v1.Identity
-	26, // 3: driftnode.v1.Event.snapshot:type_name -> driftnode.v1.Snapshot
-	27, // 4: driftnode.v1.Event.feed_diff:type_name -> driftnode.v1.FeedDiff
-	28, // 5: driftnode.v1.Event.zen_upsert:type_name -> driftnode.v1.ZenUpsert
-	29, // 6: driftnode.v1.Event.zen_remove:type_name -> driftnode.v1.ZenRemove
-	30, // 7: driftnode.v1.Event.follows_diff:type_name -> driftnode.v1.FollowsDiff
-	31, // 8: driftnode.v1.Event.followers_diff:type_name -> driftnode.v1.FollowersDiff
-	32, // 9: driftnode.v1.Event.status_diff:type_name -> driftnode.v1.StatusDiff
+	16, // 1: driftnode.v1.ZensResp.zens:type_name -> driftnode.v1.Zen
+	18, // 2: driftnode.v1.IdentitiesResp.identities:type_name -> driftnode.v1.Identity
+	30, // 3: driftnode.v1.Event.snapshot:type_name -> driftnode.v1.Snapshot
+	31, // 4: driftnode.v1.Event.feed_diff:type_name -> driftnode.v1.FeedDiff
+	32, // 5: driftnode.v1.Event.zen_upsert:type_name -> driftnode.v1.ZenUpsert
+	33, // 6: driftnode.v1.Event.zen_remove:type_name -> driftnode.v1.ZenRemove
+	34, // 7: driftnode.v1.Event.follows_diff:type_name -> driftnode.v1.FollowsDiff
+	35, // 8: driftnode.v1.Event.followers_diff:type_name -> driftnode.v1.FollowersDiff
+	36, // 9: driftnode.v1.Event.status_diff:type_name -> driftnode.v1.StatusDiff
 	7,  // 10: driftnode.v1.Snapshot.feed:type_name -> driftnode.v1.FeedItem
-	12, // 11: driftnode.v1.Snapshot.zens:type_name -> driftnode.v1.Zen
-	14, // 12: driftnode.v1.Snapshot.follows:type_name -> driftnode.v1.Identity
-	14, // 13: driftnode.v1.Snapshot.followers:type_name -> driftnode.v1.Identity
-	32, // 14: driftnode.v1.Snapshot.status:type_name -> driftnode.v1.StatusDiff
+	16, // 11: driftnode.v1.Snapshot.zens:type_name -> driftnode.v1.Zen
+	18, // 12: driftnode.v1.Snapshot.follows:type_name -> driftnode.v1.Identity
+	18, // 13: driftnode.v1.Snapshot.followers:type_name -> driftnode.v1.Identity
+	36, // 14: driftnode.v1.Snapshot.status:type_name -> driftnode.v1.StatusDiff
 	7,  // 15: driftnode.v1.FeedDiff.add:type_name -> driftnode.v1.FeedItem
-	12, // 16: driftnode.v1.ZenUpsert.zen:type_name -> driftnode.v1.Zen
-	14, // 17: driftnode.v1.FollowsDiff.add:type_name -> driftnode.v1.Identity
-	14, // 18: driftnode.v1.FollowersDiff.add:type_name -> driftnode.v1.Identity
+	16, // 16: driftnode.v1.ZenUpsert.zen:type_name -> driftnode.v1.Zen
+	18, // 17: driftnode.v1.FollowsDiff.add:type_name -> driftnode.v1.Identity
+	18, // 18: driftnode.v1.FollowersDiff.add:type_name -> driftnode.v1.Identity
 	0,  // 19: driftnode.v1.Driftnode.Whoami:input_type -> driftnode.v1.Empty
 	0,  // 20: driftnode.v1.Driftnode.Follows:input_type -> driftnode.v1.Empty
 	0,  // 21: driftnode.v1.Driftnode.Followers:input_type -> driftnode.v1.Empty
 	5,  // 22: driftnode.v1.Driftnode.Feed:input_type -> driftnode.v1.FeedReq
 	8,  // 23: driftnode.v1.Driftnode.Post:input_type -> driftnode.v1.PostReq
-	10, // 24: driftnode.v1.Driftnode.Profile:input_type -> driftnode.v1.ProfileReq
-	11, // 25: driftnode.v1.Driftnode.Detail:input_type -> driftnode.v1.DetailReq
-	0,  // 26: driftnode.v1.Driftnode.Zens:input_type -> driftnode.v1.Empty
-	3,  // 27: driftnode.v1.Driftnode.Verify:input_type -> driftnode.v1.IdentityReq
-	3,  // 28: driftnode.v1.Driftnode.Unverify:input_type -> driftnode.v1.IdentityReq
-	16, // 29: driftnode.v1.Driftnode.Follow:input_type -> driftnode.v1.FollowReq
-	18, // 30: driftnode.v1.Driftnode.Unfollow:input_type -> driftnode.v1.UnfollowReq
-	20, // 31: driftnode.v1.Driftnode.Unlock:input_type -> driftnode.v1.UnlockReq
-	0,  // 32: driftnode.v1.Driftnode.Lock:input_type -> driftnode.v1.Empty
-	0,  // 33: driftnode.v1.Driftnode.Sync:input_type -> driftnode.v1.Empty
-	0,  // 34: driftnode.v1.Driftnode.Stop:input_type -> driftnode.v1.Empty
-	0,  // 35: driftnode.v1.Driftnode.Status:input_type -> driftnode.v1.Empty
-	0,  // 36: driftnode.v1.Driftnode.RotateKey:input_type -> driftnode.v1.Empty
-	24, // 37: driftnode.v1.Driftnode.Subscribe:input_type -> driftnode.v1.SubscribeReq
-	2,  // 38: driftnode.v1.Driftnode.Whoami:output_type -> driftnode.v1.WhoamiResp
-	15, // 39: driftnode.v1.Driftnode.Follows:output_type -> driftnode.v1.IdentitiesResp
-	15, // 40: driftnode.v1.Driftnode.Followers:output_type -> driftnode.v1.IdentitiesResp
-	6,  // 41: driftnode.v1.Driftnode.Feed:output_type -> driftnode.v1.FeedResp
-	9,  // 42: driftnode.v1.Driftnode.Post:output_type -> driftnode.v1.PostResp
-	1,  // 43: driftnode.v1.Driftnode.Profile:output_type -> driftnode.v1.EmptyResp
-	1,  // 44: driftnode.v1.Driftnode.Detail:output_type -> driftnode.v1.EmptyResp
-	13, // 45: driftnode.v1.Driftnode.Zens:output_type -> driftnode.v1.ZensResp
-	4,  // 46: driftnode.v1.Driftnode.Verify:output_type -> driftnode.v1.VerifyResp
-	4,  // 47: driftnode.v1.Driftnode.Unverify:output_type -> driftnode.v1.VerifyResp
-	17, // 48: driftnode.v1.Driftnode.Follow:output_type -> driftnode.v1.FollowResp
-	19, // 49: driftnode.v1.Driftnode.Unfollow:output_type -> driftnode.v1.UnfollowResp
-	21, // 50: driftnode.v1.Driftnode.Unlock:output_type -> driftnode.v1.UnlockResp
-	1,  // 51: driftnode.v1.Driftnode.Lock:output_type -> driftnode.v1.EmptyResp
-	1,  // 52: driftnode.v1.Driftnode.Sync:output_type -> driftnode.v1.EmptyResp
-	1,  // 53: driftnode.v1.Driftnode.Stop:output_type -> driftnode.v1.EmptyResp
-	22, // 54: driftnode.v1.Driftnode.Status:output_type -> driftnode.v1.StatusResp
-	23, // 55: driftnode.v1.Driftnode.RotateKey:output_type -> driftnode.v1.RotateKeyResp
-	25, // 56: driftnode.v1.Driftnode.Subscribe:output_type -> driftnode.v1.Event
-	38, // [38:57] is the sub-list for method output_type
-	19, // [19:38] is the sub-list for method input_type
+	10, // 24: driftnode.v1.Driftnode.Like:input_type -> driftnode.v1.LikeReq
+	12, // 25: driftnode.v1.Driftnode.FetchLikes:input_type -> driftnode.v1.FetchLikesReq
+	14, // 26: driftnode.v1.Driftnode.Profile:input_type -> driftnode.v1.ProfileReq
+	15, // 27: driftnode.v1.Driftnode.Detail:input_type -> driftnode.v1.DetailReq
+	0,  // 28: driftnode.v1.Driftnode.Zens:input_type -> driftnode.v1.Empty
+	3,  // 29: driftnode.v1.Driftnode.Verify:input_type -> driftnode.v1.IdentityReq
+	3,  // 30: driftnode.v1.Driftnode.Unverify:input_type -> driftnode.v1.IdentityReq
+	20, // 31: driftnode.v1.Driftnode.Follow:input_type -> driftnode.v1.FollowReq
+	22, // 32: driftnode.v1.Driftnode.Unfollow:input_type -> driftnode.v1.UnfollowReq
+	24, // 33: driftnode.v1.Driftnode.Unlock:input_type -> driftnode.v1.UnlockReq
+	0,  // 34: driftnode.v1.Driftnode.Lock:input_type -> driftnode.v1.Empty
+	0,  // 35: driftnode.v1.Driftnode.Sync:input_type -> driftnode.v1.Empty
+	0,  // 36: driftnode.v1.Driftnode.Stop:input_type -> driftnode.v1.Empty
+	0,  // 37: driftnode.v1.Driftnode.Status:input_type -> driftnode.v1.Empty
+	0,  // 38: driftnode.v1.Driftnode.RotateKey:input_type -> driftnode.v1.Empty
+	28, // 39: driftnode.v1.Driftnode.Subscribe:input_type -> driftnode.v1.SubscribeReq
+	2,  // 40: driftnode.v1.Driftnode.Whoami:output_type -> driftnode.v1.WhoamiResp
+	19, // 41: driftnode.v1.Driftnode.Follows:output_type -> driftnode.v1.IdentitiesResp
+	19, // 42: driftnode.v1.Driftnode.Followers:output_type -> driftnode.v1.IdentitiesResp
+	6,  // 43: driftnode.v1.Driftnode.Feed:output_type -> driftnode.v1.FeedResp
+	9,  // 44: driftnode.v1.Driftnode.Post:output_type -> driftnode.v1.PostResp
+	11, // 45: driftnode.v1.Driftnode.Like:output_type -> driftnode.v1.LikeResp
+	13, // 46: driftnode.v1.Driftnode.FetchLikes:output_type -> driftnode.v1.FetchLikesResp
+	1,  // 47: driftnode.v1.Driftnode.Profile:output_type -> driftnode.v1.EmptyResp
+	1,  // 48: driftnode.v1.Driftnode.Detail:output_type -> driftnode.v1.EmptyResp
+	17, // 49: driftnode.v1.Driftnode.Zens:output_type -> driftnode.v1.ZensResp
+	4,  // 50: driftnode.v1.Driftnode.Verify:output_type -> driftnode.v1.VerifyResp
+	4,  // 51: driftnode.v1.Driftnode.Unverify:output_type -> driftnode.v1.VerifyResp
+	21, // 52: driftnode.v1.Driftnode.Follow:output_type -> driftnode.v1.FollowResp
+	23, // 53: driftnode.v1.Driftnode.Unfollow:output_type -> driftnode.v1.UnfollowResp
+	25, // 54: driftnode.v1.Driftnode.Unlock:output_type -> driftnode.v1.UnlockResp
+	1,  // 55: driftnode.v1.Driftnode.Lock:output_type -> driftnode.v1.EmptyResp
+	1,  // 56: driftnode.v1.Driftnode.Sync:output_type -> driftnode.v1.EmptyResp
+	1,  // 57: driftnode.v1.Driftnode.Stop:output_type -> driftnode.v1.EmptyResp
+	26, // 58: driftnode.v1.Driftnode.Status:output_type -> driftnode.v1.StatusResp
+	27, // 59: driftnode.v1.Driftnode.RotateKey:output_type -> driftnode.v1.RotateKeyResp
+	29, // 60: driftnode.v1.Driftnode.Subscribe:output_type -> driftnode.v1.Event
+	40, // [40:61] is the sub-list for method output_type
+	19, // [19:40] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
 	19, // [19:19] is the sub-list for extension extendee
 	0,  // [0:19] is the sub-list for field type_name
@@ -2216,7 +2469,7 @@ func file_driftnode_proto_init() {
 	if File_driftnode_proto != nil {
 		return
 	}
-	file_driftnode_proto_msgTypes[25].OneofWrappers = []any{
+	file_driftnode_proto_msgTypes[29].OneofWrappers = []any{
 		(*Event_Snapshot)(nil),
 		(*Event_FeedDiff)(nil),
 		(*Event_ZenUpsert)(nil),
@@ -2231,7 +2484,7 @@ func file_driftnode_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_driftnode_proto_rawDesc), len(file_driftnode_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

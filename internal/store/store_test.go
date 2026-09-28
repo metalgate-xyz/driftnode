@@ -749,3 +749,238 @@ func TestBackupIncludesTransportKey(t *testing.T) {
 		t.Fatal("ExportBackup should not populate TransportKey (CLI encrypts)")
 	}
 }
+
+func TestOutboundReplies(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	alice, _ := core.NewKeyPair()
+	bob, _ := core.NewKeyPair()
+
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Follow Alice and Bob so they are in the follow graph. The metric
+	// counts replies only toward currently-followed authors.
+	followAlice, _ := me.Sign(core.Event{
+		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 50, Sequence: 1,
+		Follow: &core.Follow{TargetPubkey: [32]byte(alice.Public)},
+	})
+	if err := s.AppendOwnEvent(core.ProfileLog, followAlice); err != nil {
+		t.Fatalf("append follow alice: %v", err)
+	}
+	followBob, _ := me.Sign(core.Event{
+		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 51, Sequence: 2,
+		Follow: &core.Follow{TargetPubkey: [32]byte(bob.Public)},
+	})
+	if err := s.AppendOwnEvent(core.ProfileLog, followBob); err != nil {
+		t.Fatalf("append follow bob: %v", err)
+	}
+
+	// Alice and Bob each post. Their posts go into the crawl bucket as
+	// synced PostLog events, keyed by author.
+	alicePost, _ := alice.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
+		Post: &core.Post{Text: "alice's post"},
+	})
+	aliceID, _ := alicePost.ID()
+	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+		t.Fatalf("put alice post: %v", err)
+	}
+	bobPost, _ := bob.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 200, Sequence: 1,
+		Post: &core.Post{Text: "bob's post"},
+	})
+	bobID, _ := bobPost.ID()
+	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+		t.Fatalf("put bob post: %v", err)
+	}
+
+	// I reply to Alice's post twice and Bob's post once.
+	for i, ts := range []int64{300, 400} {
+		reply, _ := me.Sign(core.Event{
+			Kind: core.KindPost, Log: core.PostLog, Timestamp: ts, Sequence: uint64(i + 1),
+			Post: &core.Post{Text: "my reply", ParentID: aliceID},
+		})
+		if err := s.AppendOwnEvent(core.PostLog, reply); err != nil {
+			t.Fatalf("append reply %d: %v", i, err)
+		}
+	}
+	replyToBob, _ := me.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 500, Sequence: 3,
+		Post: &core.Post{Text: "reply to bob", ParentID: bobID},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, replyToBob); err != nil {
+		t.Fatalf("append reply to bob: %v", err)
+	}
+
+	// A top-level post (no parent) should not count as a reply.
+	topPost, _ := me.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 600, Sequence: 4,
+		Post: &core.Post{Text: "top-level"},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, topPost); err != nil {
+		t.Fatalf("append top post: %v", err)
+	}
+
+	counts, err := s.OutboundReplies()
+	if err != nil {
+		t.Fatalf("OutboundReplies: %v", err)
+	}
+	if counts[alice.Identity()] != 2 {
+		t.Fatalf("alice: want 2 replies, got %d", counts[alice.Identity()])
+	}
+	if counts[bob.Identity()] != 1 {
+		t.Fatalf("bob: want 1 reply, got %d", counts[bob.Identity()])
+	}
+}
+
+func TestOutboundRepliesEmpty(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	counts, err := s.OutboundReplies()
+	if err != nil {
+		t.Fatalf("OutboundReplies: %v", err)
+	}
+	if len(counts) != 0 {
+		t.Fatalf("want empty, got %d", len(counts))
+	}
+}
+
+func TestOutboundLikes(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	alice, _ := core.NewKeyPair()
+	bob, _ := core.NewKeyPair()
+
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Follow Alice and Bob so they are in the follow graph.
+	for _, target := range [][]byte{alice.Public, bob.Public} {
+		follow, _ := me.Sign(core.Event{
+			Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 50, Sequence: 1,
+			Follow: &core.Follow{TargetPubkey: [32]byte(target)},
+		})
+		if err := s.AppendOwnEvent(core.ProfileLog, follow); err != nil {
+			t.Fatalf("append follow: %v", err)
+		}
+	}
+
+	// Alice and Bob each post. Their posts go into the crawl bucket.
+	alicePost, _ := alice.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
+		Post: &core.Post{Text: "alice's post"},
+	})
+	aliceID, _ := alicePost.ID()
+	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+		t.Fatalf("put alice post: %v", err)
+	}
+	bobPost, _ := bob.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 200, Sequence: 1,
+		Post: &core.Post{Text: "bob's post"},
+	})
+	bobID, _ := bobPost.ID()
+	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+		t.Fatalf("put bob post: %v", err)
+	}
+
+	// I like Alice's post twice and Bob's post once.
+	for i, ts := range []int64{300, 400} {
+		like, _ := me.Sign(core.Event{
+			Kind: core.KindLike, Log: core.PostLog, Timestamp: ts, Sequence: uint64(i + 1),
+			Like: &core.Like{TargetID: aliceID},
+		})
+		if err := s.AppendOwnEvent(core.PostLog, like); err != nil {
+			t.Fatalf("append like %d: %v", i, err)
+		}
+	}
+	likeBob, _ := me.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 500, Sequence: 3,
+		Like: &core.Like{TargetID: bobID},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, likeBob); err != nil {
+		t.Fatalf("append like bob: %v", err)
+	}
+
+	counts, err := s.OutboundLikes()
+	if err != nil {
+		t.Fatalf("OutboundLikes: %v", err)
+	}
+	if counts[alice.Identity()] != 2 {
+		t.Fatalf("alice: want 2 likes, got %d", counts[alice.Identity()])
+	}
+	if counts[bob.Identity()] != 1 {
+		t.Fatalf("bob: want 1 like, got %d", counts[bob.Identity()])
+	}
+}
+
+func TestLikesForPosts(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	alice, _ := core.NewKeyPair()
+
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Alice posts.
+	alicePost, _ := alice.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
+		Post: &core.Post{Text: "alice's post"},
+	})
+	aliceID, _ := alicePost.ID()
+	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+		t.Fatalf("put alice post: %v", err)
+	}
+
+	// I like Alice's post.
+	myLike, _ := me.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 200, Sequence: 1,
+		Like: &core.Like{TargetID: aliceID},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, myLike); err != nil {
+		t.Fatalf("append like: %v", err)
+	}
+
+	// Carol likes Alice's post (from the crawl bucket).
+	carol, _ := core.NewKeyPair()
+	carolLike, _ := carol.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 300, Sequence: 1,
+		Like: &core.Like{TargetID: aliceID},
+	})
+	if _, err := s.PutCrawledEvent(carolLike, 1); err != nil {
+		t.Fatalf("put carol like: %v", err)
+	}
+
+	// Query for likes targeting Alice's post.
+	results, err := s.LikesForPosts([]core.EventID{aliceID})
+	if err != nil {
+		t.Fatalf("LikesForPosts: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("want 2 likes, got %d", len(results))
+	}
+
+	// Query for a non-existent target returns nothing.
+	other := core.EventID{0xFF}
+	results, err = s.LikesForPosts([]core.EventID{other})
+	if err != nil {
+		t.Fatalf("LikesForPosts empty: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("want 0 likes for unknown target, got %d", len(results))
+	}
+}

@@ -128,14 +128,14 @@ func (l *Log) Tombstoned() map[EventID]bool {
 	return out
 }
 
-// NonTombstonedPosts returns Post and Reply events whose own ID is not
-// tombstoned within this log. Delete is a tombstone referencing a target ID;
-// the deleted event itself may live in the same log.
+// NonTombstonedPosts returns Post events whose own ID is not tombstoned
+// within this log. Delete is a tombstone referencing a target ID; the deleted
+// event itself may live in the same log.
 func (l *Log) NonTombstonedPosts() []SignedEvent {
 	tomb := l.Tombstoned()
 	var out []SignedEvent
 	for _, se := range l.SortedByTime() {
-		if se.Event.Kind != KindPost && se.Event.Kind != KindReply {
+		if se.Event.Kind != KindPost {
 			continue
 		}
 		id, err := se.ID()
@@ -150,7 +150,7 @@ func (l *Log) NonTombstonedPosts() []SignedEvent {
 	return out
 }
 
-// Posts returns the non-tombstoned Post and Reply events, reverse-chronological.
+// Posts returns the non-tombstoned Post events, reverse-chronological.
 func (l *Log) Posts() []SignedEvent {
 	posts := l.NonTombstonedPosts()
 	sort.SliceStable(posts, func(i, j int) bool {

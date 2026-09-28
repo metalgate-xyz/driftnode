@@ -53,9 +53,8 @@ func TestCanonicalEncodingOmitsEmptyFields(t *testing.T) {
 		t.Fatalf("diagnose: %v", err)
 	}
 	// A Post event must carry the post field ("P") but not the profile ("p"),
-	// follow ("f"), reply ("R"), like ("L"), delete ("D"), or detail ("x")
-	// fields.
-	for _, absent := range []string{`"p"`, `"f"`, `"R"`, `"L"`, `"D"`, `"x"`} {
+	// follow ("f"), like ("L"), delete ("D"), or detail ("x") fields.
+	for _, absent := range []string{`"p"`, `"f"`, `"L"`, `"D"`, `"x"`} {
 		if strings.Contains(diag, absent) {
 			t.Fatalf("diagnostic %q contains absent field %s", diag, absent)
 		}
@@ -167,5 +166,25 @@ func TestEventIDStringEncoding(t *testing.T) {
 	s := id.String()
 	if s == "" || strings.ContainsAny(s, "=") {
 		t.Fatalf("bad event id string %q", s)
+	}
+}
+
+func TestParseEventIDRoundTrip(t *testing.T) {
+	id := EventID{0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89}
+	parsed, err := ParseEventID(id.String())
+	if err != nil {
+		t.Fatalf("ParseEventID: %v", err)
+	}
+	if parsed != id {
+		t.Fatalf("round-trip mismatch: got %v want %v", parsed, id)
+	}
+}
+
+func TestParseEventIDRejectsBadInput(t *testing.T) {
+	if _, err := ParseEventID("not-valid-base32!!!"); err == nil {
+		t.Fatal("expected error for invalid base32")
+	}
+	if _, err := ParseEventID("abc"); err == nil {
+		t.Fatal("expected error for wrong-length input")
 	}
 }

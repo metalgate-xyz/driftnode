@@ -131,6 +131,110 @@ func TestPostAndFeed(t *testing.T) {
 	}
 }
 
+func TestPostReplyWithParent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	parentOut, err := runCLI(t, dbPath, []string{"post", "original", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("parent post: %v", err)
+	}
+	parentID := strings.TrimSpace(parentOut)
+	if parentID == "" {
+		t.Fatal("parent post produced no event id")
+	}
+	if _, err := runCLI(t, dbPath, []string{"post", "a reply", "--parent", parentID, "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("reply post: %v", err)
+	}
+	out, err := runCLI(t, dbPath, []string{"feed"})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if !strings.Contains(out, "(reply) a reply") {
+		t.Fatalf("feed should show reply prefix: %q", out)
+	}
+	if !strings.Contains(out, "original") {
+		t.Fatalf("feed should still show parent post: %q", out)
+	}
+}
+
+func TestPostReplyRejectsBadParent(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"post", "reply", "--parent", "not-valid!!!", "--passphrase", "testpass"}); err == nil {
+		t.Fatal("expected error for invalid parent id")
+	}
+}
+
+func TestLikeCommand(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	postOut, err := runCLI(t, dbPath, []string{"post", "likeable", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	postID := strings.TrimSpace(postOut)
+	if postID == "" {
+		t.Fatal("post produced no event id")
+	}
+	likeOut, err := runCLI(t, dbPath, []string{"like", postID, "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("like: %v", err)
+	}
+	if strings.TrimSpace(likeOut) == "" {
+		t.Fatal("like produced no event id")
+	}
+
+	// Bad post id should fail.
+	if _, err := runCLI(t, dbPath, []string{"like", "not-valid!!!", "--passphrase", "testpass"}); err == nil {
+		t.Fatal("expected error for invalid post id")
+	}
+}
+
+func TestFeedShowsLikeCountOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	postOut, err := runCLI(t, dbPath, []string{"post", "likeable", "--passphrase", "testpass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	postID := strings.TrimSpace(postOut)
+	if _, err := runCLI(t, dbPath, []string{"like", postID, "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("like: %v", err)
+	}
+	out, err := runCLI(t, dbPath, []string{"feed"})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if !strings.Contains(out, "1 like") {
+		t.Fatalf("feed should show like count: %q", out)
+	}
+}
+
+func TestFeedMine(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"post", "my post", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	out, err := runCLI(t, dbPath, []string{"feed", "--mine"})
+	if err != nil {
+		t.Fatalf("feed --mine: %v", err)
+	}
+	if !strings.Contains(out, "my post") {
+		t.Fatalf("feed --mine should show own post: %q", out)
+	}
+}
+
 func TestFeedShowsZenName(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "node.db")
 	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {

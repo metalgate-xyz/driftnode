@@ -13,6 +13,8 @@ service Driftnode {
   rpc Followers(Empty) returns (IdentitiesResp);
   rpc Feed(FeedReq) returns (FeedResp);
   rpc Post(PostReq) returns (PostResp);
+  rpc Like(LikeReq) returns (LikeResp);
+  rpc FetchLikes(FetchLikesReq) returns (FetchLikesResp);
   rpc Profile(ProfileReq) returns (EmptyResp);
   rpc Detail(DetailReq) returns (EmptyResp);
   rpc Zens(Empty) returns (ZensResp);
@@ -61,9 +63,11 @@ message VerifyResp {
   string identity = 1;
 }
 
-// FeedReq limits the returned timeline. limit <= 0 means all.
+// FeedReq limits the returned timeline. limit <= 0 means all. When mine is
+// set, the feed is filtered to the user's own posts only.
 message FeedReq {
   int32 limit = 1;
+  bool mine = 2;
 }
 
 // FeedResp is a slice of merged-timeline posts, newest-first.
@@ -78,18 +82,47 @@ message FeedItem {
   string author = 3;
   string name = 4;
   string text = 5;
+  int32 like_count = 6;
+  repeated string likers = 7;
 }
 
 // PostReq creates a post. Passphrase unlocks the signing key; omit when the
-// daemon is already unlocked.
+// daemon is already unlocked. ParentId, when non-empty, is the event ID of the
+// post being replied to; a reply is a post with a parent.
 message PostReq {
   string text = 1;
   string passphrase = 2;
+  string parent_id = 3;
 }
 
 // PostResp reports the created event id.
 message PostResp {
   string event_id = 1;
+}
+
+// LikeReq creates a Like event targeting the given post event id. Passphrase
+// unlocks the signing key; omit when the daemon is already unlocked.
+message LikeReq {
+  string post_id = 1;
+  string passphrase = 2;
+}
+
+// LikeResp reports the created event id.
+message LikeResp {
+  string event_id = 1;
+}
+
+// FetchLikesReq asks the daemon to query connected zens for Like events
+// targeting the given post ids. This is an on-demand, best-effort fetch:
+// the daemon dials each connected zen and requests any Like events it holds
+// whose target_id matches one of the requested ids. Expensive, user-triggered.
+message FetchLikesReq {
+  repeated string post_ids = 1;
+}
+
+// FetchLikesResp reports the like events received from connected zens.
+message FetchLikesResp {
+  repeated string like_event_ids = 1;
 }
 
 // ProfileReq sets the display name. Passphrase unlocks the signing key.

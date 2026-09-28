@@ -165,8 +165,8 @@ func TestEventIDConsistentAfterSerialization(t *testing.T) {
 func TestReplyEvent(t *testing.T) {
 	kp, _ := NewKeyPair()
 	se, err := kp.Sign(Event{
-		Kind: KindReply, Log: PostLog, Timestamp: Now64(), Sequence: 1,
-		Reply: &Reply{Post: Post{Text: "a reply"}, ParentID: EventID{0xAB}},
+		Kind: KindPost, Log: PostLog, Timestamp: Now64(), Sequence: 1,
+		Post: &Post{Text: "a reply", ParentID: EventID{0xAB}},
 	})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
