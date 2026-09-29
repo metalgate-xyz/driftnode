@@ -303,105 +303,6 @@ func (x *VerifyResp) GetIdentity() string {
 	return ""
 }
 
-// FeedReq limits the returned timeline. limit <= 0 means all. When mine is
-// set, the feed is filtered to the user's own posts only.
-type FeedReq struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Limit         int32                  `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
-	Mine          bool                   `protobuf:"varint,2,opt,name=mine,proto3" json:"mine,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *FeedReq) Reset() {
-	*x = FeedReq{}
-	mi := &file_driftnode_proto_msgTypes[5]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *FeedReq) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*FeedReq) ProtoMessage() {}
-
-func (x *FeedReq) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[5]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use FeedReq.ProtoReflect.Descriptor instead.
-func (*FeedReq) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{5}
-}
-
-func (x *FeedReq) GetLimit() int32 {
-	if x != nil {
-		return x.Limit
-	}
-	return 0
-}
-
-func (x *FeedReq) GetMine() bool {
-	if x != nil {
-		return x.Mine
-	}
-	return false
-}
-
-// FeedResp is a slice of merged-timeline posts, newest-first.
-type FeedResp struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Items         []*FeedItem            `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
-}
-
-func (x *FeedResp) Reset() {
-	*x = FeedResp{}
-	mi := &file_driftnode_proto_msgTypes[6]
-	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-	ms.StoreMessageInfo(mi)
-}
-
-func (x *FeedResp) String() string {
-	return protoimpl.X.MessageStringOf(x)
-}
-
-func (*FeedResp) ProtoMessage() {}
-
-func (x *FeedResp) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[6]
-	if x != nil {
-		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
-		if ms.LoadMessageInfo() == nil {
-			ms.StoreMessageInfo(mi)
-		}
-		return ms
-	}
-	return mi.MessageOf(x)
-}
-
-// Deprecated: Use FeedResp.ProtoReflect.Descriptor instead.
-func (*FeedResp) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{6}
-}
-
-func (x *FeedResp) GetItems() []*FeedItem {
-	if x != nil {
-		return x.Items
-	}
-	return nil
-}
-
 // FeedItem is one post in the merged timeline.
 type FeedItem struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -418,7 +319,7 @@ type FeedItem struct {
 
 func (x *FeedItem) Reset() {
 	*x = FeedItem{}
-	mi := &file_driftnode_proto_msgTypes[7]
+	mi := &file_driftnode_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -430,7 +331,7 @@ func (x *FeedItem) String() string {
 func (*FeedItem) ProtoMessage() {}
 
 func (x *FeedItem) ProtoReflect() protoreflect.Message {
-	mi := &file_driftnode_proto_msgTypes[7]
+	mi := &file_driftnode_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -443,7 +344,7 @@ func (x *FeedItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FeedItem.ProtoReflect.Descriptor instead.
 func (*FeedItem) Descriptor() ([]byte, []int) {
-	return file_driftnode_proto_rawDescGZIP(), []int{7}
+	return file_driftnode_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *FeedItem) GetId() string {
@@ -493,6 +394,125 @@ func (x *FeedItem) GetLikers() []string {
 		return x.Likers
 	}
 	return nil
+}
+
+// FeedPageReq returns a page of the merged timeline, newest-first. page is
+// the 0-indexed page number (page 0 is the snapshot the subscribe stream
+// sends). The page size is fixed server-side. mine filters to the user's own
+// posts. all_likes triggers an on-demand like fetch from connected zens for
+// the user's own posts in the returned page.
+type FeedPageReq struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Page          int32                  `protobuf:"varint,1,opt,name=page,proto3" json:"page,omitempty"`
+	Mine          bool                   `protobuf:"varint,2,opt,name=mine,proto3" json:"mine,omitempty"`
+	AllLikes      bool                   `protobuf:"varint,3,opt,name=all_likes,json=allLikes,proto3" json:"all_likes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FeedPageReq) Reset() {
+	*x = FeedPageReq{}
+	mi := &file_driftnode_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FeedPageReq) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FeedPageReq) ProtoMessage() {}
+
+func (x *FeedPageReq) ProtoReflect() protoreflect.Message {
+	mi := &file_driftnode_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FeedPageReq.ProtoReflect.Descriptor instead.
+func (*FeedPageReq) Descriptor() ([]byte, []int) {
+	return file_driftnode_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *FeedPageReq) GetPage() int32 {
+	if x != nil {
+		return x.Page
+	}
+	return 0
+}
+
+func (x *FeedPageReq) GetMine() bool {
+	if x != nil {
+		return x.Mine
+	}
+	return false
+}
+
+func (x *FeedPageReq) GetAllLikes() bool {
+	if x != nil {
+		return x.AllLikes
+	}
+	return false
+}
+
+// FeedPageResp is one page of merged-timeline posts, newest-first, with a
+// has_more flag indicating older posts remain.
+type FeedPageResp struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Items         []*FeedItem            `protobuf:"bytes,1,rep,name=items,proto3" json:"items,omitempty"`
+	HasMore       bool                   `protobuf:"varint,2,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FeedPageResp) Reset() {
+	*x = FeedPageResp{}
+	mi := &file_driftnode_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FeedPageResp) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FeedPageResp) ProtoMessage() {}
+
+func (x *FeedPageResp) ProtoReflect() protoreflect.Message {
+	mi := &file_driftnode_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FeedPageResp.ProtoReflect.Descriptor instead.
+func (*FeedPageResp) Descriptor() ([]byte, []int) {
+	return file_driftnode_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *FeedPageResp) GetItems() []*FeedItem {
+	if x != nil {
+		return x.Items
+	}
+	return nil
+}
+
+func (x *FeedPageResp) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
 }
 
 // PostReq creates a post. Passphrase unlocks the signing key; omit when the
@@ -2183,12 +2203,7 @@ const file_driftnode_proto_rawDesc = "" +
 	"\bidentity\x18\x01 \x01(\tR\bidentity\"(\n" +
 	"\n" +
 	"VerifyResp\x12\x1a\n" +
-	"\bidentity\x18\x01 \x01(\tR\bidentity\"3\n" +
-	"\aFeedReq\x12\x14\n" +
-	"\x05limit\x18\x01 \x01(\x05R\x05limit\x12\x12\n" +
-	"\x04mine\x18\x02 \x01(\bR\x04mine\"8\n" +
-	"\bFeedResp\x12,\n" +
-	"\x05items\x18\x01 \x03(\v2\x16.driftnode.v1.FeedItemR\x05items\"\xaf\x01\n" +
+	"\bidentity\x18\x01 \x01(\tR\bidentity\"\xaf\x01\n" +
 	"\bFeedItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\x03R\ttimestamp\x12\x16\n" +
@@ -2197,7 +2212,14 @@ const file_driftnode_proto_rawDesc = "" +
 	"\x04text\x18\x05 \x01(\tR\x04text\x12\x1d\n" +
 	"\n" +
 	"like_count\x18\x06 \x01(\x05R\tlikeCount\x12\x16\n" +
-	"\x06likers\x18\a \x03(\tR\x06likers\"Z\n" +
+	"\x06likers\x18\a \x03(\tR\x06likers\"R\n" +
+	"\vFeedPageReq\x12\x12\n" +
+	"\x04page\x18\x01 \x01(\x05R\x04page\x12\x12\n" +
+	"\x04mine\x18\x02 \x01(\bR\x04mine\x12\x1b\n" +
+	"\tall_likes\x18\x03 \x01(\bR\ballLikes\"W\n" +
+	"\fFeedPageResp\x12,\n" +
+	"\x05items\x18\x01 \x03(\v2\x16.driftnode.v1.FeedItemR\x05items\x12\x19\n" +
+	"\bhas_more\x18\x02 \x01(\bR\ahasMore\"Z\n" +
 	"\aPostReq\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12\x1e\n" +
 	"\n" +
@@ -2318,12 +2340,12 @@ const file_driftnode_proto_rawDesc = "" +
 	"\arunning\x18\x01 \x01(\bR\arunning\x12\x12\n" +
 	"\x04zens\x18\x02 \x01(\x05R\x04zens\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\bR\ttransport\x12\x1a\n" +
-	"\bunlocked\x18\x04 \x01(\bR\bunlocked2\xf6\t\n" +
+	"\bunlocked\x18\x04 \x01(\bR\bunlocked2\x82\n" +
+	"\n" +
 	"\tDriftnode\x127\n" +
 	"\x06Whoami\x12\x13.driftnode.v1.Empty\x1a\x18.driftnode.v1.WhoamiResp\x12<\n" +
 	"\aFollows\x12\x13.driftnode.v1.Empty\x1a\x1c.driftnode.v1.IdentitiesResp\x12>\n" +
 	"\tFollowers\x12\x13.driftnode.v1.Empty\x1a\x1c.driftnode.v1.IdentitiesResp\x125\n" +
-	"\x04Feed\x12\x15.driftnode.v1.FeedReq\x1a\x16.driftnode.v1.FeedResp\x125\n" +
 	"\x04Post\x12\x15.driftnode.v1.PostReq\x1a\x16.driftnode.v1.PostResp\x125\n" +
 	"\x04Like\x12\x15.driftnode.v1.LikeReq\x1a\x16.driftnode.v1.LikeResp\x12G\n" +
 	"\n" +
@@ -2341,7 +2363,8 @@ const file_driftnode_proto_rawDesc = "" +
 	"\x04Stop\x12\x13.driftnode.v1.Empty\x1a\x17.driftnode.v1.EmptyResp\x127\n" +
 	"\x06Status\x12\x13.driftnode.v1.Empty\x1a\x18.driftnode.v1.StatusResp\x12=\n" +
 	"\tRotateKey\x12\x13.driftnode.v1.Empty\x1a\x1b.driftnode.v1.RotateKeyResp\x12>\n" +
-	"\tSubscribe\x12\x1a.driftnode.v1.SubscribeReq\x1a\x13.driftnode.v1.Event0\x01B2Z0driftnode/internal/proto/driftnodepb;driftnodepbb\x06proto3"
+	"\tSubscribe\x12\x1a.driftnode.v1.SubscribeReq\x1a\x13.driftnode.v1.Event0\x01\x12A\n" +
+	"\bFeedPage\x12\x19.driftnode.v1.FeedPageReq\x1a\x1a.driftnode.v1.FeedPageRespB2Z0driftnode/internal/proto/driftnodepb;driftnodepbb\x06proto3"
 
 var (
 	file_driftnode_proto_rawDescOnce sync.Once
@@ -2362,9 +2385,9 @@ var file_driftnode_proto_goTypes = []any{
 	(*WhoamiResp)(nil),     // 2: driftnode.v1.WhoamiResp
 	(*IdentityReq)(nil),    // 3: driftnode.v1.IdentityReq
 	(*VerifyResp)(nil),     // 4: driftnode.v1.VerifyResp
-	(*FeedReq)(nil),        // 5: driftnode.v1.FeedReq
-	(*FeedResp)(nil),       // 6: driftnode.v1.FeedResp
-	(*FeedItem)(nil),       // 7: driftnode.v1.FeedItem
+	(*FeedItem)(nil),       // 5: driftnode.v1.FeedItem
+	(*FeedPageReq)(nil),    // 6: driftnode.v1.FeedPageReq
+	(*FeedPageResp)(nil),   // 7: driftnode.v1.FeedPageResp
 	(*PostReq)(nil),        // 8: driftnode.v1.PostReq
 	(*PostResp)(nil),       // 9: driftnode.v1.PostResp
 	(*LikeReq)(nil),        // 10: driftnode.v1.LikeReq
@@ -2396,7 +2419,7 @@ var file_driftnode_proto_goTypes = []any{
 	(*StatusDiff)(nil),     // 36: driftnode.v1.StatusDiff
 }
 var file_driftnode_proto_depIdxs = []int32{
-	7,  // 0: driftnode.v1.FeedResp.items:type_name -> driftnode.v1.FeedItem
+	5,  // 0: driftnode.v1.FeedPageResp.items:type_name -> driftnode.v1.FeedItem
 	16, // 1: driftnode.v1.ZensResp.zens:type_name -> driftnode.v1.Zen
 	18, // 2: driftnode.v1.IdentitiesResp.identities:type_name -> driftnode.v1.Identity
 	30, // 3: driftnode.v1.Event.snapshot:type_name -> driftnode.v1.Snapshot
@@ -2406,57 +2429,57 @@ var file_driftnode_proto_depIdxs = []int32{
 	34, // 7: driftnode.v1.Event.follows_diff:type_name -> driftnode.v1.FollowsDiff
 	35, // 8: driftnode.v1.Event.followers_diff:type_name -> driftnode.v1.FollowersDiff
 	36, // 9: driftnode.v1.Event.status_diff:type_name -> driftnode.v1.StatusDiff
-	7,  // 10: driftnode.v1.Snapshot.feed:type_name -> driftnode.v1.FeedItem
+	5,  // 10: driftnode.v1.Snapshot.feed:type_name -> driftnode.v1.FeedItem
 	16, // 11: driftnode.v1.Snapshot.zens:type_name -> driftnode.v1.Zen
 	18, // 12: driftnode.v1.Snapshot.follows:type_name -> driftnode.v1.Identity
 	18, // 13: driftnode.v1.Snapshot.followers:type_name -> driftnode.v1.Identity
 	36, // 14: driftnode.v1.Snapshot.status:type_name -> driftnode.v1.StatusDiff
-	7,  // 15: driftnode.v1.FeedDiff.add:type_name -> driftnode.v1.FeedItem
+	5,  // 15: driftnode.v1.FeedDiff.add:type_name -> driftnode.v1.FeedItem
 	16, // 16: driftnode.v1.ZenUpsert.zen:type_name -> driftnode.v1.Zen
 	18, // 17: driftnode.v1.FollowsDiff.add:type_name -> driftnode.v1.Identity
 	18, // 18: driftnode.v1.FollowersDiff.add:type_name -> driftnode.v1.Identity
 	0,  // 19: driftnode.v1.Driftnode.Whoami:input_type -> driftnode.v1.Empty
 	0,  // 20: driftnode.v1.Driftnode.Follows:input_type -> driftnode.v1.Empty
 	0,  // 21: driftnode.v1.Driftnode.Followers:input_type -> driftnode.v1.Empty
-	5,  // 22: driftnode.v1.Driftnode.Feed:input_type -> driftnode.v1.FeedReq
-	8,  // 23: driftnode.v1.Driftnode.Post:input_type -> driftnode.v1.PostReq
-	10, // 24: driftnode.v1.Driftnode.Like:input_type -> driftnode.v1.LikeReq
-	12, // 25: driftnode.v1.Driftnode.FetchLikes:input_type -> driftnode.v1.FetchLikesReq
-	14, // 26: driftnode.v1.Driftnode.Profile:input_type -> driftnode.v1.ProfileReq
-	15, // 27: driftnode.v1.Driftnode.Detail:input_type -> driftnode.v1.DetailReq
-	0,  // 28: driftnode.v1.Driftnode.Zens:input_type -> driftnode.v1.Empty
-	3,  // 29: driftnode.v1.Driftnode.Verify:input_type -> driftnode.v1.IdentityReq
-	3,  // 30: driftnode.v1.Driftnode.Unverify:input_type -> driftnode.v1.IdentityReq
-	20, // 31: driftnode.v1.Driftnode.Follow:input_type -> driftnode.v1.FollowReq
-	22, // 32: driftnode.v1.Driftnode.Unfollow:input_type -> driftnode.v1.UnfollowReq
-	24, // 33: driftnode.v1.Driftnode.Unlock:input_type -> driftnode.v1.UnlockReq
-	0,  // 34: driftnode.v1.Driftnode.Lock:input_type -> driftnode.v1.Empty
-	0,  // 35: driftnode.v1.Driftnode.Sync:input_type -> driftnode.v1.Empty
-	0,  // 36: driftnode.v1.Driftnode.Stop:input_type -> driftnode.v1.Empty
-	0,  // 37: driftnode.v1.Driftnode.Status:input_type -> driftnode.v1.Empty
-	0,  // 38: driftnode.v1.Driftnode.RotateKey:input_type -> driftnode.v1.Empty
-	28, // 39: driftnode.v1.Driftnode.Subscribe:input_type -> driftnode.v1.SubscribeReq
+	8,  // 22: driftnode.v1.Driftnode.Post:input_type -> driftnode.v1.PostReq
+	10, // 23: driftnode.v1.Driftnode.Like:input_type -> driftnode.v1.LikeReq
+	12, // 24: driftnode.v1.Driftnode.FetchLikes:input_type -> driftnode.v1.FetchLikesReq
+	14, // 25: driftnode.v1.Driftnode.Profile:input_type -> driftnode.v1.ProfileReq
+	15, // 26: driftnode.v1.Driftnode.Detail:input_type -> driftnode.v1.DetailReq
+	0,  // 27: driftnode.v1.Driftnode.Zens:input_type -> driftnode.v1.Empty
+	3,  // 28: driftnode.v1.Driftnode.Verify:input_type -> driftnode.v1.IdentityReq
+	3,  // 29: driftnode.v1.Driftnode.Unverify:input_type -> driftnode.v1.IdentityReq
+	20, // 30: driftnode.v1.Driftnode.Follow:input_type -> driftnode.v1.FollowReq
+	22, // 31: driftnode.v1.Driftnode.Unfollow:input_type -> driftnode.v1.UnfollowReq
+	24, // 32: driftnode.v1.Driftnode.Unlock:input_type -> driftnode.v1.UnlockReq
+	0,  // 33: driftnode.v1.Driftnode.Lock:input_type -> driftnode.v1.Empty
+	0,  // 34: driftnode.v1.Driftnode.Sync:input_type -> driftnode.v1.Empty
+	0,  // 35: driftnode.v1.Driftnode.Stop:input_type -> driftnode.v1.Empty
+	0,  // 36: driftnode.v1.Driftnode.Status:input_type -> driftnode.v1.Empty
+	0,  // 37: driftnode.v1.Driftnode.RotateKey:input_type -> driftnode.v1.Empty
+	28, // 38: driftnode.v1.Driftnode.Subscribe:input_type -> driftnode.v1.SubscribeReq
+	6,  // 39: driftnode.v1.Driftnode.FeedPage:input_type -> driftnode.v1.FeedPageReq
 	2,  // 40: driftnode.v1.Driftnode.Whoami:output_type -> driftnode.v1.WhoamiResp
 	19, // 41: driftnode.v1.Driftnode.Follows:output_type -> driftnode.v1.IdentitiesResp
 	19, // 42: driftnode.v1.Driftnode.Followers:output_type -> driftnode.v1.IdentitiesResp
-	6,  // 43: driftnode.v1.Driftnode.Feed:output_type -> driftnode.v1.FeedResp
-	9,  // 44: driftnode.v1.Driftnode.Post:output_type -> driftnode.v1.PostResp
-	11, // 45: driftnode.v1.Driftnode.Like:output_type -> driftnode.v1.LikeResp
-	13, // 46: driftnode.v1.Driftnode.FetchLikes:output_type -> driftnode.v1.FetchLikesResp
-	1,  // 47: driftnode.v1.Driftnode.Profile:output_type -> driftnode.v1.EmptyResp
-	1,  // 48: driftnode.v1.Driftnode.Detail:output_type -> driftnode.v1.EmptyResp
-	17, // 49: driftnode.v1.Driftnode.Zens:output_type -> driftnode.v1.ZensResp
-	4,  // 50: driftnode.v1.Driftnode.Verify:output_type -> driftnode.v1.VerifyResp
-	4,  // 51: driftnode.v1.Driftnode.Unverify:output_type -> driftnode.v1.VerifyResp
-	21, // 52: driftnode.v1.Driftnode.Follow:output_type -> driftnode.v1.FollowResp
-	23, // 53: driftnode.v1.Driftnode.Unfollow:output_type -> driftnode.v1.UnfollowResp
-	25, // 54: driftnode.v1.Driftnode.Unlock:output_type -> driftnode.v1.UnlockResp
-	1,  // 55: driftnode.v1.Driftnode.Lock:output_type -> driftnode.v1.EmptyResp
-	1,  // 56: driftnode.v1.Driftnode.Sync:output_type -> driftnode.v1.EmptyResp
-	1,  // 57: driftnode.v1.Driftnode.Stop:output_type -> driftnode.v1.EmptyResp
-	26, // 58: driftnode.v1.Driftnode.Status:output_type -> driftnode.v1.StatusResp
-	27, // 59: driftnode.v1.Driftnode.RotateKey:output_type -> driftnode.v1.RotateKeyResp
-	29, // 60: driftnode.v1.Driftnode.Subscribe:output_type -> driftnode.v1.Event
+	9,  // 43: driftnode.v1.Driftnode.Post:output_type -> driftnode.v1.PostResp
+	11, // 44: driftnode.v1.Driftnode.Like:output_type -> driftnode.v1.LikeResp
+	13, // 45: driftnode.v1.Driftnode.FetchLikes:output_type -> driftnode.v1.FetchLikesResp
+	1,  // 46: driftnode.v1.Driftnode.Profile:output_type -> driftnode.v1.EmptyResp
+	1,  // 47: driftnode.v1.Driftnode.Detail:output_type -> driftnode.v1.EmptyResp
+	17, // 48: driftnode.v1.Driftnode.Zens:output_type -> driftnode.v1.ZensResp
+	4,  // 49: driftnode.v1.Driftnode.Verify:output_type -> driftnode.v1.VerifyResp
+	4,  // 50: driftnode.v1.Driftnode.Unverify:output_type -> driftnode.v1.VerifyResp
+	21, // 51: driftnode.v1.Driftnode.Follow:output_type -> driftnode.v1.FollowResp
+	23, // 52: driftnode.v1.Driftnode.Unfollow:output_type -> driftnode.v1.UnfollowResp
+	25, // 53: driftnode.v1.Driftnode.Unlock:output_type -> driftnode.v1.UnlockResp
+	1,  // 54: driftnode.v1.Driftnode.Lock:output_type -> driftnode.v1.EmptyResp
+	1,  // 55: driftnode.v1.Driftnode.Sync:output_type -> driftnode.v1.EmptyResp
+	1,  // 56: driftnode.v1.Driftnode.Stop:output_type -> driftnode.v1.EmptyResp
+	26, // 57: driftnode.v1.Driftnode.Status:output_type -> driftnode.v1.StatusResp
+	27, // 58: driftnode.v1.Driftnode.RotateKey:output_type -> driftnode.v1.RotateKeyResp
+	29, // 59: driftnode.v1.Driftnode.Subscribe:output_type -> driftnode.v1.Event
+	7,  // 60: driftnode.v1.Driftnode.FeedPage:output_type -> driftnode.v1.FeedPageResp
 	40, // [40:61] is the sub-list for method output_type
 	19, // [19:40] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name

@@ -109,13 +109,12 @@ func (s *grpcServer) Followers(ctx context.Context, _ *driftnodepb.Empty) (*drif
 	return &driftnodepb.IdentitiesResp{Identities: toIdentities(raw)}, nil
 }
 
-func (s *grpcServer) Feed(ctx context.Context, req *driftnodepb.FeedReq) (*driftnodepb.FeedResp, error) {
-	r := s.d.handleFeed(int(req.Limit), req.Mine)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+func (s *grpcServer) FeedPage(_ context.Context, req *driftnodepb.FeedPageReq) (*driftnodepb.FeedPageResp, error) {
+	items, hasMore, err := s.d.handleFeedPage(int(req.Page), req.Mine, req.AllLikes)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	items, _ := r.Result.([]feedItem)
-	return &driftnodepb.FeedResp{Items: toFeedItems(items)}, nil
+	return &driftnodepb.FeedPageResp{Items: feedItemsToProto(items), HasMore: hasMore}, nil
 }
 
 func (s *grpcServer) Like(ctx context.Context, req *driftnodepb.LikeReq) (*driftnodepb.LikeResp, error) {
@@ -388,23 +387,6 @@ func (s *grpcServer) Subscribe(_ *driftnodepb.SubscribeReq, srv driftnodepb.Drif
 			return srv.Context().Err()
 		}
 	}
-}
-
-// toFeedItems converts the daemon's internal feedItem slice to proto.
-func toFeedItems(items []feedItem) []*driftnodepb.FeedItem {
-	out := make([]*driftnodepb.FeedItem, 0, len(items))
-	for _, it := range items {
-		out = append(out, &driftnodepb.FeedItem{
-			Id:        it.ID,
-			Timestamp: it.Timestamp,
-			Author:    it.Author,
-			Name:      it.Name,
-			Text:      it.Text,
-			LikeCount: int32(it.LikeCount),
-			Likers:    it.Likers,
-		})
-	}
-	return out
 }
 
 // toIdentities converts the daemon's map[string]string identity rows to proto.

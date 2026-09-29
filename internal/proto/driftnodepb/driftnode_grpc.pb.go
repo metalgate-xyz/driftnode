@@ -22,7 +22,6 @@ const (
 	Driftnode_Whoami_FullMethodName     = "/driftnode.v1.Driftnode/Whoami"
 	Driftnode_Follows_FullMethodName    = "/driftnode.v1.Driftnode/Follows"
 	Driftnode_Followers_FullMethodName  = "/driftnode.v1.Driftnode/Followers"
-	Driftnode_Feed_FullMethodName       = "/driftnode.v1.Driftnode/Feed"
 	Driftnode_Post_FullMethodName       = "/driftnode.v1.Driftnode/Post"
 	Driftnode_Like_FullMethodName       = "/driftnode.v1.Driftnode/Like"
 	Driftnode_FetchLikes_FullMethodName = "/driftnode.v1.Driftnode/FetchLikes"
@@ -40,6 +39,7 @@ const (
 	Driftnode_Status_FullMethodName     = "/driftnode.v1.Driftnode/Status"
 	Driftnode_RotateKey_FullMethodName  = "/driftnode.v1.Driftnode/RotateKey"
 	Driftnode_Subscribe_FullMethodName  = "/driftnode.v1.Driftnode/Subscribe"
+	Driftnode_FeedPage_FullMethodName   = "/driftnode.v1.Driftnode/FeedPage"
 )
 
 // DriftnodeClient is the client API for Driftnode service.
@@ -53,7 +53,6 @@ type DriftnodeClient interface {
 	Whoami(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*WhoamiResp, error)
 	Follows(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*IdentitiesResp, error)
 	Followers(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*IdentitiesResp, error)
-	Feed(ctx context.Context, in *FeedReq, opts ...grpc.CallOption) (*FeedResp, error)
 	Post(ctx context.Context, in *PostReq, opts ...grpc.CallOption) (*PostResp, error)
 	Like(ctx context.Context, in *LikeReq, opts ...grpc.CallOption) (*LikeResp, error)
 	FetchLikes(ctx context.Context, in *FetchLikesReq, opts ...grpc.CallOption) (*FetchLikesResp, error)
@@ -71,6 +70,7 @@ type DriftnodeClient interface {
 	Status(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*StatusResp, error)
 	RotateKey(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*RotateKeyResp, error)
 	Subscribe(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
+	FeedPage(ctx context.Context, in *FeedPageReq, opts ...grpc.CallOption) (*FeedPageResp, error)
 }
 
 type driftnodeClient struct {
@@ -105,16 +105,6 @@ func (c *driftnodeClient) Followers(ctx context.Context, in *Empty, opts ...grpc
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(IdentitiesResp)
 	err := c.cc.Invoke(ctx, Driftnode_Followers_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *driftnodeClient) Feed(ctx context.Context, in *FeedReq, opts ...grpc.CallOption) (*FeedResp, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(FeedResp)
-	err := c.cc.Invoke(ctx, Driftnode_Feed_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -300,6 +290,16 @@ func (c *driftnodeClient) Subscribe(ctx context.Context, in *SubscribeReq, opts 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Driftnode_SubscribeClient = grpc.ServerStreamingClient[Event]
 
+func (c *driftnodeClient) FeedPage(ctx context.Context, in *FeedPageReq, opts ...grpc.CallOption) (*FeedPageResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FeedPageResp)
+	err := c.cc.Invoke(ctx, Driftnode_FeedPage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DriftnodeServer is the server API for Driftnode service.
 // All implementations must embed UnimplementedDriftnodeServer
 // for forward compatibility.
@@ -311,7 +311,6 @@ type DriftnodeServer interface {
 	Whoami(context.Context, *Empty) (*WhoamiResp, error)
 	Follows(context.Context, *Empty) (*IdentitiesResp, error)
 	Followers(context.Context, *Empty) (*IdentitiesResp, error)
-	Feed(context.Context, *FeedReq) (*FeedResp, error)
 	Post(context.Context, *PostReq) (*PostResp, error)
 	Like(context.Context, *LikeReq) (*LikeResp, error)
 	FetchLikes(context.Context, *FetchLikesReq) (*FetchLikesResp, error)
@@ -329,6 +328,7 @@ type DriftnodeServer interface {
 	Status(context.Context, *Empty) (*StatusResp, error)
 	RotateKey(context.Context, *Empty) (*RotateKeyResp, error)
 	Subscribe(*SubscribeReq, grpc.ServerStreamingServer[Event]) error
+	FeedPage(context.Context, *FeedPageReq) (*FeedPageResp, error)
 	mustEmbedUnimplementedDriftnodeServer()
 }
 
@@ -347,9 +347,6 @@ func (UnimplementedDriftnodeServer) Follows(context.Context, *Empty) (*Identitie
 }
 func (UnimplementedDriftnodeServer) Followers(context.Context, *Empty) (*IdentitiesResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Followers not implemented")
-}
-func (UnimplementedDriftnodeServer) Feed(context.Context, *FeedReq) (*FeedResp, error) {
-	return nil, status.Error(codes.Unimplemented, "method Feed not implemented")
 }
 func (UnimplementedDriftnodeServer) Post(context.Context, *PostReq) (*PostResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Post not implemented")
@@ -401,6 +398,9 @@ func (UnimplementedDriftnodeServer) RotateKey(context.Context, *Empty) (*RotateK
 }
 func (UnimplementedDriftnodeServer) Subscribe(*SubscribeReq, grpc.ServerStreamingServer[Event]) error {
 	return status.Error(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedDriftnodeServer) FeedPage(context.Context, *FeedPageReq) (*FeedPageResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method FeedPage not implemented")
 }
 func (UnimplementedDriftnodeServer) mustEmbedUnimplementedDriftnodeServer() {}
 func (UnimplementedDriftnodeServer) testEmbeddedByValue()                   {}
@@ -473,24 +473,6 @@ func _Driftnode_Followers_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(DriftnodeServer).Followers(ctx, req.(*Empty))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _Driftnode_Feed_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(FeedReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DriftnodeServer).Feed(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: Driftnode_Feed_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DriftnodeServer).Feed(ctx, req.(*FeedReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -794,6 +776,24 @@ func _Driftnode_Subscribe_Handler(srv interface{}, stream grpc.ServerStream) err
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Driftnode_SubscribeServer = grpc.ServerStreamingServer[Event]
 
+func _Driftnode_FeedPage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FeedPageReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DriftnodeServer).FeedPage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Driftnode_FeedPage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DriftnodeServer).FeedPage(ctx, req.(*FeedPageReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Driftnode_ServiceDesc is the grpc.ServiceDesc for Driftnode service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -812,10 +812,6 @@ var Driftnode_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Followers",
 			Handler:    _Driftnode_Followers_Handler,
-		},
-		{
-			MethodName: "Feed",
-			Handler:    _Driftnode_Feed_Handler,
 		},
 		{
 			MethodName: "Post",
@@ -880,6 +876,10 @@ var Driftnode_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RotateKey",
 			Handler:    _Driftnode_RotateKey_Handler,
+		},
+		{
+			MethodName: "FeedPage",
+			Handler:    _Driftnode_FeedPage_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -11,7 +11,6 @@ service Driftnode {
   rpc Whoami(Empty) returns (WhoamiResp);
   rpc Follows(Empty) returns (IdentitiesResp);
   rpc Followers(Empty) returns (IdentitiesResp);
-  rpc Feed(FeedReq) returns (FeedResp);
   rpc Post(PostReq) returns (PostResp);
   rpc Like(LikeReq) returns (LikeResp);
   rpc FetchLikes(FetchLikesReq) returns (FetchLikesResp);
@@ -29,6 +28,7 @@ service Driftnode {
   rpc Status(Empty) returns (StatusResp);
   rpc RotateKey(Empty) returns (RotateKeyResp);
   rpc Subscribe(SubscribeReq) returns (stream Event);
+  rpc FeedPage(FeedPageReq) returns (FeedPageResp);
 }
 
 // Empty carries no parameters. Used by RPCs that need no input.
@@ -63,18 +63,6 @@ message VerifyResp {
   string identity = 1;
 }
 
-// FeedReq limits the returned timeline. limit <= 0 means all. When mine is
-// set, the feed is filtered to the user's own posts only.
-message FeedReq {
-  int32 limit = 1;
-  bool mine = 2;
-}
-
-// FeedResp is a slice of merged-timeline posts, newest-first.
-message FeedResp {
-  repeated FeedItem items = 1;
-}
-
 // FeedItem is one post in the merged timeline.
 message FeedItem {
   string id = 1;
@@ -84,6 +72,24 @@ message FeedItem {
   string text = 5;
   int32 like_count = 6;
   repeated string likers = 7;
+}
+
+// FeedPageReq returns a page of the merged timeline, newest-first. page is
+// the 0-indexed page number (page 0 is the snapshot the subscribe stream
+// sends). The page size is fixed server-side. mine filters to the user's own
+// posts. all_likes triggers an on-demand like fetch from connected zens for
+// the user's own posts in the returned page.
+message FeedPageReq {
+  int32 page = 1;
+  bool mine = 2;
+  bool all_likes = 3;
+}
+
+// FeedPageResp is one page of merged-timeline posts, newest-first, with a
+// has_more flag indicating older posts remain.
+message FeedPageResp {
+  repeated FeedItem items = 1;
+  bool has_more = 2;
 }
 
 // PostReq creates a post. Passphrase unlocks the signing key; omit when the

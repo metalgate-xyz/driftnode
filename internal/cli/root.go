@@ -363,98 +363,114 @@ func feedCmd() *cobra.Command {
 		Short: "Print the merged timeline from local state (no network)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if allLikes && !mine {
-				return fmt.Errorf("--all-likes requires --mine")
-			}
-			if allLikes {
-				return feedWithAllLikes(cmd, limit)
-			}
-			// When the daemon is running (it holds the store lock),
-			// read the feed via the subscribe stream. The snapshot is capped
-			// server-side, so a large feed does not blow the gRPC message
-			// limit the way a full unary Feed would. Otherwise open the store
-			// directly for offline use.
+			// When the daemon is running (it holds the store lock), read the
+			// feed via the subscribe snapshot (page 0) plus FeedPage for older
+			// posts until the limit is reached or the feed is exhausted.
+			// Otherwise open the store directly for offline use.
 			if cl, cc, derr := dialDaemon(); derr == nil {
 				defer cc.Close()
-				if mine {
-					resp, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Limit: int32(limit), Mine: true})
-					if err == nil {
-						printFeedItems(cmd, resp.Items)
-						return nil
-					}
-					if !errors.Is(err, daemon.ErrNotRunning) {
-						return err
-					}
-				}
-				snap, err := subscribeSnapshot(cl)
-				if err == nil {
-					printFeedSnapshot(cmd, snap, limit)
-					return nil
-				}
-				if !errors.Is(err, daemon.ErrNotRunning) {
-					return err
-				}
+				return feedOnline(cmd, cl, limit, mine, allLikes)
 			}
-			s, err := openStoreAt(dbPath)
-			if err != nil {
-				return err
+			if allLikes {
+				return fmt.Errorf("--all-likes requires the daemon")
 			}
-			defer s.Close()
-			ownID, _, _ := s.Identity()
-			allPosts, err := s.AllPosts()
-			if err != nil {
-				return fmt.Errorf("read posts: %w", err)
-			}
-			log := core.NewLog(allPosts)
-			posts := log.Posts()
-			if limit > 0 && len(posts) > limit {
-				posts = posts[:limit]
-			}
-			// Build like counts per post from Like events in the held PostLogs.
-			postLikes := make(map[core.EventID][]string)
-			for _, se := range allPosts {
-				if se.Event.Kind != core.KindLike || se.Event.Like == nil {
-					continue
-				}
-				likerName, _ := s.DisplayName(se.Author)
-				if likerName == "" {
-					likerName = se.Author.String()
-				}
-				postLikes[se.Event.Like.TargetID] = append(postLikes[se.Event.Like.TargetID], likerName)
-			}
-			for _, p := range posts {
-				if mine && p.Author != ownID {
-					continue
-				}
-				ts := core.FormatTime(p.Event.Timestamp)
-				name, _ := s.DisplayName(p.Author)
-				author := name
-				if author == "" {
-					author = p.Author.String()
-					if len(author) > 16 {
-						author = author[:16]
-					}
-				}
-				text := p.Event.Post.Text
-				if p.Event.Post != nil && !p.Event.Post.ParentID.IsZero() {
-					text = "(reply) " + text
-				}
-				line := fmt.Sprintf("%s  %s> %s", ts, author, text)
-				pid, _ := p.ID()
-				if likers, ok := postLikes[pid]; ok && len(likers) > 0 {
-					line += fmt.Sprintf("  (%d like%s: %s)", len(likers), pluralS(len(likers)), strings.Join(likers, ", "))
-				}
-				line += "  [" + pid.String() + "]"
-				cmd.Println(line)
-			}
-			return nil
+			return feedOffline(cmd, limit, mine)
 		},
 	}
 	addDBFlag(c)
 	c.Flags().IntVarP(&limit, "limit", "n", 0, "maximum number of posts to show (0 = all)")
 	c.Flags().BoolVar(&mine, "mine", false, "show only your own posts")
-	c.Flags().BoolVar(&allLikes, "all-likes", false, "fetch likes from connected zens for your own posts (requires --mine, requires daemon)")
+	c.Flags().BoolVar(&allLikes, "all-likes", false, "fetch likes from connected zens for your own posts (requires daemon)")
 	return c
+}
+
+// feedOnline reads the feed from the running daemon via FeedPage, newest
+// first, until limit is reached or the feed is exhausted. all_likes is
+// passed to FeedPage so the daemon fetches likes from connected zens for the
+// user's own posts in each page. Each page is printed as it arrives so a
+// large feed streams to the terminal instead of buffering the whole history
+// before the first line.
+func feedOnline(cmd *cobra.Command, cl driftnodepb.DriftnodeClient, limit int, mine, allLikes bool) error {
+	page := 0
+	shown := 0
+	for {
+		resp, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Page: int32(page), Mine: mine, AllLikes: allLikes})
+		if err != nil {
+			return fmt.Errorf("feed page %d: %w", page, err)
+		}
+		items := resp.Items
+		if limit > 0 && shown+len(items) > limit {
+			items = items[:limit-shown]
+		}
+		printFeedItems(cmd, items)
+		shown += len(items)
+		if !resp.HasMore {
+			break
+		}
+		if limit > 0 && shown >= limit {
+			break
+		}
+		page++
+	}
+	return nil
+}
+
+// feedOffline reads the feed directly from the local store when the daemon
+// is not running.
+func feedOffline(cmd *cobra.Command, limit int, mine bool) error {
+	s, err := openStoreAt(dbPath)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	ownID, _, _ := s.Identity()
+	allPosts, err := s.AllPosts()
+	if err != nil {
+		return fmt.Errorf("read posts: %w", err)
+	}
+	log := core.NewLog(allPosts)
+	posts := log.Posts()
+	if limit > 0 && len(posts) > limit {
+		posts = posts[:limit]
+	}
+	// Build like counts per post from Like events in the held PostLogs.
+	postLikes := make(map[core.EventID][]string)
+	for _, se := range allPosts {
+		if se.Event.Kind != core.KindLike || se.Event.Like == nil {
+			continue
+		}
+		likerName, _ := s.DisplayName(se.Author)
+		if likerName == "" {
+			likerName = se.Author.String()
+		}
+		postLikes[se.Event.Like.TargetID] = append(postLikes[se.Event.Like.TargetID], likerName)
+	}
+	for _, p := range posts {
+		if mine && p.Author != ownID {
+			continue
+		}
+		ts := core.FormatTime(p.Event.Timestamp)
+		name, _ := s.DisplayName(p.Author)
+		author := name
+		if author == "" {
+			author = p.Author.String()
+			if len(author) > 16 {
+				author = author[:16]
+			}
+		}
+		text := p.Event.Post.Text
+		if p.Event.Post != nil && !p.Event.Post.ParentID.IsZero() {
+			text = "(reply) " + text
+		}
+		line := fmt.Sprintf("%s  %s> %s", ts, author, text)
+		pid, _ := p.ID()
+		if likers, ok := postLikes[pid]; ok && len(likers) > 0 {
+			line += fmt.Sprintf("  (%d like%s: %s)", len(likers), pluralS(len(likers)), strings.Join(likers, ", "))
+		}
+		line += "  [" + pid.String() + "]"
+		cmd.Println(line)
+	}
+	return nil
 }
 
 // printFeedItems prints proto feed items with like counts and liker names.
@@ -478,39 +494,9 @@ func printFeedItems(cmd *cobra.Command, items []*driftnodepb.FeedItem) {
 	}
 }
 
-// feedWithAllLikes fetches the user's own posts, triggers a remote like fetch
-// for those posts, then re-queries the feed to display like counts. Requires
-// the daemon because it dials connected zens.
-func feedWithAllLikes(cmd *cobra.Command, limit int) error {
-	cl, cc, err := dialDaemon()
-	if err != nil {
-		return fmt.Errorf("--all-likes requires the daemon: %w", err)
-	}
-	defer cc.Close()
-	resp, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Limit: int32(limit), Mine: true})
-	if err != nil {
-		return fmt.Errorf("feed: %w", err)
-	}
-	if len(resp.Items) == 0 {
-		return nil
-	}
-	postIDs := make([]string, len(resp.Items))
-	for i, item := range resp.Items {
-		postIDs[i] = item.Id
-	}
-	fetchResp, err := cl.FetchLikes(context.Background(), &driftnodepb.FetchLikesReq{PostIds: postIDs})
-	if err != nil {
-		return fmt.Errorf("fetch likes: %w", err)
-	}
-	if len(fetchResp.LikeEventIds) > 0 {
-		resp, err = cl.Feed(context.Background(), &driftnodepb.FeedReq{Limit: int32(limit), Mine: true})
-		if err != nil {
-			return fmt.Errorf("re-read feed: %w", err)
-		}
-	}
-	printFeedItems(cmd, resp.Items)
-	return nil
-}
+// feedPageSize is the page size the daemon serves via FeedPage. It must
+// match the daemon's feedPageLimit.
+const feedPageSize = 200
 
 func pluralS(n int) string {
 	if n == 1 {
@@ -520,8 +506,8 @@ func pluralS(n int) string {
 }
 
 // subscribeSnapshot opens a subscribe stream, reads the initial snapshot,
-// and returns it. The snapshot is capped server-side, so the CLI never
-// receives the full merged state in one message.
+// and returns it. Used by commands that need live state panels (follows,
+// followers, zens), not by the feed command.
 func subscribeSnapshot(cl driftnodepb.DriftnodeClient) (*driftnodepb.Snapshot, error) {
 	stream, err := cl.Subscribe(context.Background(), &driftnodepb.SubscribeReq{})
 	if err != nil {
@@ -536,19 +522,6 @@ func subscribeSnapshot(cl driftnodepb.DriftnodeClient) (*driftnodepb.Snapshot, e
 		return nil, fmt.Errorf("expected snapshot, got %T", ev.Kind)
 	}
 	return s.Snapshot, nil
-}
-
-// printFeedSnapshot prints feed items from a subscribe snapshot. The limit
-// flag further bounds the printed lines; 0 means print the whole snapshot.
-func printFeedSnapshot(cmd *cobra.Command, snap *driftnodepb.Snapshot, limit int) {
-	if snap == nil {
-		return
-	}
-	items := snap.Feed
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-	printFeedItems(cmd, items)
 }
 
 func followCmd() *cobra.Command {

@@ -274,28 +274,6 @@ func (d *Daemon) removeSubscriber(s *subscriber) {
 	d.mu.Unlock()
 }
 
-// buildFeedItems returns the merged timeline feedItems, newest-first, up to
-// limit entries. limit <= 0 means all. Shared by the feed RPC and the
-// subscribe snapshot. It reads from the feed cache, which is rebuilt only
-// when the feed generation changes (a post is created or synced), so a
-// snapshot does not reload and re-sort the full PostLog from disk each time.
-func (d *Daemon) buildFeedItems(limit int, mine bool) ([]feedItem, error) {
-	posts := d.cachedPosts()
-	ownID, _, _ := d.store.Identity()
-	items := make([]feedItem, 0, len(posts))
-	for _, p := range posts {
-		if mine && p.Author != ownID {
-			continue
-		}
-		items = append(items, d.feedItemFor(p))
-	}
-	if limit > 0 && len(items) > limit {
-		items = items[:limit]
-	}
-	d.populateLikes(items)
-	return items, nil
-}
-
 // populateLikes computes the liker set for each feed item from Like events
 // held locally (own PostLog plus synced PostLogs of followed identities).
 // Likes are observational: the count is "how many Like events this zen has
@@ -833,13 +811,6 @@ type Response struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// snapshotFeedLimit caps how many feed items the subscribe snapshot sends.
-// The TUI only renders the visible window, so sending the entire feed (which
-// can be millions of posts) makes the snapshot encode, transfer, and decode
-// each O(n) and freezes the TUI for seconds. Newer posts arrive as diffs
-// afterward, so capping the initial window does not lose data.
-const snapshotFeedLimit = 200
-
 // snapshot builds the initial subscribe event carrying the full state of all
 // four panels, so the TUI seeds everything from one message. It builds fresh
 // proto values and never mutates the live zens map.
@@ -856,7 +827,7 @@ func (d *Daemon) snapshot() *driftnodepb.Snapshot {
 	for i := range src {
 		zens = append(zens, d.zenToProto(src[i]))
 	}
-	feed, _ := d.buildFeedItems(snapshotFeedLimit, false)
+	feed, _, _ := d.handleFeedPage(0, false, false)
 	follows := d.followEntries()
 	followers := d.followerEntries()
 	return &driftnodepb.Snapshot{
@@ -916,6 +887,8 @@ func feedItemToProto(it feedItem) *driftnodepb.FeedItem {
 		Author:    it.Author,
 		Name:      it.Name,
 		Text:      it.Text,
+		LikeCount: int32(it.LikeCount),
+		Likers:    it.Likers,
 	}
 }
 
@@ -960,15 +933,61 @@ type feedItem struct {
 	Likers    []string `json:"likers"`
 }
 
-// handleFeed returns the merged timeline (own PostLog plus synced PostLogs
-// from followed identities), reverse-chronological, up to limit entries.
-// When mine is set, only the user's own posts are returned.
-func (d *Daemon) handleFeed(limit int, mine bool) Response {
-	items, err := d.buildFeedItems(limit, mine)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("read posts: %s", err)}
+// feedPageLimit is the fixed page size shared by the subscribe snapshot and
+// FeedPage. The snapshot is page 0; FeedPage serves page N.
+const feedPageLimit = 200
+
+// handleFeedPage returns one page of the merged timeline, newest-first. Page
+// 0 is the snapshot. hasMore reports whether older posts remain. When
+// allLikes is set, the daemon fetches likes from connected zens for the
+// user's own posts in the page before populating like counts.
+func (d *Daemon) handleFeedPage(page int, mine, allLikes bool) ([]feedItem, bool, error) {
+	posts := d.cachedPosts()
+	ownID, _, _ := d.store.Identity()
+	start := page * feedPageLimit
+	end := start + feedPageLimit
+
+	// cachedPosts is already newest-first, so a page is a slice of the
+	// filtered view. Filtering mine once per call is O(n); the unfiltered
+	// path is O(1) slicing. Re-scanning from index 0 each page would be
+	// O(n^2) over a full fetch and hang the CLI on a large feed.
+	var view []core.SignedEvent
+	if mine {
+		view = make([]core.SignedEvent, 0, len(posts))
+		for _, p := range posts {
+			if p.Author == ownID {
+				view = append(view, p)
+			}
+		}
+	} else {
+		view = posts
 	}
-	return Response{Result: items}
+
+	if start >= len(view) {
+		return nil, false, nil
+	}
+	if end > len(view) {
+		end = len(view)
+	}
+	items := make([]feedItem, 0, end-start)
+	for _, p := range view[start:end] {
+		items = append(items, d.feedItemFor(p))
+	}
+	if allLikes {
+		ids := make([]core.EventID, 0, len(items))
+		for _, it := range items {
+			if it.Author == ownID.String() {
+				if id, err := core.ParseEventID(it.ID); err == nil {
+					ids = append(ids, id)
+				}
+			}
+		}
+		if len(ids) > 0 {
+			_, _ = d.handleFetchLikes(ids)
+		}
+	}
+	d.populateLikes(items)
+	return items, end < len(view), nil
 }
 
 // feedItemFor builds a feedItem from one signed post event. A post with a
@@ -2104,13 +2123,13 @@ func SendRequest(socketPath, method string, params map[string]any) (*Response, e
 		}
 		return &Response{Result: map[string]any{"followers": identitiesFromProto(r.Identities)}}, nil
 	case "feed":
-		limit := 0
-		if v, ok := params["limit"]; ok {
-			if f, ok := v.(float64); ok {
-				limit = int(f)
+		mine := false
+		if v, ok := params["mine"]; ok {
+			if b, ok := v.(bool); ok {
+				mine = b
 			}
 		}
-		r, err := cl.Feed(ctx, &driftnodepb.FeedReq{Limit: int32(limit)})
+		r, err := cl.FeedPage(ctx, &driftnodepb.FeedPageReq{Page: 0, Mine: mine})
 		if err != nil {
 			return nil, err
 		}

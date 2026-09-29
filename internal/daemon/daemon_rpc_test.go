@@ -525,7 +525,7 @@ func TestLikeOwnPost(t *testing.T) {
 	// The feed must show the like on the post. A self-like is a valid
 	// signed event: the like count is observational, not authoritative
 	// (design §7.2), so counting the author's own like is consistent.
-	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	feed, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})
 	if err != nil {
 		t.Fatalf("feed: %v", err)
 	}
@@ -561,7 +561,7 @@ func TestFeedMineFilter(t *testing.T) {
 	}
 
 	// Feed with mine=true should return only our own posts.
-	resp, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	resp, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})
 	if err != nil {
 		t.Fatalf("feed mine: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestFeedMineFilter(t *testing.T) {
 	}
 
 	// Feed without mine should also include our posts.
-	respAll, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{})
+	respAll, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{})
 	if err != nil {
 		t.Fatalf("feed all: %v", err)
 	}
@@ -816,7 +816,7 @@ func TestSubscribeSnapshotFeedIsCapped(t *testing.T) {
 	defer d.Stop()
 
 	cl, _ := testClient(t, sock)
-	for i := 0; i < snapshotFeedLimit+50; i++ {
+	for i := 0; i < feedPageLimit+50; i++ {
 		if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "post"}); err != nil {
 			t.Fatalf("post %d: %v", i, err)
 		}
@@ -827,8 +827,8 @@ func TestSubscribeSnapshotFeedIsCapped(t *testing.T) {
 	if !ok {
 		t.Fatalf("first event: want Snapshot, got %T", ev.Kind)
 	}
-	if len(snap.Snapshot.Feed) > snapshotFeedLimit {
-		t.Fatalf("snapshot feed cap: want <= %d, got %d", snapshotFeedLimit, len(snap.Snapshot.Feed))
+	if len(snap.Snapshot.Feed) > feedPageLimit {
+		t.Fatalf("snapshot feed cap: want <= %d, got %d", feedPageLimit, len(snap.Snapshot.Feed))
 	}
 
 	// A second subscribe must return the same feed from the cache without
@@ -1091,7 +1091,7 @@ func TestFetchLikesRPCOverTransport(t *testing.T) {
 	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
 
 	// Before fetch: feed shows the post with zero likes.
-	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	feed, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})
 	if err != nil {
 		t.Fatalf("feed before: %v", err)
 	}
@@ -1109,7 +1109,7 @@ func TestFetchLikesRPCOverTransport(t *testing.T) {
 	}
 
 	// After fetch: feed shows 1 like from bob.
-	feed, err = cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	feed, err = cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})
 	if err != nil {
 		t.Fatalf("feed after: %v", err)
 	}
@@ -1150,7 +1150,7 @@ func TestDuplicateOwnLikeCountsAsOne(t *testing.T) {
 	if second.EventId != first.EventId {
 		t.Fatalf("duplicate like should return the original event id: want %q, got %q", first.EventId, second.EventId)
 	}
-	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	feed, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})
 	if err != nil {
 		t.Fatalf("feed: %v", err)
 	}
@@ -1207,7 +1207,7 @@ func TestDuplicateOtherLikeCountsAsOne(t *testing.T) {
 		}
 	}
 
-	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	feed, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})
 	if err != nil {
 		t.Fatalf("feed: %v", err)
 	}
