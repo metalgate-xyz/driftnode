@@ -276,10 +276,6 @@ func postCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			seq, err := s.OwnEventCount(core.PostLog)
-			if err != nil {
-				return fmt.Errorf("get sequence: %w", err)
-			}
 			post := &core.Post{Text: args[0]}
 			if parentID != "" {
 				pid, err := core.ParseEventID(parentID)
@@ -288,20 +284,13 @@ func postCmd() *cobra.Command {
 				}
 				post.ParentID = pid
 			}
-			se, err := kp.Sign(core.Event{
-				Kind:      core.KindPost,
-				Log:       core.PostLog,
-				Timestamp: core.Now64(),
-				Sequence:  seq + 1,
-				Post:      post,
+			_, id, err := s.SignAndAppend(kp, core.PostLog, core.Event{
+				Kind: core.KindPost,
+				Post: post,
 			})
 			if err != nil {
-				return fmt.Errorf("sign: %w", err)
+				return err
 			}
-			if err := s.AppendOwnEvent(core.PostLog, se); err != nil {
-				return fmt.Errorf("append: %w", err)
-			}
-			id, _ := se.ID()
 			cmd.Println(id)
 			return nil
 		},
@@ -349,24 +338,13 @@ func likeCmd() *cobra.Command {
 			if target.IsZero() {
 				return fmt.Errorf("post id required")
 			}
-			seq, err := s.OwnEventCount(core.PostLog)
-			if err != nil {
-				return fmt.Errorf("get sequence: %w", err)
-			}
-			se, err := kp.Sign(core.Event{
-				Kind:      core.KindLike,
-				Log:       core.PostLog,
-				Timestamp: core.Now64(),
-				Sequence:  seq + 1,
-				Like:      &core.Like{TargetID: target},
+			_, id, err := s.SignAndAppend(kp, core.PostLog, core.Event{
+				Kind: core.KindLike,
+				Like: &core.Like{TargetID: target},
 			})
 			if err != nil {
-				return fmt.Errorf("sign: %w", err)
+				return err
 			}
-			if err := s.AppendOwnEvent(core.PostLog, se); err != nil {
-				return fmt.Errorf("append: %w", err)
-			}
-			id, _ := se.ID()
 			cmd.Println(id)
 			return nil
 		},
@@ -603,26 +581,15 @@ func followCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			target, err := resolvePubkey(args[0])
+			target, err := core.ResolvePubkey(args[0])
 			if err != nil {
 				return err
 			}
-			seq, err := s.OwnEventCount(core.ProfileLog)
-			if err != nil {
-				return fmt.Errorf("get sequence: %w", err)
-			}
-			se, err := kp.Sign(core.Event{
-				Kind:      core.KindFollow,
-				Log:       core.ProfileLog,
-				Timestamp: core.Now64(),
-				Sequence:  seq + 1,
-				Follow:    &core.Follow{TargetPubkey: target},
-			})
-			if err != nil {
-				return fmt.Errorf("sign: %w", err)
-			}
-			if err := s.AppendOwnEvent(core.ProfileLog, se); err != nil {
-				return fmt.Errorf("append: %w", err)
+			if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+				Kind:   core.KindFollow,
+				Follow: &core.Follow{TargetPubkey: target},
+			}); err != nil {
+				return err
 			}
 			cmd.Printf("followed %s\n", core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
 			return nil
@@ -663,26 +630,15 @@ func unfollowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			target, err := resolvePubkey(args[0])
+			target, err := core.ResolvePubkey(args[0])
 			if err != nil {
 				return err
 			}
-			seq, err := s.OwnEventCount(core.ProfileLog)
-			if err != nil {
-				return fmt.Errorf("get sequence: %w", err)
-			}
-			se, err := kp.Sign(core.Event{
-				Kind:      core.KindUnfollow,
-				Log:       core.ProfileLog,
-				Timestamp: core.Now64(),
-				Sequence:  seq + 1,
-				Follow:    &core.Follow{TargetPubkey: target},
-			})
-			if err != nil {
-				return fmt.Errorf("sign: %w", err)
-			}
-			if err := s.AppendOwnEvent(core.ProfileLog, se); err != nil {
-				return fmt.Errorf("append: %w", err)
+			if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+				Kind:   core.KindUnfollow,
+				Follow: &core.Follow{TargetPubkey: target},
+			}); err != nil {
+				return err
 			}
 			cmd.Printf("unfollowed %s\n", core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
 			return nil
@@ -1847,24 +1803,13 @@ func profileCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			seq, err := s.OwnEventCount(core.ProfileLog)
-			if err != nil {
-				return fmt.Errorf("get sequence: %w", err)
-			}
-			se, err := kp.Sign(core.Event{
-				Kind:      core.KindProfile,
-				Log:       core.ProfileLog,
-				Timestamp: core.Now64(),
-				Sequence:  seq + 1,
-				Profile:   &core.Profile{DisplayName: name},
+			_, id, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+				Kind:    core.KindProfile,
+				Profile: &core.Profile{DisplayName: name},
 			})
 			if err != nil {
-				return fmt.Errorf("sign: %w", err)
+				return err
 			}
-			if err := s.AppendOwnEvent(core.ProfileLog, se); err != nil {
-				return fmt.Errorf("append: %w", err)
-			}
-			id, _ := se.ID()
 			cmd.Println(id)
 			return nil
 		},
@@ -1914,24 +1859,14 @@ func detailCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			seq, err := s.OwnEventCount(core.DetailLog)
-			if err != nil {
-				return fmt.Errorf("get sequence: %w", err)
-			}
-			se, err := kp.Sign(core.Event{
-				Kind:      core.KindDetail,
-				Log:       core.DetailLog,
-				Timestamp: core.Now64(),
-				Sequence:  seq + 1,
-				Detail:    &core.Detail{Bio: bio, FirstName: firstName, LastName: lastName, Location: location},
+			_, id, err := s.SignAndAppend(kp, core.DetailLog, core.Event{
+				Kind:   core.KindDetail,
+				Detail: &core.Detail{Bio: bio, FirstName: firstName, LastName: lastName, Location: location},
 			})
 			if err != nil {
-				return fmt.Errorf("sign: %w", err)
+				return err
 			}
-			if err := s.AppendOwnEvent(core.DetailLog, se); err != nil {
-				return fmt.Errorf("append: %w", err)
-			}
-			id, _ := se.ID()
+			cmd.Println(id)
 			cmd.Println(id)
 			return nil
 		},
@@ -1943,23 +1878,4 @@ func detailCmd() *cobra.Command {
 	c.Flags().StringVar(&lastName, "last-name", "", "last name (shown only on direct request)")
 	c.Flags().StringVar(&location, "location", "", "location (shown only on direct request)")
 	return c
-}
-
-// resolvePubkey accepts either a full driftnode:<pubkey> identity string or a
-// bare base32 pubkey and returns the raw 32 bytes.
-func resolvePubkey(arg string) ([32]byte, error) {
-	var s string
-	if id, err := core.ParseIdentity(arg); err == nil {
-		pub, err := id.PubkeyBytes()
-		if err != nil {
-			return [32]byte{}, err
-		}
-		return [32]byte(pub), nil
-	}
-	s = arg
-	pub, err := core.PubkeyFromBase32(s)
-	if err != nil {
-		return [32]byte{}, fmt.Errorf("invalid pubkey %q: %w", arg, err)
-	}
-	return [32]byte(pub), nil
 }

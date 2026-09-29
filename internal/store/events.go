@@ -1,0 +1,91 @@
+package store
+
+import (
+	"errors"
+	"fmt"
+
+	"driftnode/internal/core"
+
+	bolt "go.etcd.io/bbolt"
+)
+
+var errStop = errors.New("stop iteration")
+
+// existingLikeID returns the event ID of a KindLike event by author targeting
+// postID already present in bucket, if any. One Like per author per post: a
+// re-like is silently dropped so the count cannot inflate and a peer cannot
+// flood a log with redundant like events.
+func existingLikeID(author core.Identity, target core.EventID, bucket bucketLike) (core.EventID, bool) {
+	var id core.EventID
+	var found bool
+	_ = bucket.ForEach(func(k, v []byte) error {
+		var se core.SignedEvent
+		if err := core.CanonicalDecode(v, &se); err != nil {
+			return nil
+		}
+		if se.Event.Kind == core.KindLike && se.Event.Like != nil &&
+			se.Author == author && se.Event.Like.TargetID == target {
+			copy(id[:], k)
+			found = true
+			return errStop
+		}
+		return nil
+	})
+	return id, found
+}
+
+// bucketLike is the subset of bolt.Bucket used by existingLikeID, so the
+// helper can be tested without a real bbolt transaction.
+type bucketLike interface {
+	ForEach(fn func(k, v []byte) error) error
+}
+
+// ownLogBucket returns the user's own log bucket for reading within tx, or
+// nil if the log has no events yet.
+func ownLogBucket(tx *bolt.Tx, log core.LogName) *bolt.Bucket {
+	return tx.Bucket(bucketOwn).Bucket([]byte(log))
+}
+
+// SignAndAppend signs an event of the given kind in the given log, appends
+// it to the user's own log, and returns the signed event and its event ID.
+// This is the single entry point for creating own events: the CLI offline
+// path and the daemon handlers share it so the store operation (sequence,
+// sign, append, dedup) is defined once. Liking is idempotent: if the author
+// already liked the target post, no new event is created and the existing
+// like event's ID is returned.
+func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
+	if ev.Kind == core.KindLike && ev.Like != nil {
+		var existing core.EventID
+		var found bool
+		_ = s.db.View(func(tx *bolt.Tx) error {
+			b := ownLogBucket(tx, core.PostLog)
+			if b == nil {
+				return nil
+			}
+			existing, found = existingLikeID(kp.Identity(), ev.Like.TargetID, b)
+			return nil
+		})
+		if found {
+			return nil, existing, nil
+		}
+	}
+	seq, err := s.OwnEventCount(log)
+	if err != nil {
+		return nil, core.EventID{}, fmt.Errorf("get sequence: %w", err)
+	}
+	ev.Log = log
+	ev.Timestamp = core.Now64()
+	ev.Sequence = seq + 1
+	se, err := kp.Sign(ev)
+	if err != nil {
+		return nil, core.EventID{}, fmt.Errorf("sign: %w", err)
+	}
+	if err := s.AppendOwnEvent(log, se); err != nil {
+		return nil, core.EventID{}, fmt.Errorf("append: %w", err)
+	}
+	id, err := se.ID()
+	if err != nil {
+		return nil, core.EventID{}, fmt.Errorf("event id: %w", err)
+	}
+	return se, id, nil
+}

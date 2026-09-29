@@ -53,6 +53,24 @@ func ParseIdentity(s string) (Identity, error) {
 	return id, nil
 }
 
+// ResolvePubkey resolves a user-supplied identifier to a raw 32-byte public
+// key. It accepts either a full driftnode:<pubkey> identity string or a bare
+// lowercase base32 pubkey.
+func ResolvePubkey(arg string) ([32]byte, error) {
+	if id, err := ParseIdentity(arg); err == nil {
+		pub, err := id.PubkeyBytes()
+		if err != nil {
+			return [32]byte{}, err
+		}
+		return [32]byte(pub), nil
+	}
+	pub, err := PubkeyFromBase32(arg)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("invalid pubkey %q: %w", arg, err)
+	}
+	return [32]byte(pub), nil
+}
+
 // KeyPair is an Ed25519 keypair. The public key is the identity; the private
 // key signs events. It is the entire account: there is no recovery outside
 // the backup file that holds it (§8).

@@ -157,7 +157,8 @@ func (s *Store) PutKey(kp *core.KeyPair, enc *core.EncryptedKey) error {
 // AppendOwnEvent appends a signed event to the user's own log of the given
 // name. Events are keyed by their event ID (the BLAKE3 of the canonical signed
 // bytes), so importing a backup merges as a set union of immutable events
-// rather than resequencing (§7, §8).
+// rather than resequencing (§7, §8). A duplicate Like (same author, same
+// target) is silently dropped: one Like per author per post.
 func (s *Store) AppendOwnEvent(log core.LogName, se *core.SignedEvent) error {
 	id, err := se.ID()
 	if err != nil {
@@ -175,6 +176,11 @@ func (s *Store) AppendOwnEvent(log core.LogName, se *core.SignedEvent) error {
 		// Set union: skip if already present.
 		if logBucket.Get(id[:]) != nil {
 			return nil
+		}
+		if se.Event.Kind == core.KindLike && se.Event.Like != nil {
+			if _, dup := existingLikeID(se.Author, se.Event.Like.TargetID, logBucket); dup {
+				return nil
+			}
 		}
 		return logBucket.Put(id[:], eventBytes)
 	})
@@ -241,6 +247,11 @@ func (s *Store) PutCrawledEvent(se *core.SignedEvent, seq uint64) (bool, error) 
 		}
 		if authorBucket.Get(id[:]) != nil {
 			return nil
+		}
+		if se.Event.Kind == core.KindLike && se.Event.Like != nil {
+			if _, dup := existingLikeID(se.Author, se.Event.Like.TargetID, authorBucket); dup {
+				return nil
+			}
 		}
 		inserted = true
 		return authorBucket.Put(id[:], eventBytes)

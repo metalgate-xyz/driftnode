@@ -1082,29 +1082,18 @@ func (d *Daemon) handlePost(text, parentID string, kp *core.KeyPair) Response {
 		}
 		parent = p
 	}
-	seq, err := d.store.OwnEventCount(core.PostLog)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sequence: %s", err)}
-	}
 	post := &core.Post{Text: text}
 	if !parent.IsZero() {
 		post.ParentID = parent
 	}
-	se, err := kp.Sign(core.Event{
-		Kind:      core.KindPost,
-		Log:       core.PostLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Post:      post,
+	se, id, err := d.store.SignAndAppend(kp, core.PostLog, core.Event{
+		Kind: core.KindPost,
+		Post: post,
 	})
 	if err != nil {
-		return Response{Error: fmt.Sprintf("sign: %s", err)}
-	}
-	if err := d.store.AppendOwnEvent(core.PostLog, se); err != nil {
-		return Response{Error: fmt.Sprintf("append: %s", err)}
+		return Response{Error: err.Error()}
 	}
 	d.invalidateFeed()
-	id, _ := se.ID()
 	d.touchSignAt()
 	d.triggerSyncNow()
 	ownID, _, _ := d.store.Identity()
@@ -1131,25 +1120,14 @@ func (d *Daemon) handleLike(postID string, kp *core.KeyPair) Response {
 	if target.IsZero() {
 		return Response{Error: "post id required"}
 	}
-	seq, err := d.store.OwnEventCount(core.PostLog)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sequence: %s", err)}
-	}
-	se, err := kp.Sign(core.Event{
-		Kind:      core.KindLike,
-		Log:       core.PostLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Like:      &core.Like{TargetID: target},
+	_, id, err := d.store.SignAndAppend(kp, core.PostLog, core.Event{
+		Kind: core.KindLike,
+		Like: &core.Like{TargetID: target},
 	})
 	if err != nil {
-		return Response{Error: fmt.Sprintf("sign: %s", err)}
-	}
-	if err := d.store.AppendOwnEvent(core.PostLog, se); err != nil {
-		return Response{Error: fmt.Sprintf("append: %s", err)}
+		return Response{Error: err.Error()}
 	}
 	d.invalidateFeed()
-	id, _ := se.ID()
 	d.touchSignAt()
 	d.triggerSyncNow()
 	return Response{Result: map[string]string{"event_id": id.String()}}
@@ -1309,28 +1287,16 @@ func (d *Daemon) handleFollowers() Response {
 // the local ProfileLog. The ProfileLog is what the crawler fetches and caches
 // durably, so only public-facing fields belong here.
 func (d *Daemon) handleProfile(name string, kp *core.KeyPair) Response {
-	prof := &core.Profile{DisplayName: name}
-	seq, err := d.store.OwnEventCount(core.ProfileLog)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sequence: %s", err)}
-	}
-	se, err := kp.Sign(core.Event{
-		Kind:      core.KindProfile,
-		Log:       core.ProfileLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Profile:   prof,
+	_, id, err := d.store.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:    core.KindProfile,
+		Profile: &core.Profile{DisplayName: name},
 	})
 	if err != nil {
-		return Response{Error: fmt.Sprintf("sign: %s", err)}
-	}
-	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
-		return Response{Error: fmt.Sprintf("append: %s", err)}
+		return Response{Error: err.Error()}
 	}
 	d.invalidateNames()
 	d.touchSignAt()
 	d.triggerSyncNow()
-	id, _ := se.ID()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
@@ -1339,26 +1305,15 @@ func (d *Daemon) handleProfile(name string, kp *core.KeyPair) Response {
 // cached durably by peers; it is fetched on demand for display and
 // discarded. The owner's own DetailLog is backup-critical.
 func (d *Daemon) handleDetail(bio, firstName, lastName, location string, kp *core.KeyPair) Response {
-	seq, err := d.store.OwnEventCount(core.DetailLog)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sequence: %s", err)}
-	}
-	se, err := kp.Sign(core.Event{
-		Kind:      core.KindDetail,
-		Log:       core.DetailLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Detail:    &core.Detail{Bio: bio, FirstName: firstName, LastName: lastName, Location: location},
+	_, id, err := d.store.SignAndAppend(kp, core.DetailLog, core.Event{
+		Kind:   core.KindDetail,
+		Detail: &core.Detail{Bio: bio, FirstName: firstName, LastName: lastName, Location: location},
 	})
 	if err != nil {
-		return Response{Error: fmt.Sprintf("sign: %s", err)}
-	}
-	if err := d.store.AppendOwnEvent(core.DetailLog, se); err != nil {
-		return Response{Error: fmt.Sprintf("append: %s", err)}
+		return Response{Error: err.Error()}
 	}
 	d.touchSignAt()
 	d.triggerSyncNow()
-	id, _ := se.ID()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
@@ -1374,7 +1329,7 @@ func (d *Daemon) handleDetail(bio, firstName, lastName, location string, kp *cor
 func (d *Daemon) handleFollow(targetStr string, kp *core.KeyPair) Response {
 	// Identities and raw base32 pubkeys can be parsed unambiguously, so
 	// try that first; anything else is treated as a token.
-	if target, err := resolvePubkey(targetStr); err == nil {
+	if target, err := core.ResolvePubkey(targetStr); err == nil {
 		return d.followByPubkey(target, kp)
 	}
 	return d.followByToken(targetStr, kp)
@@ -1463,22 +1418,11 @@ func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
 // It does not dial; callers that can resolve a token should dial via
 // followByToken so the routing is bound immediately.
 func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
-	seq, err := d.store.OwnEventCount(core.ProfileLog)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sequence: %s", err)}
-	}
-	se, err := kp.Sign(core.Event{
-		Kind:      core.KindFollow,
-		Log:       core.ProfileLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Follow:    &core.Follow{TargetPubkey: target},
-	})
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sign: %s", err)}
-	}
-	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
-		return Response{Error: fmt.Sprintf("append: %s", err)}
+	if _, _, err := d.store.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: target},
+	}); err != nil {
+		return Response{Error: err.Error()}
 	}
 	followedID := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
 	d.touchSignAt()
@@ -1493,26 +1437,15 @@ func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 // "remove a zen" gesture: unfollowing stops the daemon from dialing the
 // identity on future sync rounds.
 func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
-	target, err := resolvePubkey(targetStr)
+	target, err := core.ResolvePubkey(targetStr)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("resolve target: %s", err)}
 	}
-	seq, err := d.store.OwnEventCount(core.ProfileLog)
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sequence: %s", err)}
-	}
-	se, err := kp.Sign(core.Event{
-		Kind:      core.KindUnfollow,
-		Log:       core.ProfileLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Follow:    &core.Follow{TargetPubkey: target},
-	})
-	if err != nil {
-		return Response{Error: fmt.Sprintf("sign: %s", err)}
-	}
-	if err := d.store.AppendOwnEvent(core.ProfileLog, se); err != nil {
-		return Response{Error: fmt.Sprintf("append: %s", err)}
+	if _, _, err := d.store.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: target},
+	}); err != nil {
+		return Response{Error: err.Error()}
 	}
 	id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
 	token, hadToken, _ := d.store.Routing(id)
@@ -2127,23 +2060,6 @@ func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity)
 		d.emitFollowersAdd(map[string]string{"identity": fid.String(), "name": name})
 	}
 	return n, err
-}
-
-// resolvePubkey parses a driftnode identity string or raw base32 pubkey into
-// a 32-byte Ed25519 public key.
-func resolvePubkey(arg string) ([32]byte, error) {
-	if id, err := core.ParseIdentity(arg); err == nil {
-		pub, err := id.PubkeyBytes()
-		if err != nil {
-			return [32]byte{}, err
-		}
-		return [32]byte(pub), nil
-	}
-	pub, err := core.PubkeyFromBase32(arg)
-	if err != nil {
-		return [32]byte{}, fmt.Errorf("invalid pubkey %q: %w", arg, err)
-	}
-	return [32]byte(pub), nil
 }
 
 // Dial probes the daemon's control socket and returns ErrNotRunning if no

@@ -895,18 +895,16 @@ func TestOutboundLikes(t *testing.T) {
 		t.Fatalf("put bob post: %v", err)
 	}
 
-	// I like Alice's post twice and Bob's post once.
-	for i, ts := range []int64{300, 400} {
-		like, _ := me.Sign(core.Event{
-			Kind: core.KindLike, Log: core.PostLog, Timestamp: ts, Sequence: uint64(i + 1),
-			Like: &core.Like{TargetID: aliceID},
-		})
-		if err := s.AppendOwnEvent(core.PostLog, like); err != nil {
-			t.Fatalf("append like %d: %v", i, err)
-		}
+	// I like Alice's post once and Bob's post once.
+	likeAlice, _ := me.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 300, Sequence: 1,
+		Like: &core.Like{TargetID: aliceID},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, likeAlice); err != nil {
+		t.Fatalf("append like alice: %v", err)
 	}
 	likeBob, _ := me.Sign(core.Event{
-		Kind: core.KindLike, Log: core.PostLog, Timestamp: 500, Sequence: 3,
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 400, Sequence: 2,
 		Like: &core.Like{TargetID: bobID},
 	})
 	if err := s.AppendOwnEvent(core.PostLog, likeBob); err != nil {
@@ -917,8 +915,8 @@ func TestOutboundLikes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OutboundLikes: %v", err)
 	}
-	if counts[alice.Identity()] != 2 {
-		t.Fatalf("alice: want 2 likes, got %d", counts[alice.Identity()])
+	if counts[alice.Identity()] != 1 {
+		t.Fatalf("alice: want 1 like, got %d", counts[alice.Identity()])
 	}
 	if counts[bob.Identity()] != 1 {
 		t.Fatalf("bob: want 1 like, got %d", counts[bob.Identity()])

@@ -1122,3 +1122,99 @@ func TestFetchLikesRPCOverTransport(t *testing.T) {
 
 	_ = aliceKP
 }
+
+func TestDuplicateOwnLikeCountsAsOne(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	postResp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "my post", Passphrase: "pass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	first, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: postResp.EventId})
+	if err != nil {
+		t.Fatalf("like 1: %v", err)
+	}
+	second, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: postResp.EventId})
+	if err != nil {
+		t.Fatalf("like 2: %v", err)
+	}
+	if second.EventId != first.EventId {
+		t.Fatalf("duplicate like should return the original event id: want %q, got %q", first.EventId, second.EventId)
+	}
+	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if feed.Items[0].LikeCount != 1 {
+		t.Fatalf("like count: want 1, got %d", feed.Items[0].LikeCount)
+	}
+	if len(feed.Items[0].Likers) != 1 {
+		t.Fatalf("likers: want 1, got %d", len(feed.Items[0].Likers))
+	}
+}
+
+func TestDuplicateOtherLikeCountsAsOne(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	postResp, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "my post", Passphrase: "pass"})
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	postID, err := core.ParseEventID(postResp.EventId)
+	if err != nil {
+		t.Fatalf("parse post id: %v", err)
+	}
+
+	bob, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	for i := int64(1); i <= 2; i++ {
+		like, err := bob.Sign(core.Event{
+			Kind:      core.KindLike,
+			Log:       core.PostLog,
+			Timestamp: 100 + i,
+			Sequence:  uint64(i),
+			Like:      &core.Like{TargetID: postID},
+		})
+		if err != nil {
+			t.Fatalf("sign like %d: %v", i, err)
+		}
+		inserted, err := s.PutCrawledEvent(like, uint64(i))
+		if err != nil {
+			t.Fatalf("put like %d: %v", i, err)
+		}
+		if i == 2 && inserted {
+			t.Fatal("duplicate like should be dropped by PutCrawledEvent")
+		}
+	}
+
+	feed, err := cl.Feed(context.Background(), &driftnodepb.FeedReq{Mine: true})
+	if err != nil {
+		t.Fatalf("feed: %v", err)
+	}
+	if feed.Items[0].LikeCount != 1 {
+		t.Fatalf("like count: want 1, got %d", feed.Items[0].LikeCount)
+	}
+	if len(feed.Items[0].Likers) != 1 {
+		t.Fatalf("likers: want 1, got %d", len(feed.Items[0].Likers))
+	}
+}
