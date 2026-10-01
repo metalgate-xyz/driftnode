@@ -954,6 +954,7 @@ type Zen struct {
 	Kind          string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
 	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
 	Verified      bool                   `protobuf:"varint,6,opt,name=verified,proto3" json:"verified,omitempty"`
+	Pinned        bool                   `protobuf:"varint,7,opt,name=pinned,proto3" json:"pinned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1026,6 +1027,13 @@ func (x *Zen) GetStatus() string {
 func (x *Zen) GetVerified() bool {
 	if x != nil {
 		return x.Verified
+	}
+	return false
+}
+
+func (x *Zen) GetPinned() bool {
+	if x != nil {
+		return x.Pinned
 	}
 	return false
 }
@@ -2253,14 +2261,15 @@ const file_driftnode_proto_rawDesc = "" +
 	"\blocation\x18\x04 \x01(\tR\blocation\x12\x1e\n" +
 	"\n" +
 	"passphrase\x18\x05 \x01(\tR\n" +
-	"passphrase\"\x8d\x01\n" +
+	"passphrase\"\xa5\x01\n" +
 	"\x03Zen\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bidentity\x18\x02 \x01(\tR\bidentity\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
 	"\x04kind\x18\x04 \x01(\tR\x04kind\x12\x16\n" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12\x1a\n" +
-	"\bverified\x18\x06 \x01(\bR\bverified\"1\n" +
+	"\bverified\x18\x06 \x01(\bR\bverified\x12\x16\n" +
+	"\x06pinned\x18\a \x01(\bR\x06pinned\"1\n" +
 	"\bZensResp\x12%\n" +
 	"\x04zens\x18\x01 \x03(\v2\x11.driftnode.v1.ZenR\x04zens\":\n" +
 	"\bIdentity\x12\x1a\n" +
@@ -2340,7 +2349,7 @@ const file_driftnode_proto_rawDesc = "" +
 	"\arunning\x18\x01 \x01(\bR\arunning\x12\x12\n" +
 	"\x04zens\x18\x02 \x01(\x05R\x04zens\x12\x1c\n" +
 	"\ttransport\x18\x03 \x01(\bR\ttransport\x12\x1a\n" +
-	"\bunlocked\x18\x04 \x01(\bR\bunlocked2\x82\n" +
+	"\bunlocked\x18\x04 \x01(\bR\bunlocked2\xfc\n" +
 	"\n" +
 	"\tDriftnode\x127\n" +
 	"\x06Whoami\x12\x13.driftnode.v1.Empty\x1a\x18.driftnode.v1.WhoamiResp\x12<\n" +
@@ -2354,7 +2363,9 @@ const file_driftnode_proto_rawDesc = "" +
 	"\x06Detail\x12\x17.driftnode.v1.DetailReq\x1a\x17.driftnode.v1.EmptyResp\x123\n" +
 	"\x04Zens\x12\x13.driftnode.v1.Empty\x1a\x16.driftnode.v1.ZensResp\x12=\n" +
 	"\x06Verify\x12\x19.driftnode.v1.IdentityReq\x1a\x18.driftnode.v1.VerifyResp\x12?\n" +
-	"\bUnverify\x12\x19.driftnode.v1.IdentityReq\x1a\x18.driftnode.v1.VerifyResp\x12;\n" +
+	"\bUnverify\x12\x19.driftnode.v1.IdentityReq\x1a\x18.driftnode.v1.VerifyResp\x12:\n" +
+	"\x03Pin\x12\x19.driftnode.v1.IdentityReq\x1a\x18.driftnode.v1.VerifyResp\x12<\n" +
+	"\x05Unpin\x12\x19.driftnode.v1.IdentityReq\x1a\x18.driftnode.v1.VerifyResp\x12;\n" +
 	"\x06Follow\x12\x17.driftnode.v1.FollowReq\x1a\x18.driftnode.v1.FollowResp\x12A\n" +
 	"\bUnfollow\x12\x19.driftnode.v1.UnfollowReq\x1a\x1a.driftnode.v1.UnfollowResp\x12;\n" +
 	"\x06Unlock\x12\x17.driftnode.v1.UnlockReq\x1a\x18.driftnode.v1.UnlockResp\x124\n" +
@@ -2449,39 +2460,43 @@ var file_driftnode_proto_depIdxs = []int32{
 	0,  // 27: driftnode.v1.Driftnode.Zens:input_type -> driftnode.v1.Empty
 	3,  // 28: driftnode.v1.Driftnode.Verify:input_type -> driftnode.v1.IdentityReq
 	3,  // 29: driftnode.v1.Driftnode.Unverify:input_type -> driftnode.v1.IdentityReq
-	20, // 30: driftnode.v1.Driftnode.Follow:input_type -> driftnode.v1.FollowReq
-	22, // 31: driftnode.v1.Driftnode.Unfollow:input_type -> driftnode.v1.UnfollowReq
-	24, // 32: driftnode.v1.Driftnode.Unlock:input_type -> driftnode.v1.UnlockReq
-	0,  // 33: driftnode.v1.Driftnode.Lock:input_type -> driftnode.v1.Empty
-	0,  // 34: driftnode.v1.Driftnode.Sync:input_type -> driftnode.v1.Empty
-	0,  // 35: driftnode.v1.Driftnode.Stop:input_type -> driftnode.v1.Empty
-	0,  // 36: driftnode.v1.Driftnode.Status:input_type -> driftnode.v1.Empty
-	0,  // 37: driftnode.v1.Driftnode.RotateKey:input_type -> driftnode.v1.Empty
-	28, // 38: driftnode.v1.Driftnode.Subscribe:input_type -> driftnode.v1.SubscribeReq
-	6,  // 39: driftnode.v1.Driftnode.FeedPage:input_type -> driftnode.v1.FeedPageReq
-	2,  // 40: driftnode.v1.Driftnode.Whoami:output_type -> driftnode.v1.WhoamiResp
-	19, // 41: driftnode.v1.Driftnode.Follows:output_type -> driftnode.v1.IdentitiesResp
-	19, // 42: driftnode.v1.Driftnode.Followers:output_type -> driftnode.v1.IdentitiesResp
-	9,  // 43: driftnode.v1.Driftnode.Post:output_type -> driftnode.v1.PostResp
-	11, // 44: driftnode.v1.Driftnode.Like:output_type -> driftnode.v1.LikeResp
-	13, // 45: driftnode.v1.Driftnode.FetchLikes:output_type -> driftnode.v1.FetchLikesResp
-	1,  // 46: driftnode.v1.Driftnode.Profile:output_type -> driftnode.v1.EmptyResp
-	1,  // 47: driftnode.v1.Driftnode.Detail:output_type -> driftnode.v1.EmptyResp
-	17, // 48: driftnode.v1.Driftnode.Zens:output_type -> driftnode.v1.ZensResp
-	4,  // 49: driftnode.v1.Driftnode.Verify:output_type -> driftnode.v1.VerifyResp
-	4,  // 50: driftnode.v1.Driftnode.Unverify:output_type -> driftnode.v1.VerifyResp
-	21, // 51: driftnode.v1.Driftnode.Follow:output_type -> driftnode.v1.FollowResp
-	23, // 52: driftnode.v1.Driftnode.Unfollow:output_type -> driftnode.v1.UnfollowResp
-	25, // 53: driftnode.v1.Driftnode.Unlock:output_type -> driftnode.v1.UnlockResp
-	1,  // 54: driftnode.v1.Driftnode.Lock:output_type -> driftnode.v1.EmptyResp
-	1,  // 55: driftnode.v1.Driftnode.Sync:output_type -> driftnode.v1.EmptyResp
-	1,  // 56: driftnode.v1.Driftnode.Stop:output_type -> driftnode.v1.EmptyResp
-	26, // 57: driftnode.v1.Driftnode.Status:output_type -> driftnode.v1.StatusResp
-	27, // 58: driftnode.v1.Driftnode.RotateKey:output_type -> driftnode.v1.RotateKeyResp
-	29, // 59: driftnode.v1.Driftnode.Subscribe:output_type -> driftnode.v1.Event
-	7,  // 60: driftnode.v1.Driftnode.FeedPage:output_type -> driftnode.v1.FeedPageResp
-	40, // [40:61] is the sub-list for method output_type
-	19, // [19:40] is the sub-list for method input_type
+	3,  // 30: driftnode.v1.Driftnode.Pin:input_type -> driftnode.v1.IdentityReq
+	3,  // 31: driftnode.v1.Driftnode.Unpin:input_type -> driftnode.v1.IdentityReq
+	20, // 32: driftnode.v1.Driftnode.Follow:input_type -> driftnode.v1.FollowReq
+	22, // 33: driftnode.v1.Driftnode.Unfollow:input_type -> driftnode.v1.UnfollowReq
+	24, // 34: driftnode.v1.Driftnode.Unlock:input_type -> driftnode.v1.UnlockReq
+	0,  // 35: driftnode.v1.Driftnode.Lock:input_type -> driftnode.v1.Empty
+	0,  // 36: driftnode.v1.Driftnode.Sync:input_type -> driftnode.v1.Empty
+	0,  // 37: driftnode.v1.Driftnode.Stop:input_type -> driftnode.v1.Empty
+	0,  // 38: driftnode.v1.Driftnode.Status:input_type -> driftnode.v1.Empty
+	0,  // 39: driftnode.v1.Driftnode.RotateKey:input_type -> driftnode.v1.Empty
+	28, // 40: driftnode.v1.Driftnode.Subscribe:input_type -> driftnode.v1.SubscribeReq
+	6,  // 41: driftnode.v1.Driftnode.FeedPage:input_type -> driftnode.v1.FeedPageReq
+	2,  // 42: driftnode.v1.Driftnode.Whoami:output_type -> driftnode.v1.WhoamiResp
+	19, // 43: driftnode.v1.Driftnode.Follows:output_type -> driftnode.v1.IdentitiesResp
+	19, // 44: driftnode.v1.Driftnode.Followers:output_type -> driftnode.v1.IdentitiesResp
+	9,  // 45: driftnode.v1.Driftnode.Post:output_type -> driftnode.v1.PostResp
+	11, // 46: driftnode.v1.Driftnode.Like:output_type -> driftnode.v1.LikeResp
+	13, // 47: driftnode.v1.Driftnode.FetchLikes:output_type -> driftnode.v1.FetchLikesResp
+	1,  // 48: driftnode.v1.Driftnode.Profile:output_type -> driftnode.v1.EmptyResp
+	1,  // 49: driftnode.v1.Driftnode.Detail:output_type -> driftnode.v1.EmptyResp
+	17, // 50: driftnode.v1.Driftnode.Zens:output_type -> driftnode.v1.ZensResp
+	4,  // 51: driftnode.v1.Driftnode.Verify:output_type -> driftnode.v1.VerifyResp
+	4,  // 52: driftnode.v1.Driftnode.Unverify:output_type -> driftnode.v1.VerifyResp
+	4,  // 53: driftnode.v1.Driftnode.Pin:output_type -> driftnode.v1.VerifyResp
+	4,  // 54: driftnode.v1.Driftnode.Unpin:output_type -> driftnode.v1.VerifyResp
+	21, // 55: driftnode.v1.Driftnode.Follow:output_type -> driftnode.v1.FollowResp
+	23, // 56: driftnode.v1.Driftnode.Unfollow:output_type -> driftnode.v1.UnfollowResp
+	25, // 57: driftnode.v1.Driftnode.Unlock:output_type -> driftnode.v1.UnlockResp
+	1,  // 58: driftnode.v1.Driftnode.Lock:output_type -> driftnode.v1.EmptyResp
+	1,  // 59: driftnode.v1.Driftnode.Sync:output_type -> driftnode.v1.EmptyResp
+	1,  // 60: driftnode.v1.Driftnode.Stop:output_type -> driftnode.v1.EmptyResp
+	26, // 61: driftnode.v1.Driftnode.Status:output_type -> driftnode.v1.StatusResp
+	27, // 62: driftnode.v1.Driftnode.RotateKey:output_type -> driftnode.v1.RotateKeyResp
+	29, // 63: driftnode.v1.Driftnode.Subscribe:output_type -> driftnode.v1.Event
+	7,  // 64: driftnode.v1.Driftnode.FeedPage:output_type -> driftnode.v1.FeedPageResp
+	42, // [42:65] is the sub-list for method output_type
+	19, // [19:42] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
 	19, // [19:19] is the sub-list for extension extendee
 	0,  // [0:19] is the sub-list for field type_name

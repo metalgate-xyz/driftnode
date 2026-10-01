@@ -982,3 +982,117 @@ func TestLikesForPosts(t *testing.T) {
 		t.Fatalf("want 0 likes for unknown target, got %d", len(results))
 	}
 }
+
+func TestPinIdentity(t *testing.T) {
+	s := newTestStore(t)
+	a, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unpinned by default.
+	if p, _ := s.IsPinned(a.Identity()); p {
+		t.Fatal("a should start unpinned")
+	}
+	// Pin a, leave b unpinned.
+	if err := s.PinIdentity(a.Identity()); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if p, _ := s.IsPinned(a.Identity()); !p {
+		t.Fatal("a should be pinned")
+	}
+	if p, _ := s.IsPinned(b.Identity()); p {
+		t.Fatal("b should remain unpinned")
+	}
+	// List reflects only a.
+	ids, err := s.PinnedIdentities()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != a.Identity() {
+		t.Fatalf("want [a], got %v", ids)
+	}
+	// Unpin a.
+	if err := s.UnpinIdentity(a.Identity()); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if p, _ := s.IsPinned(a.Identity()); p {
+		t.Fatal("a should be unpinned after unpin")
+	}
+	ids, _ = s.PinnedIdentities()
+	if len(ids) != 0 {
+		t.Fatalf("want empty, got %v", ids)
+	}
+}
+
+func TestBackupIncludesPinnedIdentities(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	peer, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PinIdentity(peer.Identity()); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	bd, err := s.ExportBackup()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(bd.Pinned) != 1 || bd.Pinned[0] != peer.Identity() {
+		t.Fatalf("backup pinned: want [peer], got %v", bd.Pinned)
+	}
+	// Restore into a fresh store.
+	s2 := newTestStore(t)
+	if err := s2.ImportBackup(bd); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if p, _ := s2.IsPinned(peer.Identity()); !p {
+		t.Fatal("peer should be pinned after restore")
+	}
+}
+
+// TestUnfollowClearsPin proves the clear-on-unfollow invariant lives in the
+// shared store.Unfollow: both the daemon and the offline CLI route through
+// it, so unfollowing can never leave a dangling pin on an ex-follow.
+func TestUnfollowClearsPin(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	peer, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := peer.Identity().PubkeyBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pin the peer, then unfollow via the shared method.
+	if err := s.PinIdentity(peer.Identity()); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if _, _, _, err := s.Unfollow(kp, [32]byte(target)); err != nil {
+		t.Fatalf("unfollow: %v", err)
+	}
+	if p, _ := s.IsPinned(peer.Identity()); p {
+		t.Fatal("unfollow should clear the pin on the target")
+	}
+}

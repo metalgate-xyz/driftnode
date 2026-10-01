@@ -256,6 +256,35 @@ func (s *grpcServer) Unverify(ctx context.Context, req *driftnodepb.IdentityReq)
 	return &driftnodepb.VerifyResp{Identity: string(id)}, nil
 }
 
+func (s *grpcServer) Pin(ctx context.Context, req *driftnodepb.IdentityReq) (*driftnodepb.VerifyResp, error) {
+	if req.Identity == "" {
+		return nil, statusErr("identity required")
+	}
+	id, err := core.ParseIdentity(req.Identity)
+	if err != nil {
+		return nil, statusErr(err.Error())
+	}
+	if err := s.d.store.PinIdentity(id); err != nil {
+		return nil, statusErr(err.Error())
+	}
+	s.d.logger.Info("follow pinned", "identity", id)
+	return &driftnodepb.VerifyResp{Identity: string(id)}, nil
+}
+
+func (s *grpcServer) Unpin(ctx context.Context, req *driftnodepb.IdentityReq) (*driftnodepb.VerifyResp, error) {
+	if req.Identity == "" {
+		return nil, statusErr("identity required")
+	}
+	id, err := core.ParseIdentity(req.Identity)
+	if err != nil {
+		return nil, statusErr(err.Error())
+	}
+	if err := s.d.store.UnpinIdentity(id); err != nil {
+		return nil, statusErr(err.Error())
+	}
+	return &driftnodepb.VerifyResp{Identity: string(id)}, nil
+}
+
 func (s *grpcServer) Follow(ctx context.Context, req *driftnodepb.FollowReq) (*driftnodepb.FollowResp, error) {
 	if req.Target == "" {
 		return nil, statusErr("target required")

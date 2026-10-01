@@ -32,6 +32,7 @@ type zen struct {
 	kind     string
 	status   string
 	verified bool
+	pinned   bool
 }
 
 // statusInfo is the daemon health snapshot.
@@ -213,6 +214,7 @@ func zenFromProto(z *driftnodepb.Zen) zen {
 		kind:     z.Kind,
 		status:   z.Status,
 		verified: z.Verified,
+		pinned:   z.Pinned,
 	}
 }
 

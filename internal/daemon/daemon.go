@@ -136,6 +136,7 @@ type zenInfo struct {
 	Kind     string `json:"kind"`     // native_zen or browser
 	Status   string `json:"status"`   // connecting, connected, discovered, error
 	Verified bool   `json:"verified"` // identity confirmed out-of-band (§7)
+	Pinned   bool   `json:"pinned"`   // follow pinned for top sync priority
 }
 
 // subscriber is one open subscribe stream. The daemon pushes typed events
@@ -618,6 +619,9 @@ func (d *Daemon) rehydrateZens() {
 		if v, _ := d.store.IsVerified(id); v {
 			d.zens[tok].Verified = true
 		}
+		if p, _ := d.store.IsPinned(id); p {
+			d.zens[tok].Pinned = true
+		}
 	}
 	d.mu.Unlock()
 }
@@ -849,12 +853,14 @@ func (d *Daemon) snapshot() *driftnodepb.Snapshot {
 func (d *Daemon) snapshotProto() *driftnodepb.Snapshot { return d.snapshot() }
 
 // zenToProto copies one zenInfo into a fresh proto Zen, enriching it with
-// the name/identity/verified state bound to its token. It takes the zenInfo
-// by value so the caller can copy it under d.mu and then enrich without the
-// lock, avoiding a race on fields a concurrent setZenStatus may mutate.
+// the name/identity/verified/pinned state bound to its token. It takes the
+// zenInfo by value so the caller can copy it under d.mu and then enrich
+// without the lock, avoiding a race on fields a concurrent setZenStatus may
+// mutate.
 func (d *Daemon) zenToProto(z zenInfo) *driftnodepb.Zen {
 	out := zenToProtoPlain(z)
 	out.Verified = false
+	out.Pinned = false
 	if id, ok, _ := d.store.RoutingByToken(z.ID); ok {
 		out.Identity = string(id)
 		if name, _ := d.store.DisplayName(id); name != "" {
@@ -862,6 +868,9 @@ func (d *Daemon) zenToProto(z zenInfo) *driftnodepb.Zen {
 		}
 		if v, _ := d.store.IsVerified(id); v {
 			out.Verified = true
+		}
+		if p, _ := d.store.IsPinned(id); p {
+			out.Pinned = true
 		}
 	}
 	return out
@@ -876,6 +885,7 @@ func zenToProtoPlain(z zenInfo) *driftnodepb.Zen {
 		Kind:     z.Kind,
 		Status:   z.Status,
 		Verified: z.Verified,
+		Pinned:   z.Pinned,
 	}
 }
 
@@ -1454,19 +1464,17 @@ func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 // handleUnfollow signs an Unfollow event, removes the routing binding for
 // the target, and drops the zen from the zens map. This is the single
 // "remove a zen" gesture: unfollowing stops the daemon from dialing the
-// identity on future sync rounds.
+// identity on future sync rounds. The shared store.Unfollow clears the pin
+// on the target so the clear-on-unfollow invariant is defined once.
 func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	target, err := core.ResolvePubkey(targetStr)
 	if err != nil {
 		return Response{Error: fmt.Sprintf("resolve target: %s", err)}
 	}
-	if _, _, err := d.store.SignAndAppend(kp, core.ProfileLog, core.Event{
-		Kind:   core.KindUnfollow,
-		Follow: &core.Follow{TargetPubkey: target},
-	}); err != nil {
+	_, _, id, err := d.store.Unfollow(kp, target)
+	if err != nil {
 		return Response{Error: err.Error()}
 	}
-	id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
 	token, hadToken, _ := d.store.Routing(id)
 	if err := d.store.DeleteRouting(id); err != nil {
 		d.logger.Warn("unfollow: delete routing", "zen", id, "err", err)

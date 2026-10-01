@@ -19,6 +19,8 @@ service Driftnode {
   rpc Zens(Empty) returns (ZensResp);
   rpc Verify(IdentityReq) returns (VerifyResp);
   rpc Unverify(IdentityReq) returns (VerifyResp);
+  rpc Pin(IdentityReq) returns (VerifyResp);
+  rpc Unpin(IdentityReq) returns (VerifyResp);
   rpc Follow(FollowReq) returns (FollowResp);
   rpc Unfollow(UnfollowReq) returns (UnfollowResp);
   rpc Unlock(UnlockReq) returns (UnlockResp);
@@ -154,6 +156,7 @@ message Zen {
   string kind = 4;
   string status = 5;
   bool verified = 6;
+  bool pinned = 7;
 }
 
 // ZensResp lists known zens.

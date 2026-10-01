@@ -318,6 +318,77 @@ func TestFollowUnfollow(t *testing.T) {
 	}
 }
 
+func TestZensPinUnpinOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	peerKP, _ := core.NewKeyPair()
+	peerID := string(peerKP.Identity())
+
+	// Pin reports success.
+	out, err := runCLI(t, dbPath, []string{"zens", "pin", peerID})
+	if err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if !strings.Contains(out, "pinned") {
+		t.Fatalf("pin output: %q", out)
+	}
+
+	// The pin is persisted in the store.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if p, _ := s.IsPinned(core.Identity(peerID)); !p {
+		t.Fatal("peer should be pinned in the store")
+	}
+	s.Close()
+
+	// Unpin reports success and clears the store flag.
+	out, err = runCLI(t, dbPath, []string{"zens", "unpin", peerID})
+	if err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	if !strings.Contains(out, "unpinned") {
+		t.Fatalf("unpin output: %q", out)
+	}
+	s, err = store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if p, _ := s.IsPinned(core.Identity(peerID)); p {
+		t.Fatal("peer should be unpinned in the store")
+	}
+}
+
+func TestUnfollowClearsPinOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	peerKP, _ := core.NewKeyPair()
+	peerID := string(peerKP.Identity())
+
+	if _, err := runCLI(t, dbPath, []string{"zens", "pin", peerID}); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if _, err := runCLI(t, dbPath, []string{"unfollow", peerID, "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("unfollow: %v", err)
+	}
+
+	// Unfollowing must clear the pin via the shared store path.
+	s, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	if p, _ := s.IsPinned(core.Identity(peerID)); p {
+		t.Fatal("unfollow should clear the pin on the target")
+	}
+}
+
 func TestFollowsAndFollowersOffline(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "node.db")
 	_, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"})

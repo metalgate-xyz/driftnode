@@ -30,6 +30,8 @@ const (
 	Driftnode_Zens_FullMethodName       = "/driftnode.v1.Driftnode/Zens"
 	Driftnode_Verify_FullMethodName     = "/driftnode.v1.Driftnode/Verify"
 	Driftnode_Unverify_FullMethodName   = "/driftnode.v1.Driftnode/Unverify"
+	Driftnode_Pin_FullMethodName        = "/driftnode.v1.Driftnode/Pin"
+	Driftnode_Unpin_FullMethodName      = "/driftnode.v1.Driftnode/Unpin"
 	Driftnode_Follow_FullMethodName     = "/driftnode.v1.Driftnode/Follow"
 	Driftnode_Unfollow_FullMethodName   = "/driftnode.v1.Driftnode/Unfollow"
 	Driftnode_Unlock_FullMethodName     = "/driftnode.v1.Driftnode/Unlock"
@@ -61,6 +63,8 @@ type DriftnodeClient interface {
 	Zens(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ZensResp, error)
 	Verify(ctx context.Context, in *IdentityReq, opts ...grpc.CallOption) (*VerifyResp, error)
 	Unverify(ctx context.Context, in *IdentityReq, opts ...grpc.CallOption) (*VerifyResp, error)
+	Pin(ctx context.Context, in *IdentityReq, opts ...grpc.CallOption) (*VerifyResp, error)
+	Unpin(ctx context.Context, in *IdentityReq, opts ...grpc.CallOption) (*VerifyResp, error)
 	Follow(ctx context.Context, in *FollowReq, opts ...grpc.CallOption) (*FollowResp, error)
 	Unfollow(ctx context.Context, in *UnfollowReq, opts ...grpc.CallOption) (*UnfollowResp, error)
 	Unlock(ctx context.Context, in *UnlockReq, opts ...grpc.CallOption) (*UnlockResp, error)
@@ -185,6 +189,26 @@ func (c *driftnodeClient) Unverify(ctx context.Context, in *IdentityReq, opts ..
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(VerifyResp)
 	err := c.cc.Invoke(ctx, Driftnode_Unverify_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *driftnodeClient) Pin(ctx context.Context, in *IdentityReq, opts ...grpc.CallOption) (*VerifyResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyResp)
+	err := c.cc.Invoke(ctx, Driftnode_Pin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *driftnodeClient) Unpin(ctx context.Context, in *IdentityReq, opts ...grpc.CallOption) (*VerifyResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(VerifyResp)
+	err := c.cc.Invoke(ctx, Driftnode_Unpin_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -319,6 +343,8 @@ type DriftnodeServer interface {
 	Zens(context.Context, *Empty) (*ZensResp, error)
 	Verify(context.Context, *IdentityReq) (*VerifyResp, error)
 	Unverify(context.Context, *IdentityReq) (*VerifyResp, error)
+	Pin(context.Context, *IdentityReq) (*VerifyResp, error)
+	Unpin(context.Context, *IdentityReq) (*VerifyResp, error)
 	Follow(context.Context, *FollowReq) (*FollowResp, error)
 	Unfollow(context.Context, *UnfollowReq) (*UnfollowResp, error)
 	Unlock(context.Context, *UnlockReq) (*UnlockResp, error)
@@ -371,6 +397,12 @@ func (UnimplementedDriftnodeServer) Verify(context.Context, *IdentityReq) (*Veri
 }
 func (UnimplementedDriftnodeServer) Unverify(context.Context, *IdentityReq) (*VerifyResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Unverify not implemented")
+}
+func (UnimplementedDriftnodeServer) Pin(context.Context, *IdentityReq) (*VerifyResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Pin not implemented")
+}
+func (UnimplementedDriftnodeServer) Unpin(context.Context, *IdentityReq) (*VerifyResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Unpin not implemented")
 }
 func (UnimplementedDriftnodeServer) Follow(context.Context, *FollowReq) (*FollowResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method Follow not implemented")
@@ -621,6 +653,42 @@ func _Driftnode_Unverify_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Driftnode_Pin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IdentityReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DriftnodeServer).Pin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Driftnode_Pin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DriftnodeServer).Pin(ctx, req.(*IdentityReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Driftnode_Unpin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IdentityReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DriftnodeServer).Unpin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Driftnode_Unpin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DriftnodeServer).Unpin(ctx, req.(*IdentityReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Driftnode_Follow_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(FollowReq)
 	if err := dec(in); err != nil {
@@ -844,6 +912,14 @@ var Driftnode_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Unverify",
 			Handler:    _Driftnode_Unverify_Handler,
+		},
+		{
+			MethodName: "Pin",
+			Handler:    _Driftnode_Pin_Handler,
+		},
+		{
+			MethodName: "Unpin",
+			Handler:    _Driftnode_Unpin_Handler,
 		},
 		{
 			MethodName: "Follow",

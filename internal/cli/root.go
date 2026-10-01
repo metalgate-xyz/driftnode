@@ -607,13 +607,11 @@ func unfollowCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
-				Kind:   core.KindUnfollow,
-				Follow: &core.Follow{TargetPubkey: target},
-			}); err != nil {
+			if _, _, id, err := s.Unfollow(kp, target); err != nil {
 				return err
+			} else {
+				cmd.Printf("unfollowed %s\n", id)
 			}
-			cmd.Printf("unfollowed %s\n", core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
 			return nil
 		},
 	}
@@ -1398,7 +1396,7 @@ func zensCmd() *cobra.Command {
 		Short: "Show your network: connected zens",
 	}
 	addDBFlagPersistent(c)
-	c.AddCommand(zensListCmd(), zensVerifyCmd(), zensUnverifyCmd())
+	c.AddCommand(zensListCmd(), zensVerifyCmd(), zensUnverifyCmd(), zensPinCmd(), zensUnpinCmd())
 	return c
 }
 
@@ -1427,14 +1425,17 @@ func zensListCmd() *cobra.Command {
 				if identity == "" {
 					identity = "(unknown)"
 				}
-				mark := " "
+				mark := "  "
 				if z.Verified {
-					mark = "✓"
+					mark = "✓ "
+				}
+				if z.Pinned {
+					mark = strings.TrimSuffix(mark, " ") + "★ "
 				}
 				if z.Name != "" {
-					cmd.Printf("%s %s  %s  %s (%s)\n", mark, z.Status, z.Name, identity, z.Kind)
+					cmd.Printf("%s%s  %s  %s (%s)\n", mark, z.Status, z.Name, identity, z.Kind)
 				} else {
-					cmd.Printf("%s %s  %s (%s)\n", mark, z.Status, identity, z.Kind)
+					cmd.Printf("%s%s  %s (%s)\n", mark, z.Status, identity, z.Kind)
 				}
 			}
 			return nil
@@ -1508,6 +1509,77 @@ func zensUnverifyCmd() *cobra.Command {
 				return err
 			}
 			cmd.Printf("unverified %s\n", id)
+			return nil
+		},
+	}
+}
+
+func zensPinCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pin <identity>",
+		Short: "Pin a followed identity for top sync priority (local state, never synced)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := core.ParseIdentity(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid identity: %w", err)
+			}
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				_, err := cl.Pin(context.Background(), &driftnodepb.IdentityReq{Identity: string(id)})
+				if err == nil {
+					cmd.Printf("pinned %s\n", id)
+					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			// Offline: write directly to the store.
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if err := s.PinIdentity(id); err != nil {
+				return err
+			}
+			cmd.Printf("pinned %s\n", id)
+			return nil
+		},
+	}
+}
+
+func zensUnpinCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unpin <identity>",
+		Short: "Remove a pin from an identity (also removed automatically on unfollow)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := core.ParseIdentity(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid identity: %w", err)
+			}
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				_, err := cl.Unpin(context.Background(), &driftnodepb.IdentityReq{Identity: string(id)})
+				if err == nil {
+					cmd.Printf("unpinned %s\n", id)
+					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if err := s.UnpinIdentity(id); err != nil {
+				return err
+			}
+			cmd.Printf("unpinned %s\n", id)
 			return nil
 		},
 	}

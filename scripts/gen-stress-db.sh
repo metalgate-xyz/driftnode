@@ -2,7 +2,8 @@
 # gen-stress-db.sh - Generate a large driftnode store for TUI stress testing.
 #
 # Hardcoded huge numbers, no knobs. Produces ~650 MB and a feed with ~1M
-# entries across 10k followed zens. Run from the repo root.
+# entries across 10k followed zens, with likes on 20% of posts and the local
+# identity pinning 5% of followed zens. Run from the repo root.
 #
 #   bash scripts/gen-stress-db.sh                 write data/stress.db
 #   bash scripts/gen-stress-db.sh /tmp/big.db     write to a custom path
@@ -18,4 +19,6 @@ go run scripts/gentestdb.go \
   -zens 10000 \
   -posts 100 \
   -followers 0.3 \
+  -likes 0.3 \
+  -pins 0.1 \
   -own-posts 50

@@ -109,6 +109,62 @@ func TestVerifyZens(t *testing.T) {
 	}
 }
 
+func TestPinZens(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	d.Start(sock)
+	defer d.Stop()
+
+	peerKP, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	peerID := peerKP.Identity()
+	d.upsertZen("p1", "native", "connected")
+	if err := s.PutRouting(peerID, "p1"); err != nil {
+		t.Fatalf("PutRouting: %v", err)
+	}
+
+	cl, _ := testClient(t, sock)
+
+	// Before pin, the zen is not marked pinned.
+	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
+	if err != nil {
+		t.Fatalf("zens: %v", err)
+	}
+	if len(resp.Zens) != 1 {
+		t.Fatalf("want 1 zen, got %d", len(resp.Zens))
+	}
+	if resp.Zens[0].Pinned {
+		t.Fatal("zen should not be pinned before pin RPC")
+	}
+
+	// Pin the peer identity.
+	if _, err := cl.Pin(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	// After pin, the zen is marked pinned.
+	resp, err = cl.Zens(context.Background(), &driftnodepb.Empty{})
+	if err != nil {
+		t.Fatalf("zens after pin: %v", err)
+	}
+	if !resp.Zens[0].Pinned {
+		t.Fatal("zen should be pinned after pin RPC")
+	}
+
+	// Unpin clears the flag.
+	if _, err := cl.Unpin(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err != nil {
+		t.Fatalf("unpin: %v", err)
+	}
+	resp, _ = cl.Zens(context.Background(), &driftnodepb.Empty{})
+	if resp.Zens[0].Pinned {
+		t.Fatal("zen should not be pinned after unpin")
+	}
+}
+
 // TestZensShowsIdentityWithoutName covers a discovered zen whose exchange
 // ref carried an identity but no name hint (the common case before the
 // crawler fetches the ProfileLog). The zens RPC must surface the identity

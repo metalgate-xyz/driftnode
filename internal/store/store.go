@@ -24,7 +24,9 @@ import (
 // per-author buckets for the same dedup property. Routing maps a followed
 // identity to the tailcat token currently used to reach it. Verified holds
 // identities the user has confirmed out-of-band (§7), so a later connection
-// under a different identity can be flagged as a possible MITM.
+// under a different identity can be flagged as a possible MITM. Pinned holds
+// follows the user has marked for top sync priority; a pin is tied to the
+// follow edge and cleared on unfollow.
 var (
 	bucketMeta      = []byte("meta")
 	bucketKey       = []byte("key")       // single EncryptedKey value under key "key"
@@ -33,6 +35,7 @@ var (
 	bucketMedia     = []byte("media")     // content-addressed blobs
 	bucketRouting   = []byte("routing")   // identity -> tailcat token
 	bucketVerified  = []byte("verified")  // identity -> presence (out-of-band confirmed)
+	bucketPinned    = []byte("pinned")    // identity -> presence (follow pinned for sync priority)
 	bucketTransport = []byte("transport") // tailcat private key, so the node's address token stays stable across restarts
 	bucketCursor    = []byte("cursor")    // per-(author,log) high-water timestamp of last successful pull
 )
@@ -76,7 +79,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketTransport, bucketCursor} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketPinned, bucketTransport, bucketCursor} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -320,14 +323,19 @@ func (s *Store) ExportBackup() (*core.BackupData, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &core.BackupData{Key: ek, OwnLogs: events, Verified: verified}, nil
+	pinned, err := s.PinnedIdentities()
+	if err != nil {
+		return nil, err
+	}
+	return &core.BackupData{Key: ek, OwnLogs: events, Verified: verified, Pinned: pinned}, nil
 }
 
 // ImportBackup merges a backup into the store: replaces the keypair (via the
 // CLI's separate PutKey call after decryption) and merges own logs as a set
 // union of signed events (§8). AppendOwnEvent dedups by event ID, so this is
-// idempotent. Verified identities replace the local set: they are trust
-// decisions, not derived data, so the backup's view wins.
+// idempotent. Verified identities and pinned follows replace the local sets:
+// they are local trust and priority decisions, not derived data, so the
+// backup's view wins.
 func (s *Store) ImportBackup(bd *core.BackupData) error {
 	if bd.Key == nil {
 		return errors.New("backup missing key")
@@ -340,6 +348,11 @@ func (s *Store) ImportBackup(bd *core.BackupData) error {
 	if bd.Verified != nil {
 		if err := s.PutVerifiedIdentities(bd.Verified); err != nil {
 			return fmt.Errorf("restore verified: %w", err)
+		}
+	}
+	if bd.Pinned != nil {
+		if err := s.PutPinnedIdentities(bd.Pinned); err != nil {
+			return fmt.Errorf("restore pinned: %w", err)
 		}
 	}
 	return nil
@@ -1076,6 +1089,62 @@ func (s *Store) VerifiedIdentities() ([]core.Identity, error) {
 func (s *Store) PutVerifiedIdentities(ids []core.Identity) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucketVerified)
+		if err := b.ForEach(func(k, v []byte) error { return b.Delete(k) }); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if err := b.Put([]byte(id), []byte{1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// PinIdentity marks a follow as pinned for top sync priority. A pin is local
+// state, never synced or signed, and is tied to the follow edge: unfollowing
+// the identity clears it (UnfollowAndUnpin). Backup-critical, since losing
+// the pin set would silently downgrade high-priority follows on restore.
+func (s *Store) PinIdentity(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPinned).Put([]byte(id), []byte{1})
+	})
+}
+
+// UnpinIdentity removes a sync-priority pin.
+func (s *Store) UnpinIdentity(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPinned).Delete([]byte(id))
+	})
+}
+
+// IsPinned reports whether a follow is pinned for sync priority.
+func (s *Store) IsPinned(id core.Identity) (bool, error) {
+	var present bool
+	err := s.db.View(func(tx *bolt.Tx) error {
+		present = tx.Bucket(bucketPinned).Get([]byte(id)) != nil
+		return nil
+	})
+	return present, err
+}
+
+// PinnedIdentities returns every identity pinned for sync priority, used for
+// backup export, the zens view, and the weight formula's pin(author) metric.
+func (s *Store) PinnedIdentities() ([]core.Identity, error) {
+	var out []core.Identity
+	err := s.db.View(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketPinned).ForEach(func(k, v []byte) error {
+			out = append(out, core.Identity(k))
+			return nil
+		})
+	})
+	return out, err
+}
+
+// PutPinnedIdentities replaces the pinned set, used by backup import.
+func (s *Store) PutPinnedIdentities(ids []core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketPinned)
 		if err := b.ForEach(func(k, v []byte) error { return b.Delete(k) }); err != nil {
 			return err
 		}
