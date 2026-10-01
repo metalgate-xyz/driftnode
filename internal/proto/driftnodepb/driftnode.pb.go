@@ -954,7 +954,6 @@ type Zen struct {
 	Kind          string                 `protobuf:"bytes,4,opt,name=kind,proto3" json:"kind,omitempty"`
 	Status        string                 `protobuf:"bytes,5,opt,name=status,proto3" json:"status,omitempty"`
 	Verified      bool                   `protobuf:"varint,6,opt,name=verified,proto3" json:"verified,omitempty"`
-	Pinned        bool                   `protobuf:"varint,7,opt,name=pinned,proto3" json:"pinned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1031,13 +1030,6 @@ func (x *Zen) GetVerified() bool {
 	return false
 }
 
-func (x *Zen) GetPinned() bool {
-	if x != nil {
-		return x.Pinned
-	}
-	return false
-}
-
 // ZensResp lists known zens.
 type ZensResp struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1083,11 +1075,15 @@ func (x *ZensResp) GetZens() []*Zen {
 	return nil
 }
 
-// Identity is one row of the follows or followers list.
+// Identity is one row of the follows or followers list. Verified and pinned
+// are projected from the local store (the single source of truth): verified
+// applies to any identity, pinned only to a follow edge.
 type Identity struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Identity      string                 `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
 	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Verified      bool                   `protobuf:"varint,3,opt,name=verified,proto3" json:"verified,omitempty"`
+	Pinned        bool                   `protobuf:"varint,4,opt,name=pinned,proto3" json:"pinned,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1134,6 +1130,20 @@ func (x *Identity) GetName() string {
 		return x.Name
 	}
 	return ""
+}
+
+func (x *Identity) GetVerified() bool {
+	if x != nil {
+		return x.Verified
+	}
+	return false
+}
+
+func (x *Identity) GetPinned() bool {
+	if x != nil {
+		return x.Pinned
+	}
+	return false
 }
 
 // IdentitiesResp lists identities.
@@ -2261,20 +2271,21 @@ const file_driftnode_proto_rawDesc = "" +
 	"\blocation\x18\x04 \x01(\tR\blocation\x12\x1e\n" +
 	"\n" +
 	"passphrase\x18\x05 \x01(\tR\n" +
-	"passphrase\"\xa5\x01\n" +
+	"passphrase\"\x8d\x01\n" +
 	"\x03Zen\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1a\n" +
 	"\bidentity\x18\x02 \x01(\tR\bidentity\x12\x12\n" +
 	"\x04name\x18\x03 \x01(\tR\x04name\x12\x12\n" +
 	"\x04kind\x18\x04 \x01(\tR\x04kind\x12\x16\n" +
 	"\x06status\x18\x05 \x01(\tR\x06status\x12\x1a\n" +
-	"\bverified\x18\x06 \x01(\bR\bverified\x12\x16\n" +
-	"\x06pinned\x18\a \x01(\bR\x06pinned\"1\n" +
+	"\bverified\x18\x06 \x01(\bR\bverified\"1\n" +
 	"\bZensResp\x12%\n" +
-	"\x04zens\x18\x01 \x03(\v2\x11.driftnode.v1.ZenR\x04zens\":\n" +
+	"\x04zens\x18\x01 \x03(\v2\x11.driftnode.v1.ZenR\x04zens\"n\n" +
 	"\bIdentity\x12\x1a\n" +
 	"\bidentity\x18\x01 \x01(\tR\bidentity\x12\x12\n" +
-	"\x04name\x18\x02 \x01(\tR\x04name\"H\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name\x12\x1a\n" +
+	"\bverified\x18\x03 \x01(\bR\bverified\x12\x16\n" +
+	"\x06pinned\x18\x04 \x01(\bR\x06pinned\"H\n" +
 	"\x0eIdentitiesResp\x126\n" +
 	"\n" +
 	"identities\x18\x01 \x03(\v2\x16.driftnode.v1.IdentityR\n" +

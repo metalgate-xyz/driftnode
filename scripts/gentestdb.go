@@ -323,29 +323,17 @@ func appendOwnProfile(s *store.Store, kp *core.KeyPair, name string) error {
 
 // followLocal appends a Follow event in the local identity's own ProfileLog
 // targeting the remote identity, adding it to the follow graph that
-// AllPosts and the Follows tab read.
+// AllPosts and the Follows tab read. Uses store.Follow so the local
+// follow-state cache stays in sync.
 func followLocal(s *store.Store, own *core.KeyPair, target core.Identity) error {
-	seq, err := s.OwnEventCount(core.ProfileLog)
-	if err != nil {
-		return err
-	}
 	pub, err := target.PubkeyBytes()
 	if err != nil {
 		return err
 	}
 	var arr [32]byte
 	copy(arr[:], pub)
-	se, err := own.Sign(core.Event{
-		Kind:      core.KindFollow,
-		Log:       core.ProfileLog,
-		Timestamp: core.Now64(),
-		Sequence:  seq + 1,
-		Follow:    &core.Follow{TargetPubkey: arr},
-	})
-	if err != nil {
-		return err
-	}
-	return s.AppendOwnEvent(core.ProfileLog, se)
+	_, _, _, err = s.Follow(own, arr)
+	return err
 }
 
 // zenName builds a readable, stable display name from the index, so the

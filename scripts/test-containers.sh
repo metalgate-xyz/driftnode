@@ -285,7 +285,7 @@ printf "\n===== Phase 9: Follow graph =====\n"
 
 expect_count() { # <node> <subcmd> <want>
   local got
-  got=$(dn "$1" "$2" | grep -c '^driftnode:')
+  got=$(dn "$1" "$2" | grep -c 'driftnode:')
   [[ "$got" -eq "$3" ]] && ok "$1 $2 = $3" || bad "$1 $2 = $3" "got $got"
 }
 expect_has() { # <node> <subcmd> <identity>

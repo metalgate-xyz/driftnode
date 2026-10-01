@@ -8,14 +8,14 @@ import (
 
 // renderZen renders one zen row as a single line, mirroring the feed's
 // layout: the name in the accent color (falling back to the identity when no
-// name is set), a verified check, a pin marker, the colored status word, and
-// the identity in the muted color. When selected, each segment is re-styled
-// (accent on a highlighted background) so ANSI resets don't defeat the
-// highlight.
+// name is set), a verified check, a pin marker (follows only), the colored
+// status word, and the identity in the muted color. When selected, each
+// segment is re-styled (accent on a highlighted background) so ANSI resets
+// don't defeat the highlight.
 //
-// Follows and followers are the same shape with no status and no verified
-// flag, so they share this renderer: an empty status simply omits the status
-// word, leaving name and identity.
+// Follows and followers share this renderer. The zens tab never sets the
+// pinned flag (a pin is a follow-edge property), so the marker appears only
+// on the follows list. An empty status simply omits the status word.
 func renderZen(z zen, selected bool) string {
 	name := z.name
 	if name == "" {

@@ -214,7 +214,6 @@ func zenFromProto(z *driftnodepb.Zen) zen {
 		kind:     z.Kind,
 		status:   z.Status,
 		verified: z.Verified,
-		pinned:   z.Pinned,
 	}
 }
 
@@ -225,7 +224,13 @@ func identitiesFromProto(ids []*driftnodepb.Identity) []zen {
 		if name == "" {
 			name = shortID(id.Identity)
 		}
-		out = append(out, zen{name: name, identity: id.Identity, id: id.Identity})
+		out = append(out, zen{
+			name:     name,
+			identity: id.Identity,
+			id:       id.Identity,
+			verified: id.Verified,
+			pinned:   id.Pinned,
+		})
 	}
 	return out
 }

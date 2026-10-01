@@ -326,6 +326,18 @@ func TestZensPinUnpinOffline(t *testing.T) {
 	peerKP, _ := core.NewKeyPair()
 	peerID := string(peerKP.Identity())
 
+	// Must follow before pinning.
+	if _, err := runCLI(t, dbPath, []string{"follow", peerID, "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+
+	// Pinning a non-follow fails.
+	otherKP, _ := core.NewKeyPair()
+	otherID := string(otherKP.Identity())
+	if _, err := runCLI(t, dbPath, []string{"zens", "pin", otherID}); err == nil {
+		t.Fatal("pinning a non-follow should fail")
+	}
+
 	// Pin reports success.
 	out, err := runCLI(t, dbPath, []string{"zens", "pin", peerID})
 	if err != nil {
@@ -371,6 +383,10 @@ func TestUnfollowClearsPinOffline(t *testing.T) {
 	peerKP, _ := core.NewKeyPair()
 	peerID := string(peerKP.Identity())
 
+	// Must follow before pinning.
+	if _, err := runCLI(t, dbPath, []string{"follow", peerID, "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
 	if _, err := runCLI(t, dbPath, []string{"zens", "pin", peerID}); err != nil {
 		t.Fatalf("pin: %v", err)
 	}

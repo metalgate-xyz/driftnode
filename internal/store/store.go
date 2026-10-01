@@ -24,24 +24,60 @@ import (
 // per-author buckets for the same dedup property. Routing maps a followed
 // identity to the tailcat token currently used to reach it. Verified holds
 // identities the user has confirmed out-of-band (§7), so a later connection
-// under a different identity can be flagged as a possible MITM. Pinned holds
-// follows the user has marked for top sync priority; a pin is tied to the
-// follow edge and cleared on unfollow.
+// under a different identity can be flagged as a possible MITM. FollowState
+// is a local identity-keyed cache of the follow graph plus per-follow pin
+// flags: followed=1 when the identity is in the follow graph (derived from
+// the signed, synced ProfileLog), pinned=1 when the user has marked the
+// follow for top sync priority. It is rebuilt from the log on backup restore.
 var (
-	bucketMeta      = []byte("meta")
-	bucketKey       = []byte("key")       // single EncryptedKey value under key "key"
-	bucketOwn       = []byte("own")       // own logs: sub-buckets per log name
-	bucketCrawl     = []byte("crawl")     // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
-	bucketMedia     = []byte("media")     // content-addressed blobs
-	bucketRouting   = []byte("routing")   // identity -> tailcat token
-	bucketVerified  = []byte("verified")  // identity -> presence (out-of-band confirmed)
-	bucketPinned    = []byte("pinned")    // identity -> presence (follow pinned for sync priority)
-	bucketTransport = []byte("transport") // tailcat private key, so the node's address token stays stable across restarts
-	bucketCursor    = []byte("cursor")    // per-(author,log) high-water timestamp of last successful pull
+	bucketMeta       = []byte("meta")
+	bucketKey        = []byte("key")        // single EncryptedKey value under key "key"
+	bucketOwn        = []byte("own")        // own logs: sub-buckets per log name
+	bucketCrawl      = []byte("crawl")      // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
+	bucketMedia      = []byte("media")      // content-addressed blobs
+	bucketRouting    = []byte("routing")    // identity -> tailcat token
+	bucketVerified   = []byte("verified")   // identity -> presence (out-of-band confirmed)
+	bucketFollowState = []byte("followstate") // identity -> [2]byte{followed, pinned}
+	bucketTransport  = []byte("transport")  // tailcat private key, so the node's address token stays stable across restarts
+	bucketCursor     = []byte("cursor")     // per-(author,log) high-water timestamp of last successful pull
 )
 
 // meta keys
 var metaKeyIdentity = []byte("identity") // own identity string
+
+// ErrPinRequiresFollow is returned by PinIdentity when the identity is not in
+// the current follow graph. A pin is a property of the follow edge.
+var ErrPinRequiresFollow = errors.New("can only pin a followed identity")
+
+// followState is the two local flags cached per identity: whether it is
+// followed and whether the follow is pinned. Stored as a fixed 2-byte value
+// so reads and writes are single-record and the flags can't drift apart.
+type followState struct {
+	followed bool
+	pinned   bool
+}
+
+func (f followState) encode() []byte {
+	out := make([]byte, 2)
+	if f.followed {
+		out[0] = 1
+	}
+	if f.pinned {
+		out[1] = 1
+	}
+	return out
+}
+
+func decodeFollowState(v []byte) followState {
+	var f followState
+	if len(v) >= 2 && v[0] != 0 {
+		f.followed = true
+	}
+	if len(v) >= 2 && v[1] != 0 {
+		f.pinned = true
+	}
+	return f
+}
 
 // Store is the local persistent store. It wraps a bbolt DB.
 type Store struct {
@@ -79,7 +115,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketPinned, bucketTransport, bucketCursor} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketCrawl, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -333,9 +369,9 @@ func (s *Store) ExportBackup() (*core.BackupData, error) {
 // ImportBackup merges a backup into the store: replaces the keypair (via the
 // CLI's separate PutKey call after decryption) and merges own logs as a set
 // union of signed events (§8). AppendOwnEvent dedups by event ID, so this is
-// idempotent. Verified identities and pinned follows replace the local sets:
-// they are local trust and priority decisions, not derived data, so the
-// backup's view wins.
+// idempotent. Verified identities replace the local set. The follow-state
+// cache is rebuilt from the restored ProfileLog, then the backup's pins are
+// applied onto the rebuilt follow edges (a pin requires a follow).
 func (s *Store) ImportBackup(bd *core.BackupData) error {
 	if bd.Key == nil {
 		return errors.New("backup missing key")
@@ -350,12 +386,44 @@ func (s *Store) ImportBackup(bd *core.BackupData) error {
 			return fmt.Errorf("restore verified: %w", err)
 		}
 	}
+	if err := s.rebuildFollowState(); err != nil {
+		return fmt.Errorf("rebuild follow state: %w", err)
+	}
 	if bd.Pinned != nil {
 		if err := s.PutPinnedIdentities(bd.Pinned); err != nil {
 			return fmt.Errorf("restore pinned: %w", err)
 		}
 	}
 	return nil
+}
+
+// rebuildFollowState reconstructs the follow-state cache from the own
+// ProfileLog, clearing and re-deriving which identities are currently
+// followed. Pins are not restored here: PutPinnedIdentities applies them
+// after the follow edges exist.
+func (s *Store) rebuildFollowState() error {
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		return err
+	}
+	fs := core.NewLog(events).FollowSet()
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFollowState)
+		if err := b.ForEach(func(k, v []byte) error { return b.Delete(k) }); err != nil {
+			return err
+		}
+		var idErr error
+		fs.Each(func(target [32]byte) {
+			if idErr != nil {
+				return
+			}
+			identity := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
+			if err := b.Put([]byte(identity), followState{followed: true}.encode()); err != nil {
+				idErr = err
+			}
+		})
+		return idErr
+	})
 }
 
 // PutEncryptedKey stores an encrypted keypair directly (used by `key import`),
@@ -1101,55 +1169,110 @@ func (s *Store) PutVerifiedIdentities(ids []core.Identity) error {
 	})
 }
 
-// PinIdentity marks a follow as pinned for top sync priority. A pin is local
-// state, never synced or signed, and is tied to the follow edge: unfollowing
-// the identity clears it (UnfollowAndUnpin). Backup-critical, since losing
-// the pin set would silently downgrade high-priority follows on restore.
-func (s *Store) PinIdentity(id core.Identity) error {
+// putFollowState writes the cached follow+pin flags for an identity.
+func (s *Store) putFollowState(id core.Identity, st followState) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketPinned).Put([]byte(id), []byte{1})
+		return tx.Bucket(bucketFollowState).Put([]byte(id), st.encode())
 	})
 }
 
-// UnpinIdentity removes a sync-priority pin.
+// deleteFollowState removes the cached follow+pin flags for an identity,
+// clearing both the follow edge and any pin on it.
+func (s *Store) deleteFollowState(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		return tx.Bucket(bucketFollowState).Delete([]byte(id))
+	})
+}
+
+// getFollowState reads the cached follow+pin flags for an identity.
+func (s *Store) getFollowState(id core.Identity) (followState, error) {
+	var st followState
+	err := s.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket(bucketFollowState).Get([]byte(id))
+		st = decodeFollowState(v)
+		return nil
+	})
+	return st, err
+}
+
+// IsFollowed reports whether an identity is in the current follow graph,
+// read from the local follow-state cache. The cache is kept in sync with the
+// signed, synced ProfileLog by store.Follow and store.Unfollow, and rebuilt
+// from the log on backup restore.
+func (s *Store) IsFollowed(id core.Identity) (bool, error) {
+	st, err := s.getFollowState(id)
+	return st.followed, err
+}
+
+// PinIdentity marks a follow as pinned for top sync priority. A pin is a
+// property of the follow edge, so the identity must be followed: pinning a
+// non-follow is rejected. A pin is local state, never synced or signed, and
+// is cleared on unfollow. Backup-critical, since losing the pin set would
+// silently downgrade high-priority follows on restore.
+func (s *Store) PinIdentity(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFollowState)
+		v := b.Get([]byte(id))
+		st := decodeFollowState(v)
+		if !st.followed {
+			return ErrPinRequiresFollow
+		}
+		st.pinned = true
+		return b.Put([]byte(id), st.encode())
+	})
+}
+
+// UnpinIdentity removes a sync-priority pin from a follow.
 func (s *Store) UnpinIdentity(id core.Identity) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketPinned).Delete([]byte(id))
+		b := tx.Bucket(bucketFollowState)
+		v := b.Get([]byte(id))
+		st := decodeFollowState(v)
+		st.pinned = false
+		if !st.followed && !st.pinned {
+			return b.Delete([]byte(id))
+		}
+		return b.Put([]byte(id), st.encode())
 	})
 }
 
 // IsPinned reports whether a follow is pinned for sync priority.
 func (s *Store) IsPinned(id core.Identity) (bool, error) {
-	var present bool
-	err := s.db.View(func(tx *bolt.Tx) error {
-		present = tx.Bucket(bucketPinned).Get([]byte(id)) != nil
-		return nil
-	})
-	return present, err
+	st, err := s.getFollowState(id)
+	return st.pinned, err
 }
 
-// PinnedIdentities returns every identity pinned for sync priority, used for
-// backup export, the zens view, and the weight formula's pin(author) metric.
+// PinnedIdentities returns every followed identity pinned for sync priority,
+// used for backup export, the follows view, and the weight formula's
+// pin(author) metric.
 func (s *Store) PinnedIdentities() ([]core.Identity, error) {
 	var out []core.Identity
 	err := s.db.View(func(tx *bolt.Tx) error {
-		return tx.Bucket(bucketPinned).ForEach(func(k, v []byte) error {
-			out = append(out, core.Identity(k))
+		return tx.Bucket(bucketFollowState).ForEach(func(k, v []byte) error {
+			if decodeFollowState(v).pinned {
+				out = append(out, core.Identity(k))
+			}
 			return nil
 		})
 	})
 	return out, err
 }
 
-// PutPinnedIdentities replaces the pinned set, used by backup import.
+// PutPinnedIdentities applies a set of pins onto existing follow edges, used
+// by backup import after the follow-state cache has been rebuilt from the
+// restored ProfileLog. Identities not in the follow graph are skipped, since
+// a pin requires a follow.
 func (s *Store) PutPinnedIdentities(ids []core.Identity) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketPinned)
-		if err := b.ForEach(func(k, v []byte) error { return b.Delete(k) }); err != nil {
-			return err
-		}
+		b := tx.Bucket(bucketFollowState)
 		for _, id := range ids {
-			if err := b.Put([]byte(id), []byte{1}); err != nil {
+			v := b.Get([]byte(id))
+			st := decodeFollowState(v)
+			if !st.followed {
+				continue
+			}
+			st.pinned = true
+			if err := b.Put([]byte(id), st.encode()); err != nil {
 				return err
 			}
 		}

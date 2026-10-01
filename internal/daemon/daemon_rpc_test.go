@@ -122,23 +122,30 @@ func TestPinZens(t *testing.T) {
 		t.Fatalf("NewKeyPair: %v", err)
 	}
 	peerID := peerKP.Identity()
-	d.upsertZen("p1", "native", "connected")
-	if err := s.PutRouting(peerID, "p1"); err != nil {
-		t.Fatalf("PutRouting: %v", err)
-	}
 
 	cl, _ := testClient(t, sock)
 
-	// Before pin, the zen is not marked pinned.
-	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
+	// Pinning without a follow is rejected: a pin is a property of the
+	// follow edge.
+	if _, err := cl.Pin(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err == nil {
+		t.Fatal("pin should fail for a non-followed identity")
+	}
+
+	// Follow the peer so the pin has a follow edge to attach to.
+	if _, err := cl.Follow(context.Background(), &driftnodepb.FollowReq{Target: string(peerID), Passphrase: "pass"}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+
+	// Before pin, the follow is not marked pinned.
+	resp, err := cl.Follows(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("zens: %v", err)
+		t.Fatalf("follows: %v", err)
 	}
-	if len(resp.Zens) != 1 {
-		t.Fatalf("want 1 zen, got %d", len(resp.Zens))
+	if len(resp.Identities) != 1 || resp.Identities[0].Identity != string(peerID) {
+		t.Fatalf("want 1 follow [peer], got %v", resp.Identities)
 	}
-	if resp.Zens[0].Pinned {
-		t.Fatal("zen should not be pinned before pin RPC")
+	if resp.Identities[0].Pinned {
+		t.Fatal("follow should not be pinned before pin RPC")
 	}
 
 	// Pin the peer identity.
@@ -146,22 +153,42 @@ func TestPinZens(t *testing.T) {
 		t.Fatalf("pin: %v", err)
 	}
 
-	// After pin, the zen is marked pinned.
-	resp, err = cl.Zens(context.Background(), &driftnodepb.Empty{})
+	// After pin, the follow is marked pinned.
+	resp, err = cl.Follows(context.Background(), &driftnodepb.Empty{})
 	if err != nil {
-		t.Fatalf("zens after pin: %v", err)
+		t.Fatalf("follows after pin: %v", err)
 	}
-	if !resp.Zens[0].Pinned {
-		t.Fatal("zen should be pinned after pin RPC")
+	if !resp.Identities[0].Pinned {
+		t.Fatal("follow should be pinned after pin RPC")
 	}
 
 	// Unpin clears the flag.
 	if _, err := cl.Unpin(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err != nil {
 		t.Fatalf("unpin: %v", err)
 	}
-	resp, _ = cl.Zens(context.Background(), &driftnodepb.Empty{})
-	if resp.Zens[0].Pinned {
-		t.Fatal("zen should not be pinned after unpin")
+	resp, _ = cl.Follows(context.Background(), &driftnodepb.Empty{})
+	if resp.Identities[0].Pinned {
+		t.Fatal("follow should not be pinned after unpin")
+	}
+
+	// Unfollowing clears the pin: re-follow and pin, then unfollow, then
+	// re-follow and confirm the pin is gone (the follow edge was recreated
+	// but the pin was cleared on the old edge).
+	if _, err := cl.Pin(context.Background(), &driftnodepb.IdentityReq{Identity: string(peerID)}); err != nil {
+		t.Fatalf("pin again: %v", err)
+	}
+	if _, err := cl.Unfollow(context.Background(), &driftnodepb.UnfollowReq{Target: string(peerID), Passphrase: "pass"}); err != nil {
+		t.Fatalf("unfollow: %v", err)
+	}
+	if _, err := cl.Follow(context.Background(), &driftnodepb.FollowReq{Target: string(peerID), Passphrase: "pass"}); err != nil {
+		t.Fatalf("re-follow: %v", err)
+	}
+	resp, _ = cl.Follows(context.Background(), &driftnodepb.Empty{})
+	if len(resp.Identities) != 1 {
+		t.Fatalf("want 1 follow after re-follow, got %d", len(resp.Identities))
+	}
+	if resp.Identities[0].Pinned {
+		t.Fatal("follow should not be pinned after unfollow+re-follow")
 	}
 }
 

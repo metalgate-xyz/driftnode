@@ -92,8 +92,8 @@ func (s *grpcServer) Follows(ctx context.Context, _ *driftnodepb.Empty) (*driftn
 	if !ok {
 		return &driftnodepb.IdentitiesResp{}, nil
 	}
-	raw, _ := m["follows"].([]map[string]string)
-	return &driftnodepb.IdentitiesResp{Identities: toIdentities(raw)}, nil
+	raw, _ := m["follows"].([]*driftnodepb.Identity)
+	return &driftnodepb.IdentitiesResp{Identities: raw}, nil
 }
 
 func (s *grpcServer) Followers(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.IdentitiesResp, error) {
@@ -105,8 +105,8 @@ func (s *grpcServer) Followers(ctx context.Context, _ *driftnodepb.Empty) (*drif
 	if !ok {
 		return &driftnodepb.IdentitiesResp{}, nil
 	}
-	raw, _ := m["followers"].([]map[string]string)
-	return &driftnodepb.IdentitiesResp{Identities: toIdentities(raw)}, nil
+	raw, _ := m["followers"].([]*driftnodepb.Identity)
+	return &driftnodepb.IdentitiesResp{Identities: raw}, nil
 }
 
 func (s *grpcServer) FeedPage(_ context.Context, req *driftnodepb.FeedPageReq) (*driftnodepb.FeedPageResp, error) {
@@ -416,18 +416,6 @@ func (s *grpcServer) Subscribe(_ *driftnodepb.SubscribeReq, srv driftnodepb.Drif
 			return srv.Context().Err()
 		}
 	}
-}
-
-// toIdentities converts the daemon's map[string]string identity rows to proto.
-func toIdentities(rows []map[string]string) []*driftnodepb.Identity {
-	out := make([]*driftnodepb.Identity, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, &driftnodepb.Identity{
-			Identity: r["identity"],
-			Name:     r["name"],
-		})
-	}
-	return out
 }
 
 // ---- client-side dialer (shared by CLI and TUI) ----

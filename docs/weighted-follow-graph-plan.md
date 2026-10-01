@@ -76,15 +76,18 @@ testable independently.
    computes per-followed-author like counts from own PostLog, counting only
    authors in the current follow graph.
 3. **Pins feature and tracking e2e.** DONE. `driftnode zens pin <identity>`
-and `driftnode zens unpin <identity>` commands + gRPC `Pin`/`Unpin` RPCs +
-local bbolt pin set (never synced, never signed). Pins survive backup
-restore (included in `BackupData`). A pin is tied to the follow edge, not a
-stable identity property: unfollowing clears the pin via the shared
-`store.Unfollow` method, so the online daemon and offline CLI paths share one
-clear-on-unfollow invariant. The `Pinned` flag surfaces in the zens snapshot
-(CLI `zens list` and the TUI). Metric: `store.PinnedIdentities()` returns the
-pin set for the `pin(author)` term; the weight floor for pinned follows is
-applied in phase 5 when per-follow weights are persisted.
+and `driftnode zens unpin <identity>` commands + gRPC `Pin`/`Unpin` RPCs.
+Pins are local-only state, never synced or signed. A pin marks a follow edge
+for top sync priority: `pinned` lives on the `Identity` proto (follows list),
+and pinning requires a follow (`ErrPinRequiresFollow`). The follow graph and
+pin flags live in a local identity-keyed cache, kept in sync with the signed
+ProfileLog by routing all follow writes through `store.Follow` and all
+unfollow writes through `store.Unfollow`; the cache is rebuilt from the log
+on backup restore. Pins survive backup restore (in `BackupData`). The
+`Pinned` flag surfaces in the follows list (CLI `follows` and the TUI follows
+tab). Metric: `store.PinnedIdentities()` returns the pin set for the
+`pin(author)` term; the weight floor is applied in phase 5 when per-follow
+weights are persisted.
 4. **Weight formula.** Normalization scheme and default coefficients chosen
    against real metric distributions from phases 1-3. Config knobs
    (`w_likes`, `w_replies`, `w_recip`, `w_pin`) via `driftnode config`.
@@ -108,11 +111,14 @@ Replies (Phase 1) are implemented as a Post with `parent_id`:
 `KindReply` and the `Reply` struct have been removed. The metric
 `store.OutboundReplies()` resolves reply parents to followed authors.
 
-Pins (Phase 3) are local-only state in a bbolt bucket, mirroring the verified
-identity pattern. `driftnode zens pin/unpin` toggle the set; the `Pinned` flag
-projects into the zens snapshot. Unfollowing clears the pin through the shared
-`store.Unfollow` so the invariant lives in one place. Pins are included in
-`BackupData` so they survive restore.
+Pins (Phase 3) are local-only state. `driftnode zens pin/unpin` toggle a
+follow's pin flag; `pinned` lives on the `Identity` proto (follows list) and
+surfaces in the follows list. Pinning requires a follow. The follow graph and
+pin flags are cached together in a local identity-keyed store, kept in sync
+with the signed ProfileLog by routing all follow writes through
+`store.Follow` and all unfollow writes through `store.Unfollow`. The cache is
+rebuilt from the log on backup restore. Pins survive backup restore (in
+`BackupData`).
 
 Remaining: weight formula (Phase 4), weighted graph (Phase 5), scheduler
 redesign (Phase 6).

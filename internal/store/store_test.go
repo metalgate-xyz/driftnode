@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/ed25519"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -985,6 +986,15 @@ func TestLikesForPosts(t *testing.T) {
 
 func TestPinIdentity(t *testing.T) {
 	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
 	a, err := core.NewKeyPair()
 	if err != nil {
 		t.Fatal(err)
@@ -992,6 +1002,19 @@ func TestPinIdentity(t *testing.T) {
 	b, err := core.NewKeyPair()
 	if err != nil {
 		t.Fatal(err)
+	}
+	aPub, _ := a.Identity().PubkeyBytes()
+	bPub, _ := b.Identity().PubkeyBytes()
+	if _, _, _, err := s.Follow(kp, [32]byte(aPub)); err != nil {
+		t.Fatalf("follow a: %v", err)
+	}
+	if _, _, _, err := s.Follow(kp, [32]byte(bPub)); err != nil {
+		t.Fatalf("follow b: %v", err)
+	}
+	// Pinning a non-follow fails.
+	other, _ := core.NewKeyPair()
+	if err := s.PinIdentity(other.Identity()); !errors.Is(err, ErrPinRequiresFollow) {
+		t.Fatalf("pin non-follow: want ErrPinRequiresFollow, got %v", err)
 	}
 	// Unpinned by default.
 	if p, _ := s.IsPinned(a.Identity()); p {
@@ -1043,6 +1066,10 @@ func TestBackupIncludesPinnedIdentities(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	peerPub, _ := peer.Identity().PubkeyBytes()
+	if _, _, _, err := s.Follow(kp, [32]byte(peerPub)); err != nil {
+		t.Fatalf("follow peer: %v", err)
+	}
 	if err := s.PinIdentity(peer.Identity()); err != nil {
 		t.Fatalf("pin: %v", err)
 	}
@@ -1085,7 +1112,10 @@ func TestUnfollowClearsPin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Pin the peer, then unfollow via the shared method.
+	// Follow, pin, then unfollow via the shared method.
+	if _, _, _, err := s.Follow(kp, [32]byte(target)); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
 	if err := s.PinIdentity(peer.Identity()); err != nil {
 		t.Fatalf("pin: %v", err)
 	}

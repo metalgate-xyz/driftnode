@@ -91,11 +91,30 @@ func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event)
 	return se, id, nil
 }
 
-// Unfollow signs an Unfollow event for target and clears the pin on that
-// identity, as one operation. A pin is tied to the follow edge, so
-// unfollowing implies unpinning: routing both the daemon and the offline CLI
-// through this method keeps the clear-on-unfollow invariant in one place.
-// The signed event and its ID are returned along with the resolved identity.
+// Follow signs a Follow event for target and records the local follow edge.
+// Routing both the daemon and the offline CLI through this method keeps the
+// follow-state cache in sync with the signed, synced ProfileLog. The signed
+// event and its ID are returned along with the resolved identity.
+func (s *Store) Follow(kp *core.KeyPair, target [32]byte) (*core.SignedEvent, core.EventID, core.Identity, error) {
+	if _, id, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: target},
+	}); err != nil {
+		return nil, core.EventID{}, "", err
+	} else {
+		identity := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
+		if err := s.putFollowState(identity, followState{followed: true}); err != nil {
+			return nil, core.EventID{}, "", fmt.Errorf("follow state: %w", err)
+		}
+		return nil, id, identity, nil
+	}
+}
+
+// Unfollow signs an Unfollow event for target and clears the local follow edge,
+// including any pin. A pin is tied to the follow edge, so unfollowing implies
+// unpinning: routing both the daemon and the offline CLI through this method
+// keeps the clear-on-unfollow invariant in one place. The signed event and
+// its ID are returned along with the resolved identity.
 func (s *Store) Unfollow(kp *core.KeyPair, target [32]byte) (*core.SignedEvent, core.EventID, core.Identity, error) {
 	se, id, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
 		Kind:   core.KindUnfollow,
@@ -105,8 +124,8 @@ func (s *Store) Unfollow(kp *core.KeyPair, target [32]byte) (*core.SignedEvent, 
 		return nil, core.EventID{}, "", err
 	}
 	identity := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
-	if err := s.UnpinIdentity(identity); err != nil {
-		return nil, core.EventID{}, "", fmt.Errorf("unpin: %w", err)
+	if err := s.deleteFollowState(identity); err != nil {
+		return nil, core.EventID{}, "", fmt.Errorf("follow state: %w", err)
 	}
 	return se, id, identity, nil
 }

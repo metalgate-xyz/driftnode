@@ -136,7 +136,6 @@ type zenInfo struct {
 	Kind     string `json:"kind"`     // native_zen or browser
 	Status   string `json:"status"`   // connecting, connected, discovered, error
 	Verified bool   `json:"verified"` // identity confirmed out-of-band (§7)
-	Pinned   bool   `json:"pinned"`   // follow pinned for top sync priority
 }
 
 // subscriber is one open subscribe stream. The daemon pushes typed events
@@ -213,9 +212,8 @@ func (d *Daemon) emitZenRemove(id string) {
 }
 
 // emitFollowsAdd pushes a follows addition.
-func (d *Daemon) emitFollowsAdd(entry map[string]string) {
-	ident := identityEntryToProto(entry)
-	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowsDiff{FollowsDiff: &driftnodepb.FollowsDiff{Add: []*driftnodepb.Identity{ident}}}})
+func (d *Daemon) emitFollowsAdd(entry *driftnodepb.Identity) {
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowsDiff{FollowsDiff: &driftnodepb.FollowsDiff{Add: []*driftnodepb.Identity{entry}}}})
 }
 
 // emitFollowsRemove pushes a follows removal by identity.
@@ -224,9 +222,8 @@ func (d *Daemon) emitFollowsRemove(identity string) {
 }
 
 // emitFollowersAdd pushes a followers addition.
-func (d *Daemon) emitFollowersAdd(entry map[string]string) {
-	ident := identityEntryToProto(entry)
-	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowersDiff{FollowersDiff: &driftnodepb.FollowersDiff{Add: []*driftnodepb.Identity{ident}}}})
+func (d *Daemon) emitFollowersAdd(entry *driftnodepb.Identity) {
+	d.broadcast(&driftnodepb.Event{Kind: &driftnodepb.Event_FollowersDiff{FollowersDiff: &driftnodepb.FollowersDiff{Add: []*driftnodepb.Identity{entry}}}})
 }
 
 // emitFeedAdd pushes a feed addition (newly merged posts, newest-first).
@@ -384,16 +381,22 @@ func (d *Daemon) displayName(id core.Identity) string {
 
 // followEntries returns the identities this zen follows, with display names,
 // for the subscribe snapshot.
-func (d *Daemon) followEntries() []map[string]string {
+func (d *Daemon) followEntries() []*driftnodepb.Identity {
 	ids, err := d.store.FollowGraph()
 	if err != nil {
 		return nil
 	}
-	out := make([]map[string]string, 0, len(ids))
+	out := make([]*driftnodepb.Identity, 0, len(ids))
 	for _, id := range ids {
-		entry := map[string]string{"identity": id.String()}
+		entry := &driftnodepb.Identity{Identity: id.String()}
 		if name := d.displayName(id); name != "" {
-			entry["name"] = name
+			entry.Name = name
+		}
+		if v, _ := d.store.IsVerified(id); v {
+			entry.Verified = true
+		}
+		if p, _ := d.store.IsPinned(id); p {
+			entry.Pinned = true
 		}
 		out = append(out, entry)
 	}
@@ -402,16 +405,19 @@ func (d *Daemon) followEntries() []map[string]string {
 
 // followerEntries returns the identities that follow this zen, with display
 // names, for the subscribe snapshot.
-func (d *Daemon) followerEntries() []map[string]string {
+func (d *Daemon) followerEntries() []*driftnodepb.Identity {
 	ids, err := d.store.ReceivedFollowers()
 	if err != nil {
 		return nil
 	}
-	out := make([]map[string]string, 0, len(ids))
+	out := make([]*driftnodepb.Identity, 0, len(ids))
 	for _, id := range ids {
-		entry := map[string]string{"identity": id.String()}
+		entry := &driftnodepb.Identity{Identity: id.String()}
 		if name := d.displayName(id); name != "" {
-			entry["name"] = name
+			entry.Name = name
+		}
+		if v, _ := d.store.IsVerified(id); v {
+			entry.Verified = true
 		}
 		out = append(out, entry)
 	}
@@ -618,9 +624,6 @@ func (d *Daemon) rehydrateZens() {
 		}
 		if v, _ := d.store.IsVerified(id); v {
 			d.zens[tok].Verified = true
-		}
-		if p, _ := d.store.IsPinned(id); p {
-			d.zens[tok].Pinned = true
 		}
 	}
 	d.mu.Unlock()
@@ -837,8 +840,8 @@ func (d *Daemon) snapshot() *driftnodepb.Snapshot {
 	return &driftnodepb.Snapshot{
 		Feed:      feedItemsToProto(feed),
 		Zens:      zens,
-		Follows:   identityEntriesToProto(follows),
-		Followers: identityEntriesToProto(followers),
+		Follows:   follows,
+		Followers: followers,
 		Status: &driftnodepb.StatusDiff{
 			Running:   true,
 			Zens:      int32(len(zens)),
@@ -853,14 +856,12 @@ func (d *Daemon) snapshot() *driftnodepb.Snapshot {
 func (d *Daemon) snapshotProto() *driftnodepb.Snapshot { return d.snapshot() }
 
 // zenToProto copies one zenInfo into a fresh proto Zen, enriching it with
-// the name/identity/verified/pinned state bound to its token. It takes the
-// zenInfo by value so the caller can copy it under d.mu and then enrich
-// without the lock, avoiding a race on fields a concurrent setZenStatus may
-// mutate.
+// the name/identity/verified state bound to its token. It takes the zenInfo
+// by value so the caller can copy it under d.mu and then enrich without the
+// lock, avoiding a race on fields a concurrent setZenStatus may mutate.
 func (d *Daemon) zenToProto(z zenInfo) *driftnodepb.Zen {
 	out := zenToProtoPlain(z)
 	out.Verified = false
-	out.Pinned = false
 	if id, ok, _ := d.store.RoutingByToken(z.ID); ok {
 		out.Identity = string(id)
 		if name, _ := d.store.DisplayName(id); name != "" {
@@ -868,9 +869,6 @@ func (d *Daemon) zenToProto(z zenInfo) *driftnodepb.Zen {
 		}
 		if v, _ := d.store.IsVerified(id); v {
 			out.Verified = true
-		}
-		if p, _ := d.store.IsPinned(id); p {
-			out.Pinned = true
 		}
 	}
 	return out
@@ -885,7 +883,6 @@ func zenToProtoPlain(z zenInfo) *driftnodepb.Zen {
 		Kind:     z.Kind,
 		Status:   z.Status,
 		Verified: z.Verified,
-		Pinned:   z.Pinned,
 	}
 }
 
@@ -907,20 +904,6 @@ func feedItemsToProto(items []feedItem) []*driftnodepb.FeedItem {
 	out := make([]*driftnodepb.FeedItem, 0, len(items))
 	for _, it := range items {
 		out = append(out, feedItemToProto(it))
-	}
-	return out
-}
-
-// identityEntryToProto converts one map[string]string identity row to proto.
-func identityEntryToProto(r map[string]string) *driftnodepb.Identity {
-	return &driftnodepb.Identity{Identity: r["identity"], Name: r["name"]}
-}
-
-// identityEntriesToProto converts a map[string]string identity slice to proto.
-func identityEntriesToProto(rows []map[string]string) []*driftnodepb.Identity {
-	out := make([]*driftnodepb.Identity, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, identityEntryToProto(r))
 	}
 	return out
 }
@@ -1278,38 +1261,14 @@ func (d *Daemon) handleWhoami(id core.Identity) Response {
 // handleFollows returns the identities this zen currently follows, derived
 // by replaying its own ProfileLog Follow/Unfollow events (section 7.1).
 func (d *Daemon) handleFollows() Response {
-	ids, err := d.store.FollowGraph()
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	out := make([]map[string]string, 0, len(ids))
-	for _, id := range ids {
-		entry := map[string]string{"identity": id.String()}
-		if name, err := d.store.DisplayName(id); err == nil && name != "" {
-			entry["name"] = name
-		}
-		out = append(out, entry)
-	}
-	return Response{Result: map[string]any{"follows": out}}
+	return Response{Result: map[string]any{"follows": d.followEntries()}}
 }
 
 // handleFollowers returns the identities that follow this zen, derived from
 // Follow events it has received targeting itself (section 9.3). This is the
 // zen's own observed follower set, not a global truth.
 func (d *Daemon) handleFollowers() Response {
-	ids, err := d.store.ReceivedFollowers()
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	out := make([]map[string]string, 0, len(ids))
-	for _, id := range ids {
-		entry := map[string]string{"identity": id.String()}
-		if name, err := d.store.DisplayName(id); err == nil && name != "" {
-			entry["name"] = name
-		}
-		out = append(out, entry)
-	}
-	return Response{Result: map[string]any{"followers": out}}
+	return Response{Result: map[string]any{"followers": d.followerEntries()}}
 }
 
 // handleProfile signs a Profile event (public: zen name) and appends it to
@@ -1443,29 +1402,26 @@ func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
 	return resp
 }
 
-// writeFollow signs and appends a Follow event for the given target pubkey.
-// It does not dial; callers that can resolve a token should dial via
-// followByToken so the routing is bound immediately.
+// writeFollow signs a Follow event for the given target pubkey and records the
+// local follow edge. It does not dial; callers that can resolve a token
+// should dial via followByToken so the routing is bound immediately.
 func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
-	if _, _, err := d.store.SignAndAppend(kp, core.ProfileLog, core.Event{
-		Kind:   core.KindFollow,
-		Follow: &core.Follow{TargetPubkey: target},
-	}); err != nil {
+	if _, _, id, err := d.store.Follow(kp, target); err != nil {
 		return Response{Error: err.Error()}
+	} else {
+		d.touchSignAt()
+		d.triggerSyncNow()
+		name, _ := d.store.DisplayName(id)
+		d.emitFollowsAdd(&driftnodepb.Identity{Identity: id.String(), Name: name})
+		return Response{Result: map[string]string{"followed": id.String()}}
 	}
-	followedID := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
-	d.touchSignAt()
-	d.triggerSyncNow()
-	name, _ := d.store.DisplayName(followedID)
-	d.emitFollowsAdd(map[string]string{"identity": followedID.String(), "name": name})
-	return Response{Result: map[string]string{"followed": followedID.String()}}
 }
 
 // handleUnfollow signs an Unfollow event, removes the routing binding for
 // the target, and drops the zen from the zens map. This is the single
 // "remove a zen" gesture: unfollowing stops the daemon from dialing the
-// identity on future sync rounds. The shared store.Unfollow clears the pin
-// on the target so the clear-on-unfollow invariant is defined once.
+// identity on future sync rounds. The shared store.Unfollow clears the local
+// follow edge and any pin so the clear-on-unfollow invariant is defined once.
 func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	target, err := core.ResolvePubkey(targetStr)
 	if err != nil {
@@ -2084,7 +2040,7 @@ func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity)
 	}
 	for _, fid := range newFollowers {
 		name := d.displayName(fid)
-		d.emitFollowersAdd(map[string]string{"identity": fid.String(), "name": name})
+		d.emitFollowersAdd(&driftnodepb.Identity{Identity: fid.String(), Name: name})
 	}
 	return n, err
 }

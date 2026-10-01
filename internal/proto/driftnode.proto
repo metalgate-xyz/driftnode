@@ -156,7 +156,6 @@ message Zen {
   string kind = 4;
   string status = 5;
   bool verified = 6;
-  bool pinned = 7;
 }
 
 // ZensResp lists known zens.
@@ -164,10 +163,14 @@ message ZensResp {
   repeated Zen zens = 1;
 }
 
-// Identity is one row of the follows or followers list.
+// Identity is one row of the follows or followers list. Verified and pinned
+// are projected from the local store (the single source of truth): verified
+// applies to any identity, pinned only to a follow edge.
 message Identity {
   string identity = 1;
   string name = 2;
+  bool verified = 3;
+  bool pinned = 4;
 }
 
 // IdentitiesResp lists identities.

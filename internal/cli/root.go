@@ -558,13 +558,11 @@ func followCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
-				Kind:   core.KindFollow,
-				Follow: &core.Follow{TargetPubkey: target},
-			}); err != nil {
+			if _, _, id, err := s.Follow(kp, target); err != nil {
 				return err
+			} else {
+				cmd.Printf("followed %s\n", id)
 			}
-			cmd.Printf("followed %s\n", core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
 			return nil
 		},
 	}
@@ -649,7 +647,7 @@ func followsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printIdentities(cmd, identitiesFromStore(ids, s))
+			printIdentities(cmd, identitiesFromStore(ids, s, true))
 			return nil
 		},
 	}
@@ -686,7 +684,7 @@ func followersCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			printIdentities(cmd, identitiesFromStore(ids, s))
+			printIdentities(cmd, identitiesFromStore(ids, s, false))
 			return nil
 		},
 	}
@@ -695,26 +693,44 @@ func followersCmd() *cobra.Command {
 }
 
 // identitiesFromStore builds an identity list from a slice of core identities,
-// resolving display names from the store. Used by the offline fallback path.
-func identitiesFromStore(ids []core.Identity, s *store.Store) []*driftnodepb.Identity {
+// resolving display names and trust/priority state from the store. Used by
+// the offline fallback path. withPinned controls whether the pin flag is
+// projected: it applies only to follows, not followers.
+func identitiesFromStore(ids []core.Identity, s *store.Store, withPinned bool) []*driftnodepb.Identity {
 	out := make([]*driftnodepb.Identity, 0, len(ids))
 	for _, id := range ids {
 		entry := &driftnodepb.Identity{Identity: id.String()}
 		if name, err := s.DisplayName(id); err == nil && name != "" {
 			entry.Name = name
 		}
+		if v, _ := s.IsVerified(id); v {
+			entry.Verified = true
+		}
+		if withPinned {
+			if p, _ := s.IsPinned(id); p {
+				entry.Pinned = true
+			}
+		}
 		out = append(out, entry)
 	}
 	return out
 }
 
-// printIdentities renders follows/followers from a daemon RPC response.
+// printIdentities renders follows/followers from a daemon RPC response,
+// with a verified check and, for follows, a pin marker.
 func printIdentities(cmd *cobra.Command, items []*driftnodepb.Identity) {
 	for _, entry := range items {
+		marks := ""
+		if entry.Verified {
+			marks += "✓ "
+		}
+		if entry.Pinned {
+			marks += "★ "
+		}
 		if entry.Name != "" {
-			cmd.Printf("%s\t%s\n", entry.Identity, entry.Name)
+			cmd.Printf("%s%s\t%s\n", marks, entry.Identity, entry.Name)
 		} else {
-			cmd.Println(entry.Identity)
+			cmd.Printf("%s%s\n", marks, entry.Identity)
 		}
 	}
 }
@@ -1425,17 +1441,14 @@ func zensListCmd() *cobra.Command {
 				if identity == "" {
 					identity = "(unknown)"
 				}
-				mark := "  "
+				mark := " "
 				if z.Verified {
-					mark = "✓ "
-				}
-				if z.Pinned {
-					mark = strings.TrimSuffix(mark, " ") + "★ "
+					mark = "✓"
 				}
 				if z.Name != "" {
-					cmd.Printf("%s%s  %s  %s (%s)\n", mark, z.Status, z.Name, identity, z.Kind)
+					cmd.Printf("%s %s  %s  %s (%s)\n", mark, z.Status, z.Name, identity, z.Kind)
 				} else {
-					cmd.Printf("%s%s  %s (%s)\n", mark, z.Status, identity, z.Kind)
+					cmd.Printf("%s %s  %s (%s)\n", mark, z.Status, identity, z.Kind)
 				}
 			}
 			return nil
