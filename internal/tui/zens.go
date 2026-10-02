@@ -4,11 +4,12 @@ import (
 	"fmt"
 
 	"charm.land/lipgloss/v2"
+	"driftnode/internal/core"
 )
 
 // renderZen renders one zen row as a single line, mirroring the feed's
 // layout: the name in the accent color (falling back to the identity when no
-// name is set), a verified check, a pin marker (follows only), the colored
+// name is set), a verified marker, a pin marker (follows only), the colored
 // status word, and the identity in the muted color. When selected, each
 // segment is re-styled (accent on a highlighted background) so ANSI resets
 // don't defeat the highlight.
@@ -31,10 +32,10 @@ func renderZen(z zen, selected bool) string {
 
 	marks := ""
 	if z.verified {
-		marks += lipgloss.NewStyle().Foreground(lipgloss.Color(good)).Render("✓ ")
+		marks += lipgloss.NewStyle().Foreground(lipgloss.Color(good)).Render(core.GlyphVerified + " ")
 	}
 	if z.pinned {
-		marks += lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Render("★ ")
+		marks += lipgloss.NewStyle().Foreground(lipgloss.Color(accent)).Render(core.GlyphPin + " ")
 	}
 	title := nameStyle.Render(name)
 	id := idStyle.Render(z.identity)

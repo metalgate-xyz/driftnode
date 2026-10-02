@@ -24,6 +24,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 PASS=0; FAIL=0
+LIKE_GLYPH='💟'
 ok()  { printf "  %-55s PASS\n" "$1"; PASS=$((PASS+1)); }
 bad() { printf "  %-55s FAIL: %s\n" "$1" "$2"; FAIL=$((FAIL+1)); }
 contains() { echo "$1" | grep -qF "$2"; }
@@ -225,7 +226,7 @@ dnq carol like "$LIKEABLE_POST_ID"
 sleep 10
 DAVE_MINE=$(dn dave feed --mine)
 contains "$DAVE_MINE" "likeable post" && ok "P4.5.2 dave sees liked post in feed --mine" || bad "P4.5.2 dave sees liked post" "$DAVE_MINE"
-contains "$DAVE_MINE" "(1 like: carol)" && ok "P4.5.3 like from carol visible via normal sync" || bad "P4.5.3 like via normal sync" "$DAVE_MINE"
+contains "$DAVE_MINE" "1 $LIKE_GLYPH: carol" && ok "P4.5.3 like from carol visible via normal sync" || bad "P4.5.3 like via normal sync" "$DAVE_MINE"
 
 printf "\n===== Phase 5: Eve discovers the network =====\n"
 dnq eve post "eve checking in"

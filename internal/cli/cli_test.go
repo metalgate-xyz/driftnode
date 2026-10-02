@@ -213,7 +213,7 @@ func TestFeedShowsLikeCountOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("feed: %v", err)
 	}
-	if !strings.Contains(out, "1 like") {
+	if !strings.Contains(out, "1 "+core.GlyphLike) {
 		t.Fatalf("feed should show like count: %q", out)
 	}
 }

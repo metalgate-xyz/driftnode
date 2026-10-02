@@ -465,7 +465,7 @@ func feedOffline(cmd *cobra.Command, limit int, mine bool) error {
 		line := fmt.Sprintf("%s  %s> %s", ts, author, text)
 		pid, _ := p.ID()
 		if likers, ok := postLikes[pid]; ok && len(likers) > 0 {
-			line += fmt.Sprintf("  (%d like%s: %s)", len(likers), pluralS(len(likers)), strings.Join(likers, ", "))
+			line += fmt.Sprintf("  %d %s: %s", len(likers), core.GlyphLike, strings.Join(likers, ", "))
 		}
 		line += "  [" + pid.String() + "]"
 		cmd.Println(line)
@@ -485,7 +485,7 @@ func printFeedItems(cmd *cobra.Command, items []*driftnodepb.FeedItem) {
 		}
 		line := fmt.Sprintf("%s  %s> %s", core.FormatTime(item.Timestamp), author, item.Text)
 		if item.LikeCount > 0 {
-			line += fmt.Sprintf("  (%d like%s: %s)", item.LikeCount, pluralS(int(item.LikeCount)), strings.Join(item.Likers, ", "))
+			line += fmt.Sprintf("  %d %s: %s", item.LikeCount, core.GlyphLike, strings.Join(item.Likers, ", "))
 		}
 		if item.Id != "" {
 			line += "  [" + item.Id + "]"
@@ -497,13 +497,6 @@ func printFeedItems(cmd *cobra.Command, items []*driftnodepb.FeedItem) {
 // feedPageSize is the page size the daemon serves via FeedPage. It must
 // match the daemon's feedPageLimit.
 const feedPageSize = 200
-
-func pluralS(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "s"
-}
 
 // subscribeSnapshot opens a subscribe stream, reads the initial snapshot,
 // and returns it. Used by commands that need live state panels (follows,
@@ -717,15 +710,15 @@ func identitiesFromStore(ids []core.Identity, s *store.Store, withPinned bool) [
 }
 
 // printIdentities renders follows/followers from a daemon RPC response,
-// with a verified check and, for follows, a pin marker.
+// with a verified marker and, for follows, a pin marker.
 func printIdentities(cmd *cobra.Command, items []*driftnodepb.Identity) {
 	for _, entry := range items {
 		marks := ""
 		if entry.Verified {
-			marks += "✓ "
+			marks += core.GlyphVerified + " "
 		}
 		if entry.Pinned {
-			marks += "★ "
+			marks += core.GlyphPin + " "
 		}
 		if entry.Name != "" {
 			cmd.Printf("%s%s\t%s\n", marks, entry.Identity, entry.Name)
@@ -1443,7 +1436,7 @@ func zensListCmd() *cobra.Command {
 				}
 				mark := " "
 				if z.Verified {
-					mark = "✓"
+					mark = core.GlyphVerified
 				}
 				if z.Name != "" {
 					cmd.Printf("%s %s  %s  %s (%s)\n", mark, z.Status, z.Name, identity, z.Kind)
