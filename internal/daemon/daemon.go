@@ -1733,6 +1733,13 @@ func (d *Daemon) syncAllZens() {
 		d.logger.Warn("sync: read follow graph", "err", err)
 		return
 	}
+	// Recompute per-follow sync-priority weights from current interaction
+	// metrics so the weighted graph is fresh for this round. The dialer
+	// still fans out uniformly; phase 6 consumes the weights for priority
+	// ordering.
+	if _, err := d.store.RecomputeWeights(); err != nil {
+		d.logger.Warn("sync: recompute weights", "err", err)
+	}
 	// Split into bound (have a token) and pending (need resolution).
 	var bound []core.Identity
 	var pending []core.Identity

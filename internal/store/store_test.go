@@ -3,10 +3,12 @@ package store
 import (
 	"crypto/ed25519"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 
 	"driftnode/internal/core"
+	"driftnode/internal/weight"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -1124,5 +1126,213 @@ func TestUnfollowClearsPin(t *testing.T) {
 	}
 	if p, _ := s.IsPinned(peer.Identity()); p {
 		t.Fatal("unfollow should clear the pin on the target")
+	}
+}
+
+// TestRecomputeWeights verifies the store gathers all four interaction
+// metrics and persists per-follow weights that match the weight formula
+// applied to the same ground-truth inputs. The store's job is metric
+// gathering and persistence; the formula itself is tested in the weight
+// package. This asserts the wiring: the right counts reach the formula, and
+// the result round-trips through Weight and WeightedGraph.
+func TestRecomputeWeights(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	alice, _ := core.NewKeyPair() // pinned, no interaction
+	bob, _ := core.NewKeyPair()   // liked 3x
+	carol, _ := core.NewKeyPair()  // reciprocal follow, no interaction
+	dave, _ := core.NewKeyPair()   // cold-start: followed, no signal
+
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	follows := []core.Identity{alice.Identity(), bob.Identity(), carol.Identity(), dave.Identity()}
+	for _, target := range [][]byte{alice.Public, bob.Public, carol.Public, dave.Public} {
+		if _, _, _, err := s.Follow(me, [32]byte(target)); err != nil {
+			t.Fatalf("follow: %v", err)
+		}
+	}
+
+	// Bob posts 3 times, and I like each post once. One Like per author
+	// per post is enforced, so accumulating per-author like counts
+	// requires distinct target posts.
+	for i := 0; i < 3; i++ {
+		post, _ := bob.Sign(core.Event{
+			Kind: core.KindPost, Log: core.PostLog, Timestamp: int64(100 + i), Sequence: uint64(1 + i),
+			Post: &core.Post{Text: "bob's post"},
+		})
+		pid, _ := post.ID()
+		if _, err := s.PutCrawledEvent(post, 1); err != nil {
+			t.Fatalf("put bob post %d: %v", i, err)
+		}
+		like, _ := me.Sign(core.Event{
+			Kind: core.KindLike, Log: core.PostLog, Timestamp: int64(200 + i), Sequence: uint64(1 + i),
+			Like: &core.Like{TargetID: pid},
+		})
+		if err := s.AppendOwnEvent(core.PostLog, like); err != nil {
+			t.Fatalf("append like %d: %v", i, err)
+		}
+	}
+
+	// Carol follows me back, so she is reciprocal.
+	carolFollow, _ := carol.Sign(core.Event{
+		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 60, Sequence: 1,
+		Follow: &core.Follow{TargetPubkey: [32]byte(me.Public)},
+	})
+	if _, err := s.PutCrawledEvent(carolFollow, 1); err != nil {
+		t.Fatalf("put carol follow: %v", err)
+	}
+
+	// Pin Alice.
+	if err := s.PinIdentity(alice.Identity()); err != nil {
+		t.Fatalf("pin alice: %v", err)
+	}
+
+	weights, err := s.RecomputeWeights()
+	if err != nil {
+		t.Fatalf("RecomputeWeights: %v", err)
+	}
+
+	// Expected weights: the formula applied to the same ground-truth inputs
+	// the store should have gathered.
+	expected := weight.Weights(weight.Inputs{
+		Follows: follows,
+		Likes:   map[core.Identity]int{bob.Identity(): 3},
+		Recip:   map[core.Identity]bool{carol.Identity(): true},
+		Pins:    map[core.Identity]bool{alice.Identity(): true},
+	})
+	for _, id := range follows {
+		if math.Abs(weights[id]-expected[id]) > 1e-9 {
+			t.Fatalf("weight %v: want %g, got %g", id, expected[id], weights[id])
+		}
+	}
+
+	// The formula's defining properties must hold on the gathered metrics:
+	// a pin dominates accumulated interaction, reciprocal beats cold-start,
+	// and interaction beats cold-start. These are the properties the
+	// scheduler (phase 6) will rely on, so they must hold end to end, not
+	// just in the weight package's unit tests.
+	if weights[alice.Identity()] <= weights[bob.Identity()] {
+		t.Fatalf("pin must dominate interaction: alice=%g bob=%g",
+			weights[alice.Identity()], weights[bob.Identity()])
+	}
+	if weights[carol.Identity()] <= weights[dave.Identity()] {
+		t.Fatalf("reciprocal must beat cold-start: carol=%g dave=%g",
+			weights[carol.Identity()], weights[dave.Identity()])
+	}
+	if weights[bob.Identity()] <= weights[dave.Identity()] {
+		t.Fatalf("interaction must beat cold-start: bob=%g dave=%g",
+			weights[bob.Identity()], weights[dave.Identity()])
+	}
+
+	// Weight round-trips through Weight.
+	gotAlice, err := s.Weight(alice.Identity())
+	if err != nil {
+		t.Fatalf("Weight alice: %v", err)
+	}
+	if math.Abs(gotAlice-weights[alice.Identity()]) > 1e-9 {
+		t.Fatalf("Weight alice round-trip: want %g, got %g", weights[alice.Identity()], gotAlice)
+	}
+
+	// WeightedGraph returns the same set as the returned map.
+	wg, err := s.WeightedGraph()
+	if err != nil {
+		t.Fatalf("WeightedGraph: %v", err)
+	}
+	if len(wg) != len(weights) {
+		t.Fatalf("WeightedGraph size: want %d, got %d", len(weights), len(wg))
+	}
+	for id, w := range weights {
+		if math.Abs(wg[id]-w) > 1e-9 {
+			t.Fatalf("WeightedGraph %v: want %g, got %g", id, w, wg[id])
+		}
+	}
+}
+
+// TestRecomputeWeightsRefreshes verifies that a second RecomputeWeights after a
+// metric changes reflects the new signal and replaces the old weight.
+func TestRecomputeWeightsRefreshes(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	bob, _ := core.NewKeyPair()
+
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	if _, _, _, err := s.Follow(me, [32]byte(bob.Public)); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+
+	// First round: Bob is cold-start.
+	w1, err := s.RecomputeWeights()
+	if err != nil {
+		t.Fatalf("recompute 1: %v", err)
+	}
+	want1 := weight.Weights(weight.Inputs{Follows: []core.Identity{bob.Identity()}})
+	if math.Abs(w1[bob.Identity()]-want1[bob.Identity()]) > 1e-9 {
+		t.Fatalf("round 1: want %g, got %g", want1[bob.Identity()], w1[bob.Identity()])
+	}
+
+	// Bob posts and I like it once.
+	bobPost, _ := bob.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
+		Post: &core.Post{Text: "bob's post"},
+	})
+	bobID, _ := bobPost.ID()
+	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+		t.Fatalf("put bob post: %v", err)
+	}
+	like, _ := me.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 200, Sequence: 1,
+		Like: &core.Like{TargetID: bobID},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, like); err != nil {
+		t.Fatalf("append like: %v", err)
+	}
+
+	// Second round: Bob now has one like.
+	w2, err := s.RecomputeWeights()
+	if err != nil {
+		t.Fatalf("recompute 2: %v", err)
+	}
+	want2 := weight.Weights(weight.Inputs{
+		Follows: []core.Identity{bob.Identity()},
+		Likes:   map[core.Identity]int{bob.Identity(): 1},
+	})
+	if math.Abs(w2[bob.Identity()]-want2[bob.Identity()]) > 1e-9 {
+		t.Fatalf("round 2: want %g, got %g", want2[bob.Identity()], w2[bob.Identity()])
+	}
+
+	// The persisted weight reflects the refresh, not the stale round-1 value.
+	got, err := s.Weight(bob.Identity())
+	if err != nil {
+		t.Fatalf("Weight: %v", err)
+	}
+	if math.Abs(got-want2[bob.Identity()]) > 1e-9 {
+		t.Fatalf("persisted weight: want %g, got %g", want2[bob.Identity()], got)
+	}
+}
+
+// TestWeightUnknownIdentity verifies a not-followed identity reads as 0.
+func TestWeightUnknownIdentity(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	other, _ := core.NewKeyPair()
+	w, err := s.Weight(other.Identity())
+	if err != nil {
+		t.Fatalf("Weight: %v", err)
+	}
+	if w != 0 {
+		t.Fatalf("unknown identity: want 0, got %g", w)
 	}
 }
