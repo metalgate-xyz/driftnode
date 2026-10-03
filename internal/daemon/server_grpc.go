@@ -268,6 +268,7 @@ func (s *grpcServer) Pin(ctx context.Context, req *driftnodepb.IdentityReq) (*dr
 		return nil, statusErr(err.Error())
 	}
 	s.d.logger.Info("follow pinned", "identity", id)
+	s.d.refreshSplit()
 	return &driftnodepb.VerifyResp{Identity: string(id)}, nil
 }
 
@@ -282,6 +283,7 @@ func (s *grpcServer) Unpin(ctx context.Context, req *driftnodepb.IdentityReq) (*
 	if err := s.d.store.UnpinIdentity(id); err != nil {
 		return nil, statusErr(err.Error())
 	}
+	s.d.refreshSplit()
 	return &driftnodepb.VerifyResp{Identity: string(id)}, nil
 }
 
@@ -351,7 +353,7 @@ func (s *grpcServer) Lock(ctx context.Context, _ *driftnodepb.Empty) (*driftnode
 }
 
 func (s *grpcServer) Sync(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.EmptyResp, error) {
-	s.d.triggerSyncNow()
+	s.d.triggerCrawlNow()
 	s.d.logger.Info("sync requested")
 	return &driftnodepb.EmptyResp{Status: "triggered"}, nil
 }

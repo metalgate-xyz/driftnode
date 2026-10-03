@@ -167,7 +167,6 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 		c.queue = append(c.queue, nextBatch...)
 		c.mu.Unlock()
 	}
-	c.logger.Info("crawl complete", "fetched", fetched, "visited", len(c.visited))
 	return fetched, nil
 }
 

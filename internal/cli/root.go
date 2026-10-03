@@ -979,7 +979,6 @@ func daemonCmd() *cobra.Command {
 	var bootstrapFile string
 	var bootstrapKeyFile string
 	var idleLockStr string
-	var syncConcurrency int
 	var c *cobra.Command
 	c = &cobra.Command{
 		Use:   "daemon",
@@ -1024,7 +1023,6 @@ func daemonCmd() *cobra.Command {
 				}
 				d.SetIdleLock(dur)
 			}
-			d.SetSyncConcurrency(syncConcurrency)
 			// When started interactively with a TTY, decrypt the signing
 			// key before Start so the daemon can sync, crawl, and run
 			// bootstrap auto-follow from the first moment. Non-interactive
@@ -1073,7 +1071,6 @@ func daemonCmd() *cobra.Command {
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h); default keeps it unlocked until 'daemon lock' or stop")
-	c.Flags().IntVar(&syncConcurrency, "sync-concurrency", 8, "maximum number of zen dials to run in parallel during a sync round")
 	return c
 }
 
@@ -1094,7 +1091,7 @@ func spawnDetachedDaemon(cmd *cobra.Command, parent *cobra.Command, logPath stri
 	}
 
 	childArgs := []string{"--db", dbPath, "daemon", "--detached", "--detached-child", "--log", logPath}
-	for _, f := range []string{"ephemeral", "bootstrap", "bootstrap-key", "idle-lock", "sync-concurrency"} {
+	for _, f := range []string{"ephemeral", "bootstrap", "bootstrap-key", "idle-lock"} {
 		if parent.Flags().Changed(f) {
 			childArgs = append(childArgs, "--"+f, parent.Flags().Lookup(f).Value.String())
 		}
@@ -1278,7 +1275,6 @@ func daemonRestartCmd() *cobra.Command {
 	var bootstrapFile string
 	var bootstrapKeyFile string
 	var idleLockStr string
-	var syncConcurrency int
 	var c *cobra.Command
 	c = &cobra.Command{
 		Use:   "restart",
@@ -1311,7 +1307,6 @@ func daemonRestartCmd() *cobra.Command {
 	c.Flags().StringVar(&bootstrapFile, "bootstrap", "", "path to a signed bootstrap.yaml to load and auto-dial seed zens")
 	c.Flags().StringVar(&bootstrapKeyFile, "bootstrap-key", "", "path to a file containing the base64 Ed25519 public key that signed the bootstrap")
 	c.Flags().StringVar(&idleLockStr, "idle-lock", "", "auto-lock the signing key after this idle duration (e.g. 5m, 1h)")
-	c.Flags().IntVar(&syncConcurrency, "sync-concurrency", 8, "maximum number of zen dials to run in parallel during a sync round")
 	return c
 }
 

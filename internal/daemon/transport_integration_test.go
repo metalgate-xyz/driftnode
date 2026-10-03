@@ -300,13 +300,13 @@ func TestResolvePendingFollowsDoesNotSyncNonFollowedZen(t *testing.T) {
 	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
 	d.learnZenRef(syncproto.ZenRef{Token: carolTok, Identity: carolKP.Identity()})
 
-	// Trigger a sync round: Carol is a pending follow, so
-	// resolvePendingFollows probes both known tokens. Only Carol's token
-	// matches a pending follow and gets synced; Bob's token is probed
-	// (handshake only) and must not pull Bob's post.
-	if _, err := SendRequest(sock, "sync", nil); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
+	// Drive one assess pass directly. In the redesigned scheduler the
+	// assess thread owns pending-follow resolution: it probes known tokens,
+	// binds the one matching a pending follow (Carol), and syncs only that
+	// confirmed follow. Bob's token is probed (handshake only) and must not
+	// pull Bob's post. The assess thread runs every 60s in production; this
+	// calls its body synchronously for a deterministic check.
+	d.assess(context.Background())
 
 	deadline := time.Now().Add(5 * time.Second)
 	var carolPresent, bobPresent bool

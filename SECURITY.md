@@ -53,13 +53,16 @@ event only. `unfollow` is the single remove gesture: it writes an Unfollow
 event, deletes the routing binding, and drops the zen. There is no separate
 `zens add` command.
 
-`syncAllZens` reads `FollowGraph()` (the declared follow set, derived from
-the Profile log) and dials each identity's bound token. A followed identity
-with no bound token (followed offline by pubkey) is pending: known tokens
-are probed with a handshake-only session to learn the zen's identity, and
-only a matching token is bound and then synced. Tokens learned via zen
-exchange (`learnZenRef`) are recorded for discovery and zen-exchange offers
-but never auto-dialed; dialing them requires a follow.
+The scheduler's assess thread reads `FollowGraph()` (the declared follow set,
+derived from the Profile log), resolves pending (offline-by-pubkey) follows
+by probing known tokens with a handshake-only session, and recomputes the
+weighted graph. A followed identity with no bound token is pending: known
+tokens are probed to learn the zen's identity, and only a matching token is
+bound and then synced. The head and tail lanes dial the bound follows by
+priority: the head set (top-K highest weight) with fast-skip, the tail set
+with low fan-out. Tokens learned via zen exchange (`learnZenRef`) are
+recorded for discovery and zen-exchange offers but never auto-dialed;
+dialing them requires a follow.
 
 Bootstrap seeds are auto-followed on first dial (`dialBootstrapSeeds`): each
 seed is dialed, its identity learned from the handshake, a Follow event

@@ -195,16 +195,136 @@ weights are persisted.
    reciprocal set, and the pin set, mirroring the phase-4 analysis script's
    single-pass pattern) and writes each followed identity's weight into a
    new `weight` bucket. `store.WeightedGraph()` reads the persisted weights
-   and `store.Weight(id)` reads one. The daemon's `syncAllZens` calls
-   `RecomputeWeights()` once per round before dialing, so the weighted graph
-   is fresh. Sync is still uniform fan-out; the persisted weights are
-   consumed for priority ordering in phase 6.
-6. **Scheduler redesign.** Replace `syncAllZens`'s flat `FollowGraph()`
-   iteration + uniform fan-out with a priority queue over the weighted
-   graph: high-weight follows sync first and every round; low-weight
-   follows round-robin across rounds; a dialing peer that times out stops
-   blocking the next high-weight follow. Regression test: top-K high-weight
-   follows sync in round 1 even when the long tail is unreachable.
+   and `store.Weight(id)` reads one. The daemon's assess thread calls
+   `RecomputeWeights()` once per pass before deriving the head/tail sets, so
+   the weighted graph is fresh. Sync is still uniform fan-out; the persisted
+   weights are consumed for priority ordering in phase 6.
+6. **Scheduler redesign.** DONE. Replace `syncAllZens`'s flat `FollowGraph()`
+   iteration + uniform fan-out with four independent routines sharing one
+   background context (cancelled on Stop): a crawl loop, an assess thread, a
+   head lane, and a tail lane. All period, backoff, timeout, and concurrency
+   values are hardcoded constants in the daemon.
+
+   - **Crawl loop.** A separate concern, untouched by phase 6 except renaming:
+     `syncLoop`->`crawlLoop`, `syncNow`->`crawlNow`,
+     `triggerSyncNow`->`triggerCrawlNow`. It periodically walks the follow
+     graph fetching Profile logs (section 9.3) and fires on demand when user
+     actions (post, follow, unfollow) trigger a crawl. The head lane's own
+     continuous cadence delivers snappy sync of the top-K follows, so a
+     separate head-sync trigger is not needed.
+
+   - **Assess thread.** The only routine that touches the weight computation.
+     One body per pass, run in this order:
+
+     1. Resolve pending follows. A followed identity with no bound routing
+        token (an offline-by-pubkey follow) is resolved by probing known
+        tokens: each is dialed with a short handshake revealing the remote
+        identity; if that identity is a pending follow, its token is bound
+        via `store.PutRouting`. Only the handshake runs for non-matching
+        tokens (a full sync would leak a non-followed zen's PostLog).
+        Resolution belongs here because the assess thread is the promote/
+        demote routine that makes new follows reachable: probing known
+        tokens is the only way to learn a binding for an offline-by-pubkey
+        follow, and a resolved follow enters the weighted graph this pass
+        and becomes dialable by the lanes on the next.
+     2. Recompute the weighted graph (`store.RecomputeWeights`, which
+        persists the per-follow weight map to the `weight` bucket). Newly
+        bound follows now have weights.
+     3. Derive the head and tail sets from the recomputed bound follows
+        (bound = has a routing token): head = top-K highest-weight, tail =
+        the rest, with the identity string as a deterministic tiebreak for
+        stable ordering. A follow whose interaction signal grew (its posts
+        got liked/replied to, it became reciprocal, or it was pinned) climbs
+        the ranking into the head set; one that lost signal drops into the
+        tail.
+
+     The assess thread runs on a ticker whose period is `assessPeriod`, the
+     functional answer to "how fast should graph weights be reassessed?",
+     independent of the lanes (see the constants table for its value and
+     grounding).
+
+   - **Head lane.** Continuously dials the head set with fast-skip: a head
+     follow that does not answer is skipped after the head dial timeout (5s),
+     releasing its concurrency slot in seconds instead of holding it. Head
+     fan-out is 8. After each pass it pauses a short backoff (5s) so a pass
+     that completes fast does not busy spin. The point is snappy updates from
+     the follows the user cares about.
+
+   - **Tail lane.** Continuously dials the tail set in the background with a
+     small fixed fan-out (2) and a longer per-dial timeout (10s; latency is
+     acceptable here, liveness is the goal, but a follow that never answers
+     still releases its slot). After each pass it pauses the same short
+     backoff (5s).
+
+   All four routines share one background context (cancelled on Stop). The
+   constants (all source-code constants in the daemon, not config):
+
+   | Routine | Constant | Value | Role |
+   |---|---|---|---|
+   | Crawl loop | `crawlInterval` | 10m | ticker period between crawl passes (walk follow graph, fetch Profile logs, §9.3) |
+   | Crawl loop | `crawlNow` | chan, cap 1 | on-demand trigger; a pending signal is dropped if one is already queued |
+   | Assess thread | `assessPeriod` | 60s | ticker period: how fast weights are recomputed and head/tail re-derived |
+   | Assess thread | `defaultHeadSize` | 150 | K, the head-set size (Dunbar); tests override via the unexported `headSize` field |
+   | Head lane | `headDialTimeout` | 5s | fast-skip per-dial timeout; a non-answering head follow releases its slot in seconds |
+   | Head lane | `headFanout` | 8 | parallel dials per pass |
+   | Head lane | `laneBackoff` | 5s | sleep after each pass so a fast pass does not busy spin (shared with tail) |
+   | Tail lane | `tailDialTimeout` | 10s | per-dial timeout; latency OK here (liveness), but a never-answering follow still releases its slot |
+   | Tail lane | `tailFanout` | 2 | small fixed concurrency |
+   | Tail lane | `laneBackoff` | 5s | sleep after each pass (shared with head) |
+
+   `assessPeriod` (60s) is the functional cadence for weight reassessment,
+   independent of the lanes. It is grounded in the timescale on which the
+   weight ranking actually changes: interaction signals arrive in bursts
+   concentrated in the first 30-60 min after content, a tweet's median
+   impression half-life is ~80 min (Pfeffer et al., arXiv 2302.09654), and the
+   follow graph's structure churns slowly at ~9% of edges per month (Myers et
+   al., WWW 2014). Recompute is a single read transaction over a
+   Dunbar-bounded graph (~150), so running it every minute is negligible cost.
+   The lane backoff (5s) is a technical sleep distinct from the assess period;
+   the on-demand dial path (`connectAndSync`, used by follow-by-token,
+   bootstrap, and pending-resolution) keeps its 30s dial timeout derived from
+   the caller's context.
+
+   The head size K is the number of highest-weight follows in the head set,
+   sized to Dunbar's number (~150 stable relationships), the realistic ceiling
+   for a personal network. Tests override it by setting the unexported
+   `headSize` field directly (the test lives in the same package); no
+   test-only setter pollutes the public API. The old `syncConcurrency` field,
+   `SetSyncConcurrency`, and the `--sync-concurrency` CLI flag are removed:
+   the lanes have hardcoded fan-out, so the knob controls nothing.
+   `syncAllZens` is removed (replaced by the lanes). The lanes' dials derive
+   their per-dial timeout from the shared background context so Stop cancels
+   in-flight dials promptly; `connectAndSync` and `resolvePendingFollows`
+   take a context for the same reason.
+
+   Regression test (against an injected `Transport`, like the existing
+   `multiPipeTransport` in `transport_integration_test.go`):
+
+   - **Head fast-skip under an unreachable tail.** Set up Alice with a small
+     K (e.g. 2 via the unexported field) and N>K bound follows whose weights
+     rank the first K as head and the rest as tail. Give the tail follows a
+     transport whose `Dial` blocks until its context is cancelled (never
+     answers), and the head follows a working `pipeTransport` server each.
+     Assert that every head follow's posts land in Alice's store (via
+     `storeHasPost`) within one head pass plus the head backoff, even while
+     the unreachable tail dials are still blocking in their own lane. This
+     proves the head lane dials the head set with fast-skip and is not
+     starved by the tail: a broken implementation that dialed the whole
+     graph with one shared fan-out would have its slots held by the blocking
+     tail and the head posts would not land.
+   - **Tail independence.** With the same setup, assert a tail follow with a
+     working server syncs in the background (its post lands) even though no
+     head pass touched it, confirming the tail lane dials the tail set
+     separately.
+   - **Promote/demote.** Start with a follow in the tail set (no interaction
+     signal, cold-start weight). Change its signal: like one of its posts
+     (append a signed `Like` to Alice's own PostLog targeting the follow's
+     post, which lifts its weight above cold-start) so it outranks a current
+     head follow. Run the assess thread (`store.RecomputeWeights`), then read
+     `store.WeightedGraph()` and split the bound follows at K to see the head
+     and tail sets. Assert the follow is now in the head set and the
+     displaced follow is in the tail set. This validates that promote/demote
+     is driven solely by the assess thread's recomputation, not by the lanes.
 
 ## Current state of interaction primitives
 
@@ -226,4 +346,10 @@ with the signed ProfileLog by routing all follow writes through
 rebuilt from the log on backup restore. Pins survive backup restore (in
 `BackupData`).
 
-Remaining: scheduler redesign (Phase 6).
+The scheduler (Phase 6) is implemented as four independent routines sharing
+one background context: a crawl loop (periodic + on-demand Profile-log
+walks), an assess thread (weight recomputation and head/tail derivation), a
+head lane (continuous, fast-skip dialing of the top-K follows), and a tail
+lane (continuous, low-fan-out dialing of the rest). `syncAllZens`,
+`syncConcurrency`/`SetSyncConcurrency`, and the `--sync-concurrency` CLI flag
+are removed.

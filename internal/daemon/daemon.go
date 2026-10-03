@@ -16,6 +16,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
 
@@ -59,10 +60,31 @@ type Daemon struct {
 	// control socket for local commands).
 	tcListener *p2p.Listener
 	transport  Transport
-	// syncCancel stops the background sync loop on Stop.
-	syncCancel context.CancelFunc
-	// syncNow triggers an immediate sync round out of the periodic cadence.
-	syncNow chan struct{}
+	// bgCancel stops all four background routines (crawl loop, assess
+	// thread, head lane, tail lane) on Stop. They share one context so a
+	// single cancellation tears down in-flight dials promptly.
+	bgCancel context.CancelFunc
+	// crawlNow triggers an immediate crawl pass out of the periodic
+	// cadence, fired by user actions (post, follow, unfollow) and the
+	// sync RPC. Buffered with capacity 1 so a pending signal is dropped
+	// if one is already queued.
+	crawlNow chan struct{}
+	// headSize caps the head-set size K (Dunbar). Tests override it by
+	// setting this field directly (same package); production leaves it
+	// zero so the split uses defaultHeadSize.
+	headSize int
+	// splitMu guards headSet and tailSet, the head/tail split computed once
+	// per assess pass and read by both lanes. assess is the sole writer
+	// (the only routine that derives weights); it holds splitMu around the
+	// weight derivation and the split, never during the resolve dials, so
+	// the lanes keep running while pending follows are resolved. A lane
+	// holds splitMu only for the slice copy it reads, so it dials against a
+	// consistent snapshot even if assess publishes the next split mid-pass.
+	// Separate from d.mu so the lanes do not contend with control-socket
+	// handlers.
+	splitMu   sync.Mutex
+	headSet   []core.Identity
+	tailSet   []core.Identity
 	// done is closed when Stop is called, allowing Start's Wait to return.
 	done chan struct{}
 
@@ -103,10 +125,6 @@ type Daemon struct {
 	// Cleared while the key is locked, so the next unlock retries the
 	// bootstrap auto-follow if it ran before the key was available.
 	bootstrapDone bool
-
-	// syncConcurrency caps the number of zen dials that run in parallel
-	// during a sync round. Default 8; 0 falls back to that.
-	syncConcurrency int
 
 	// subscribers are open subscribe connections. Each holds a buffered
 	// queue of push events. The daemon broadcasts state changes (zens
@@ -434,7 +452,7 @@ func New(s *store.Store, logger *slog.Logger) *Daemon {
 		logger:      logger,
 		zens:        make(map[string]*zenInfo),
 		knownTokens: make(map[string]bool),
-		syncNow:     make(chan struct{}, 1),
+		crawlNow:    make(chan struct{}, 1),
 		done:        make(chan struct{}),
 		nameCache:   make(map[core.Identity]string),
 	}
@@ -471,17 +489,6 @@ func (d *Daemon) SetBootstrap(path string, verifyKey ed25519.PublicKey) {
 func (d *Daemon) SetIdleLock(dur time.Duration) {
 	d.mu.Lock()
 	d.idleLock = dur
-	d.mu.Unlock()
-}
-
-// SetSyncConcurrency caps the number of zen dials that run in parallel
-// during a sync round. A zero or negative value falls back to the default.
-func (d *Daemon) SetSyncConcurrency(n int) {
-	if n <= 0 {
-		n = 8
-	}
-	d.mu.Lock()
-	d.syncConcurrency = n
 	d.mu.Unlock()
 }
 
@@ -557,13 +564,27 @@ func (d *Daemon) Start(socketPath string) error {
 		d.emitStatus()
 	}
 
-	// Background sync loop: pull from known zens periodically and on demand.
+	// Background routines, all sharing one context cancelled on Stop:
+	// the crawl loop (periodic + on-demand Profile-log walks), the assess
+	// thread (weight recomputation and head/tail derivation), and the
+	// head and tail lanes that continuously dial their sets with fast-skip.
+	// The lanes deliver snappy sync of the top-K follows, so a reattached
+	// daemon pulls the logs it missed while down without waiting on the
+	// crawl interval.
 	ctx, cancel := context.WithCancel(context.Background())
-	d.syncCancel = cancel
-	go d.syncLoop(ctx)
-	// Trigger an immediate first round so a reattached daemon pulls the
-	// logs it missed while down, instead of waiting up to syncInterval.
-	d.triggerSyncNow()
+	d.bgCancel = cancel
+	// Seed the head/tail split before launching the lanes so their first
+	// pass reads a populated split instead of empty sets, then waits for
+	// the first assess pass. Read-only: no dials, just the persisted
+	// weights and routing table.
+	d.seedSplit()
+	go d.crawlLoop(ctx)
+	go d.assessLoop(ctx)
+	go d.headLane(ctx)
+	go d.tailLane(ctx)
+	// Trigger an immediate first crawl so a reattached daemon discovers
+	// any new follows' Profile logs right away.
+	d.triggerCrawlNow()
 
 	// Auto-dial bootstrap seed zens (section 6.1). A fresh node finds its
 	// first zens this way; the file is verified before any dial.
@@ -596,9 +617,9 @@ func (d *Daemon) Start(socketPath string) error {
 // rehydrateZens loads the persisted routing bindings (identity -> token)
 // into the in-memory zens map. Called from Start so the known network is
 // visible to the zens RPC right after a restart, instead of appearing empty
-// until the background sync loop redials each token. Tokens learned only
-// through zen exchange are not persisted, so they are not restored here;
-// they are relearned on the next exchange.
+// until the head/tail lanes redial each token. Tokens learned only through
+// zen exchange are not persisted, so they are not restored here; they are
+// relearned on the next exchange.
 func (d *Daemon) rehydrateZens() {
 	routing, err := d.store.AllRouting()
 	if err != nil {
@@ -708,8 +729,9 @@ func (d *Daemon) rotateKey() (string, error) {
 }
 
 // Stop closes the control socket, the tailcat listener, and stops the
-// background sync loop, then removes the socket file. It is safe to call
-// from the control-socket handler (self-stop) or from a signal handler.
+// background routines (crawl loop, assess thread, head/tail lanes), then
+// removes the socket file. It is safe to call from the control-socket
+// handler (self-stop) or from a signal handler.
 //
 // Teardown ordering matters: subscribers are closed first so the Subscribe
 // pumps exit and their streams complete; then GracefulStop waits for in-flight
@@ -726,8 +748,8 @@ func (d *Daemon) Stop() {
 	d.listener = nil
 	tc := d.tcListener
 	d.tcListener = nil
-	syncCancel := d.syncCancel
-	d.syncCancel = nil
+	syncCancel := d.bgCancel
+	d.bgCancel = nil
 	subs := d.subs
 	d.subs = nil
 	socket := d.socket
@@ -1107,7 +1129,7 @@ func (d *Daemon) handlePost(text, parentID string, kp *core.KeyPair) Response {
 	}
 	d.invalidateFeed()
 	d.touchSignAt()
-	d.triggerSyncNow()
+	d.triggerCrawlNow()
 	ownID, _, _ := d.store.Identity()
 	name := d.displayName(ownID)
 	d.emitFeedAdd([]feedItem{{
@@ -1141,7 +1163,7 @@ func (d *Daemon) handleLike(postID string, kp *core.KeyPair) Response {
 	}
 	d.invalidateFeed()
 	d.touchSignAt()
-	d.triggerSyncNow()
+	d.triggerCrawlNow()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
@@ -1284,7 +1306,7 @@ func (d *Daemon) handleProfile(name string, kp *core.KeyPair) Response {
 	}
 	d.invalidateNames()
 	d.touchSignAt()
-	d.triggerSyncNow()
+	d.triggerCrawlNow()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
@@ -1301,7 +1323,7 @@ func (d *Daemon) handleDetail(bio, firstName, lastName, location string, kp *cor
 		return Response{Error: err.Error()}
 	}
 	d.touchSignAt()
-	d.triggerSyncNow()
+	d.triggerCrawlNow()
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 
@@ -1410,7 +1432,8 @@ func (d *Daemon) writeFollow(target [32]byte, kp *core.KeyPair) Response {
 		return Response{Error: err.Error()}
 	} else {
 		d.touchSignAt()
-		d.triggerSyncNow()
+		d.triggerCrawlNow()
+		d.refreshSplit()
 		name, _ := d.store.DisplayName(id)
 		d.emitFollowsAdd(&driftnodepb.Identity{Identity: id.String(), Name: name})
 		return Response{Result: map[string]string{"followed": id.String()}}
@@ -1442,7 +1465,8 @@ func (d *Daemon) handleUnfollow(targetStr string, kp *core.KeyPair) Response {
 	}
 	d.emitFollowsRemove(id.String())
 	d.touchSignAt()
-	d.triggerSyncNow()
+	d.triggerCrawlNow()
+	d.refreshSplit()
 	return Response{Result: map[string]string{"unfollowed": id.String()}}
 }
 
@@ -1460,9 +1484,14 @@ func (d *Daemon) touchSignAt() {
 // authenticated zen identity is bound to the token in the routing table so
 // future sync rounds can dial it by identity. Zen tokens learned during the
 // exchange are recorded for future dials (section 6.1).
-func (d *Daemon) connectAndSync(token string) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+//
+// The per-dial timeout is derived from ctx: the lanes pass a context
+// bounded by their lane dial timeout (head fast-skip 5s, tail 10s) so a
+// non-answering follow releases its slot promptly; the on-demand path
+// (follow-by-token, bootstrap, pending-resolution) passes a context with
+// the full 30s dial timeout. ctx is also what Stop cancels to tear down
+// in-flight dials.
+func (d *Daemon) connectAndSync(ctx context.Context, token string) {
 	d.mu.Lock()
 	transport := d.transport
 	d.mu.Unlock()
@@ -1657,36 +1686,64 @@ func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
 	}
 }
 
-// triggerSyncNow signals the background sync loop to run an immediate sync
-// round. It is non-blocking: the channel is buffered with capacity 1, so a
-// pending signal is simply dropped if one is already queued.
-func (d *Daemon) triggerSyncNow() {
+// Scheduler constants. All source-code constants, not user-facing config.
+// See docs/weighted-follow-graph-plan.md phase 6 for grounding.
+const (
+	// crawlInterval is the ticker period between crawl passes (walk the
+	// follow graph, fetch Profile logs, section 9.3).
+	crawlInterval = 10 * time.Minute
+	// assessPeriod is the ticker period for the assess thread: how fast
+	// weights are recomputed and head/tail re-derived.
+	assessPeriod = 60 * time.Second
+	// defaultHeadSize is K, the head-set size (Dunbar). Tests override via
+	// the unexported headSize field.
+	defaultHeadSize = 150
+	// headDialTimeout is the head lane's fast-skip per-dial timeout: a
+	// non-answering head follow releases its slot in seconds.
+	headDialTimeout = 5 * time.Second
+	// headFanout is the head lane's parallel dials per pass.
+	headFanout = 8
+	// tailDialTimeout is the tail lane's per-dial timeout: latency is OK
+	// here (liveness), but a never-answering follow still releases its slot.
+	tailDialTimeout = 10 * time.Second
+	// tailFanout is the tail lane's small fixed concurrency.
+	tailFanout = 2
+	// laneBackoff is the sleep after each lane pass so a fast pass does
+	// not busy spin (shared by head and tail).
+	laneBackoff = 5 * time.Second
+	// onDemandDialTimeout is the per-dial timeout for the on-demand dial
+	// path (follow-by-token, bootstrap, pending-resolution), derived from
+	// the caller's context.
+	onDemandDialTimeout = 30 * time.Second
+)
+
+// triggerCrawlNow signals the crawl loop to run an immediate crawl pass out
+// of the periodic cadence, fired by user actions (post, follow, unfollow)
+// and the sync RPC. It is non-blocking: the channel is buffered with
+// capacity 1, so a pending signal is dropped if one is already queued.
+func (d *Daemon) triggerCrawlNow() {
 	select {
-	case d.syncNow <- struct{}{}:
+	case d.crawlNow <- struct{}{}:
 	default:
 	}
 }
 
-// syncLoop periodically syncs with all known zens and also fires on demand
-// when syncNow is signaled. It also runs the crawler periodically to walk
-// the follow graph (section 9.3).
-func (d *Daemon) syncLoop(ctx context.Context) {
-	const syncInterval = 1 * time.Minute
-	const crawlInterval = 10 * time.Minute
-	syncTicker := time.NewTicker(syncInterval)
-	crawlTicker := time.NewTicker(crawlInterval)
-	defer syncTicker.Stop()
-	defer crawlTicker.Stop()
+// crawlLoop periodically walks the follow graph fetching Profile logs
+// (section 9.3) and fires on demand when crawlNow is signaled. The head
+// lane's own continuous cadence delivers snappy sync of the top-K follows,
+// so a separate head-sync trigger is not needed.
+func (d *Daemon) crawlLoop(ctx context.Context) {
+	d.logger.Info("crawl loop started", "interval", crawlInterval)
+	defer d.logger.Info("crawl loop stopped")
+	ticker := time.NewTicker(crawlInterval)
+	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-d.syncNow:
-			d.syncAllZens()
+		case <-d.crawlNow:
 			d.runCrawl(ctx)
-		case <-syncTicker.C:
-			d.syncAllZens()
-		case <-crawlTicker.C:
+		case <-ticker.C:
 			d.runCrawl(ctx)
 		}
 	}
@@ -1700,12 +1757,14 @@ func (d *Daemon) runCrawl(ctx context.Context) {
 	if c == nil {
 		return
 	}
+	d.logger.Info("crawl pass start")
+	start := time.Now()
 	fetched, err := c.Run(ctx, &crawlFetcher{d: d})
 	if err != nil {
 		d.logger.Warn("crawl failed", "err", err)
 		return
 	}
-	d.logger.Info("crawl complete", "fetched", fetched, "visited", c.VisitedCount())
+	d.logger.Info("crawl complete", "fetched", fetched, "visited", c.VisitedCount(), "elapsed", time.Since(start))
 }
 
 // crawlFetcher implements crawler.Fetcher by dialing known zens to fetch
@@ -1720,84 +1779,194 @@ func (f *crawlFetcher) FetchFollowers(ctx context.Context, id core.Identity) ([]
 	return f.d.crawlFetchFollowers(ctx, id)
 }
 
-// syncAllZens runs a sync round against every followed identity whose
-// routing token is known. The follow graph is the auto-dial set: a zen is
-// dialed while it is followed and its token is bound. Unfollowing removes
-// the identity from the dial set; a followed identity with no bound token
-// (e.g. followed offline by pubkey) is resolved by probing known tokens:
-// each is dialed, the handshake reveals the identity, and if it matches a
-// pending follow, the token is bound and the identity is synced.
-func (d *Daemon) syncAllZens() {
+// assessLoop runs the assess thread on a ticker. One body per pass, in this
+// order: resolve pending follows, then recompute the weighted graph. It is
+// the only routine that touches weight computation; the lanes derive the
+// head/tail split from the persisted weights each pass.
+func (d *Daemon) assessLoop(ctx context.Context) {
+	d.logger.Info("assess loop started", "period", assessPeriod)
+	defer d.logger.Info("assess loop stopped")
+	ticker := time.NewTicker(assessPeriod)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			d.assess(ctx)
+		}
+	}
+}
+
+// assess runs one pass of the assess thread: resolve pending follows, then
+// recompute and persist the weighted graph. The lanes read the persisted
+// weights and routing table to derive head/tail each pass; this is the only
+// routine that recomputes weights, so a follow's promote/demote is driven
+// by the assess cadence, not by the lanes.
+func (d *Daemon) assess(ctx context.Context) {
+	d.logger.Info("assess pass start")
+	start := time.Now()
 	ids, err := d.store.FollowGraph()
 	if err != nil {
-		d.logger.Warn("sync: read follow graph", "err", err)
+		d.logger.Warn("assess: read follow graph", "err", err)
 		return
 	}
-	// Recompute per-follow sync-priority weights from current interaction
-	// metrics so the weighted graph is fresh for this round. The dialer
-	// still fans out uniformly; phase 6 consumes the weights for priority
-	// ordering.
-	if _, err := d.store.RecomputeWeights(); err != nil {
-		d.logger.Warn("sync: recompute weights", "err", err)
+	d.logger.Info("assess:", "follows", len(ids))
+	// Bound vs. pending from one routing read instead of one per follow.
+	routing, err := d.store.AllRouting()
+	if err != nil {
+		d.logger.Warn("assess: read routing", "err", err)
+		return
 	}
-	// Split into bound (have a token) and pending (need resolution).
-	var bound []core.Identity
 	var pending []core.Identity
 	for _, id := range ids {
-		_, ok, err := d.store.Routing(id)
-		if err != nil {
-			d.logger.Warn("sync: read routing", "zen", id, "err", err)
-			continue
-		}
-		if ok {
-			bound = append(bound, id)
-		} else {
+		if _, ok := routing[id]; !ok {
 			pending = append(pending, id)
 		}
 	}
-	// Dial bound identities in parallel with a bounded fan-out, so a
-	// large follow graph syncs in wall-clock time proportional to
-	// syncConcurrency rather than to the number of follows. The shared
-	// state each session touches is already safe: daemon state is under
-	// d.mu, and bbolt serializes store writes internally.
-	d.mu.Lock()
-	syncConcurrency := d.syncConcurrency
-	d.mu.Unlock()
-	if syncConcurrency <= 0 {
-		syncConcurrency = 8
-	}
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, syncConcurrency)
-	for _, id := range bound {
-		token, _, _ := d.store.Routing(id)
-		wg.Add(1)
-		sem <- struct{}{}
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-			d.connectAndSync(token)
-		}()
-	}
-	wg.Wait()
-	// Resolve pending follows by probing known tokens.
+	d.logger.Info("assess:", "pending", len(pending))
+	// 1. Resolve pending follows: probing known tokens is the only way to
+	// learn a binding for an offline-by-pubkey follow, and a resolved
+	// follow enters the weighted graph this pass and becomes dialable by
+	// the lanes on the next.
 	if len(pending) > 0 {
-		d.resolvePendingFollows(pending)
+		d.resolvePendingFollows(ctx, pending)
 	}
+	// 2. Derive weights and re-split. The resolution above may have bound
+	// pending follows, so deriveSplit re-reads routing to include them.
+	n := d.deriveSplit(ids)
+	d.logger.Info("assess:", "weights", n)
+	d.logger.Info("assess pass done", "elapsed", time.Since(start))
+}
+
+// deriveSplit recomputes the weighted graph from the follow graph's
+// interaction signals, then re-derives and caches the head/tail split. It is
+// the cheap part of an assess pass: no dials, no pending resolution, just a
+// single weight recompute (one bbolt read tx over the follow graph) and a
+// sort. assess calls it after resolving pending follows; user-action
+// handlers (follow, pin, unfollow, unpin) call it directly so the ranking
+// reflects the change on the next lane pass instead of waiting up to
+// assessPeriod. Holding splitMu around the recompute and the split keeps the
+// lanes on a consistent snapshot.
+func (d *Daemon) deriveSplit(ids []core.Identity) int {
+	d.splitMu.Lock()
+	defer d.splitMu.Unlock()
+	weights, err := d.store.RecomputeWeights()
+	if err != nil {
+		d.logger.Warn("derive split: recompute weights", "err", err)
+		return 0
+	}
+	routing, err := d.store.AllRouting()
+	if err != nil {
+		d.logger.Warn("derive split: read routing", "err", err)
+		return len(weights)
+	}
+	d.headSet, d.tailSet = splitHeadTail(ids, weights, routing, d.headSize)
+	return len(weights)
+}
+
+// refreshSplit reads the follow graph and derives the split, for the
+// user-action handlers that don't already hold the ids. assess reads the
+// graph once and passes the ids to deriveSplit to avoid a second read.
+func (d *Daemon) refreshSplit() {
+	ids, err := d.store.FollowGraph()
+	if err != nil {
+		d.logger.Warn("refresh split: read follow graph", "err", err)
+		return
+	}
+	d.deriveSplit(ids)
+}
+
+// splitHeadTail splits the bound follows into head and tail: head = the
+// top-K highest-weight bound follows, tail = the rest, with the identity
+// string as a deterministic tiebreak for stable ordering. Pure: no I/O, no
+// receiver state. assess calls it once per pass and caches the result for
+// the lanes; computing the split in two places (one per lane) would run the
+// sort twice and, worse, could race a weight derivation between the two
+// calls so head and tail derive from different weight snapshots.
+func splitHeadTail(ids []core.Identity, weights map[core.Identity]float64, routing map[core.Identity]string, headSize int) (head, tail []core.Identity) {
+	type entry struct {
+		id core.Identity
+		w  float64
+	}
+	var entries []entry
+	for _, id := range ids {
+		if _, ok := routing[id]; !ok {
+			continue // not bound
+		}
+		entries = append(entries, entry{id: id, w: weights[id]})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].w != entries[j].w {
+			return entries[i].w > entries[j].w
+		}
+		return entries[i].id < entries[j].id
+	})
+	k := headSize
+	if k <= 0 {
+		k = defaultHeadSize
+	}
+	if k > len(entries) {
+		k = len(entries)
+	}
+	for i, e := range entries {
+		if i < k {
+			head = append(head, e.id)
+		} else {
+			tail = append(tail, e.id)
+		}
+	}
+	return head, tail
+}
+
+// snapshotSplit returns a copy of the cached head/tail split for a lane pass.
+// It holds splitMu only long enough to copy the slices, so a lane dials a
+// consistent set even if assess publishes the next split while the pass runs.
+func (d *Daemon) snapshotSplit() (head, tail []core.Identity) {
+	d.splitMu.Lock()
+	head = append(head, d.headSet...)
+	tail = append(tail, d.tailSet...)
+	d.splitMu.Unlock()
+	return head, tail
+}
+
+// seedSplit populates the head/tail split from the persisted weights and
+// routing table without deriving (no dials, no recompute). Called from Start
+// before the lanes launch so their first pass reads a populated split instead
+// of empty sets, then waits for the first assess pass. No lock: the lanes
+// have not started yet.
+func (d *Daemon) seedSplit() {
+	ids, err := d.store.FollowGraph()
+	if err != nil {
+		d.logger.Warn("seed split: read follow graph", "err", err)
+		return
+	}
+	routing, err := d.store.AllRouting()
+	if err != nil {
+		d.logger.Warn("seed split: read routing", "err", err)
+		return
+	}
+	weights, err := d.store.WeightedGraph()
+	if err != nil {
+		d.logger.Warn("seed split: read weighted graph", "err", err)
+		return
+	}
+	d.headSet, d.tailSet = splitHeadTail(ids, weights, routing, d.headSize)
 }
 
 // resolvePendingFollows dials known tokens to find the routing for followed
 // identities that have no bound token. Each token is dialed and a handshake
 // reveals the zen's identity; if that identity is in the pending set, the
-// token is bound and the identity is synced. Used when a follow was
-// recorded by pubkey (offline) and the token is learned later via zen
-// exchange or another sync.
+// token is bound and the identity is synced. Used when a follow was recorded
+// by pubkey (offline) and the token is learned later via zen exchange or
+// another sync. ctx bounds each dial (and is cancelled on Stop).
 //
 // Only the handshake runs for non-matching tokens: a full sync session pulls
 // the remote zen's PostLog into the local follows cache, so syncing with a
 // token that is not a followed identity would leak that zen's posts into the
 // feed's source set. Binding the token here makes the confirmed follow
-// "bound", and the regular sync loop pulls its logs on the next round.
-func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
+// "bound", and the lanes pull its logs on the next pass.
+func (d *Daemon) resolvePendingFollows(ctx context.Context, pending []core.Identity) {
 	pendingSet := make(map[core.Identity]bool, len(pending))
 	for _, id := range pending {
 		pendingSet[id] = true
@@ -1812,8 +1981,8 @@ func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
 	}
 	for _, ref := range d.knownRefsList() {
 		tok := ref.Token
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		conn, err := transport.Dial(ctx, tok)
+		dialCtx, cancel := context.WithTimeout(ctx, onDemandDialTimeout)
+		conn, err := transport.Dial(dialCtx, tok)
 		if err != nil {
 			cancel()
 			continue
@@ -1836,7 +2005,109 @@ func (d *Daemon) resolvePendingFollows(pending []core.Identity) {
 		}
 		// Now that the follow is bound, sync its logs. This is the only
 		// sync in this path, and it runs solely for a confirmed follow.
-		d.connectAndSync(tok)
+		// The on-demand dial path keeps its 30s timeout derived from the
+		// caller's context.
+		syncCtx, syncCancel := context.WithTimeout(ctx, onDemandDialTimeout)
+		d.connectAndSync(syncCtx, tok)
+		syncCancel()
+	}
+}
+
+// dialSet dials each identity's bound token with the given per-dial timeout
+// and fan-out, deriving each dial's context from the shared lane context so
+// Stop cancels in-flight dials promptly. A dial that does not answer within
+// the timeout releases its slot (fast-skip), so the lane is not starved by
+// unresponsive follows. fanout caps the parallel dials per pass. It returns
+// the number of dials launched, for per-pass logging.
+func (d *Daemon) dialSet(ctx context.Context, ids []core.Identity, timeout time.Duration, fanout int) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	if fanout <= 0 {
+		fanout = 1
+	}
+	// Resolve tokens up front so the dial loop does not re-enter the
+	// routing table per identity.
+	var tokens []string
+	for _, id := range ids {
+		tok, ok, _ := d.store.Routing(id)
+		if !ok {
+			continue
+		}
+		tokens = append(tokens, tok)
+	}
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, fanout)
+	for _, tok := range tokens {
+		wg.Add(1)
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			return len(tokens)
+		}
+		go func(token string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			dialCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			d.connectAndSync(dialCtx, token)
+		}(tok)
+	}
+	wg.Wait()
+	return len(tokens)
+}
+
+// headLane continuously dials the head set with fast-skip: a head follow
+// that does not answer is skipped after headDialTimeout, releasing its
+// concurrency slot in seconds instead of holding it. After each pass it
+// pauses laneBackoff so a pass that completes fast does not busy spin. The
+// point is snappy updates from the follows the user cares about.
+func (d *Daemon) headLane(ctx context.Context) {
+	d.logger.Info("head lane started", "fanout", headFanout, "dial_timeout", headDialTimeout, "backoff", laneBackoff)
+	defer d.logger.Info("head lane stopped")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		d.logger.Info("head lane pass start")
+		start := time.Now()
+		head, _ := d.snapshotSplit()
+		n := d.dialSet(ctx, head, headDialTimeout, headFanout)
+		d.logger.Info("head lane pass done", "head", len(head), "dialed", n, "elapsed", time.Since(start))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(laneBackoff):
+		}
+	}
+}
+
+// tailLane continuously dials the tail set in the background with a small
+// fixed fan-out and a longer per-dial timeout: latency is acceptable here
+// (liveness is the goal), but a follow that never answers still releases
+// its slot. After each pass it pauses laneBackoff.
+func (d *Daemon) tailLane(ctx context.Context) {
+	d.logger.Info("tail lane started", "fanout", tailFanout, "dial_timeout", tailDialTimeout, "backoff", laneBackoff)
+	defer d.logger.Info("tail lane stopped")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		d.logger.Info("tail lane pass start")
+		start := time.Now()
+		_, tail := d.snapshotSplit()
+		n := d.dialSet(ctx, tail, tailDialTimeout, tailFanout)
+		d.logger.Info("tail lane pass done", "tail", len(tail), "dialed", n, "elapsed", time.Since(start))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(laneBackoff):
+		}
 	}
 }
 
