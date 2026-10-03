@@ -264,7 +264,7 @@ weights are persisted.
    | Crawl loop | `crawlInterval` | 10m | ticker period between crawl passes (walk follow graph, fetch Profile logs, §9.3) |
    | Crawl loop | `crawlNow` | chan, cap 1 | on-demand trigger; a pending signal is dropped if one is already queued |
    | Assess thread | `assessPeriod` | 60s | ticker period: how fast weights are recomputed and head/tail re-derived |
-   | Assess thread | `defaultHeadSize` | 150 | K, the head-set size (Dunbar); tests override via the unexported `headSize` field |
+   | Assess thread | `maxHeadSize` | 150 | ceiling on K, the head-set size; K scales with the bound follows (about a third, Dunbar's layer ratio) up to this cap |
    | Head lane | `headDialTimeout` | 5s | fast-skip per-dial timeout; a non-answering head follow releases its slot in seconds |
    | Head lane | `headFanout` | 8 | parallel dials per pass |
    | Head lane | `laneBackoff` | 5s | sleep after each pass so a fast pass does not busy spin (shared with tail) |
@@ -285,26 +285,31 @@ weights are persisted.
    bootstrap, and pending-resolution) keeps its 30s dial timeout derived from
    the caller's context.
 
-   The head size K is the number of highest-weight follows in the head set,
-   sized to Dunbar's number (~150 stable relationships), the realistic ceiling
-   for a personal network. Tests override it by setting the unexported
-   `headSize` field directly (the test lives in the same package); no
-   test-only setter pollutes the public API. The old `syncConcurrency` field,
-   `SetSyncConcurrency`, and the `--sync-concurrency` CLI flag are removed:
-   the lanes have hardcoded fan-out, so the knob controls nothing.
-   `syncAllZens` is removed (replaced by the lanes). The lanes' dials derive
-   their per-dial timeout from the shared background context so Stop cancels
-   in-flight dials promptly; `connectAndSync` and `resolvePendingFollows`
-   take a context for the same reason.
+   The head size K is the number of highest-weight follows in the head set.
+   K scales with the bound follows at about a third (Dunbar's layer ratio:
+   each layer is ~3x the one inside it, so a third keeps the head a true inner
+   circle), capped at `maxHeadSize` (150, Dunbar's active network ceiling for
+   a personal network) and floored to 1 so a single bound follow is never
+   stranded in an empty head. The head/tail split is derived from the bound
+   follows and computed by the scheduler; tests that need a specific K size
+   the bound graph accordingly (e.g. 12 bound follows yield K=4). The old
+   `syncConcurrency` field, `SetSyncConcurrency`, and the `--sync-concurrency`
+   CLI flag are removed: the lanes have hardcoded fan-out, so the knob
+   controls nothing. `syncAllZens` is removed (replaced by the lanes). The
+   lanes' dials derive their per-dial timeout from the shared background
+   context so Stop cancels in-flight dials promptly; `connectAndSync` and
+   `resolvePendingFollows` take a context for the same reason.
 
    Regression test (against an injected `Transport`, like the existing
    `multiPipeTransport` in `transport_integration_test.go`):
 
-   - **Head fast-skip under an unreachable tail.** Set up Alice with a small
-     K (e.g. 2 via the unexported field) and N>K bound follows whose weights
-     rank the first K as head and the rest as tail. Give the tail follows a
-     transport whose `Dial` blocks until its context is cancelled (never
-     answers), and the head follows a working `pipeTransport` server each.
+   - **Head fast-skip under an unreachable tail.** Set up Alice with N bound
+     follows whose weights rank the first K as head and the rest as tail,
+     where K is the scheduler's derived value (e.g. 12 bound follows yield
+     K=4). Give the tail follows a transport whose `Dial` blocks until its
+     context is cancelled (never answers), and the head follows a working
+     `pipeTransport` server each. The tail count meets the head fan-out so a
+     single shared dial pool would be saturated by the blocking tail dials.
      Assert that every head follow's posts land in Alice's store (via
      `storeHasPost`) within one head pass plus the head backoff, even while
      the unreachable tail dials are still blocking in their own lane. This
@@ -321,10 +326,12 @@ weights are persisted.
      (append a signed `Like` to Alice's own PostLog targeting the follow's
      post, which lifts its weight above cold-start) so it outranks a current
      head follow. Run the assess thread (`store.RecomputeWeights`), then read
-     `store.WeightedGraph()` and split the bound follows at K to see the head
-     and tail sets. Assert the follow is now in the head set and the
-     displaced follow is in the tail set. This validates that promote/demote
-     is driven solely by the assess thread's recomputation, not by the lanes.
+     `store.WeightedGraph()` and split the bound follows at K (the
+     scheduler's derived value; e.g. 2 bound follows floor to K=1) to see
+     the head and tail sets. Assert the follow is now in the head set and
+     the displaced follow is in the tail set. This validates that
+     promote/demote is driven solely by the assess thread's recomputation,
+     not by the lanes.
 
 ## Current state of interaction primitives
 

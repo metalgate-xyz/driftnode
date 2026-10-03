@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sort"
 	"testing"
 	"time"
 
@@ -90,30 +92,31 @@ func peerServer(t *testing.T, name string) (*store.Store, *core.KeyPair, string,
 
 // TestHeadLaneFastSkipUnderUnreachableTail proves the head lane dials the
 // head set with fast-skip and is not starved by an unreachable tail. Alice
-// has K=2 with 2 pinned head follows (working servers) and 8 cold-start tail
-// follows (a transport that never answers). The tail count meets the head
-// fan-out, so a single shared dial pool would be saturated by the blocking
-// tail dials and the head dials would wait for the tail timeout before
-// running. Every head follow's post must land well within the head dial
-// timeout (seconds), proving the head lane has its own concurrency pool
-// separate from the tail.
+// has 4 pinned head follows (working servers) and 8 cold-start tail follows
+// (a transport that never answers): 12 bound follows, so K scales to 4 and
+// the head set is exactly the pinned follows. The tail count meets the
+// head fan-out, so a single shared dial pool would be saturated by the
+// blocking tail dials and the head dials would wait for the tail timeout
+// before running. Every head follow's post must land well within the head
+// dial timeout (seconds), proving the head lane has its own concurrency
+// pool separate from the tail.
 func TestHeadLaneFastSkipUnderUnreachableTail(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	aliceStore := openTestStore(t)
 	aliceKP := initTestIdentityAt(t, aliceStore, "alicepass")
 
-	const k = 2
+	const numHeads = 4
 	const numTail = headFanout // saturate a shared pool the size of headFanout
 	type peer struct {
 		kp   *core.KeyPair
 		text string
 		tok  string
 	}
-	heads := make([]peer, k)
+	heads := make([]peer, numHeads)
 	tails := make([]peer, numTail)
-	working := make(map[string]pipeTransport, k)
+	working := make(map[string]pipeTransport, numHeads)
 	block := make(map[string]bool, numTail)
-	for i := 0; i < k; i++ {
+	for i := 0; i < numHeads; i++ {
 		hs, hkp, htext, _ := peerServer(t, "head"+string(rune('A'+i)))
 		tok := "tok-head-" + string(rune('A'+i))
 		heads[i] = peer{kp: hkp, text: htext, tok: tok}
@@ -136,7 +139,6 @@ func TestHeadLaneFastSkipUnderUnreachableTail(t *testing.T) {
 	}
 
 	d := New(aliceStore, logger)
-	d.headSize = k
 	d.SetTransport(laneTransport{working: working, block: block})
 	sock := testSocketPath(t)
 	if err := d.Start(sock); err != nil {
@@ -180,10 +182,10 @@ func TestTailLaneIndependence(t *testing.T) {
 	aliceStore := openTestStore(t)
 	aliceKP := initTestIdentityAt(t, aliceStore, "alicepass")
 
-	const k = 1
 	// One head follow (pinned, working) so the head lane has something to
 	// do; one tail follow (cold-start, working) that only the tail lane
-	// reaches.
+	// reaches. Two bound follows floor to K=1, so the head lane dials
+	// only the pinned follow and the tail lane dials the other.
 	headS, headKP, _, _ := peerServer(t, "head")
 	tailS, tailKP, tailText, _ := peerServer(t, "tail")
 	setupBoundFollow(t, aliceStore, aliceKP, headKP, "tok-head", true)
@@ -194,7 +196,6 @@ func TestTailLaneIndependence(t *testing.T) {
 	}
 
 	d := New(aliceStore, logger)
-	d.headSize = k
 	d.SetTransport(multiPipeTransport{
 		servers: map[string]pipeTransport{
 			"tok-head": {serverStore: headS, serverKey: headKP, logger: logger},
@@ -263,9 +264,9 @@ func TestPromoteDemote(t *testing.T) {
 	}
 
 	// Initial split: bob (pinned) is head, carol (cold-start) is tail.
-	const k = 1
+	// Two bound follows floor to K=1, so the single head slot goes to the
+	// higher-weight follow.
 	d := New(aliceStore, logger)
-	d.headSize = k
 	// assess derives weights and splits in one pass; read the derived
 	// weights back for the ordering assertion, without a second recompute.
 	d.assess(context.Background())
@@ -330,4 +331,98 @@ func containsID(ids []core.Identity, id core.Identity) bool {
 		}
 	}
 	return false
+}
+
+// TestSplitHeadTailKPolicy asserts splitHeadTail over the K policy's edge
+// cases: empty, the floor (bound 1-2 collapses K to 1), a mid-size third,
+// the cap (bound/3 at maxHeadSize), and above the cap. For each case it
+// checks the head/tail sizes and that the head holds the top-K by weight
+// while the tail holds the rest (the ranking property a count-only check
+// would miss). Weights are non-negative in production (the weight formula
+// sums non-negative terms), so this stays within that contract.
+func TestSplitHeadTailKPolicy(t *testing.T) {
+	// buildFollows makes n bound follows with strictly descending weights:
+	// ids[0] heaviest, ids[n-1] lightest. All are bound (routing entry set).
+	buildFollows := func(n int) (ids []core.Identity, weights map[core.Identity]float64, routing map[core.Identity]string) {
+		ids = make([]core.Identity, n)
+		weights = make(map[core.Identity]float64, n)
+		routing = make(map[core.Identity]string, n)
+		for i := 0; i < n; i++ {
+			id := core.Identity(fmt.Sprintf("driftnode:%04d", i))
+			ids[i] = id
+			weights[id] = float64(n - i)
+			routing[id] = "tok"
+		}
+		return
+	}
+
+	cases := []struct {
+		name     string
+		bound    int
+		wantHead int
+		wantTail int
+	}{
+		{"empty", 0, 0, 0},
+		{"floor_one", 1, 1, 0},
+		{"floor_two", 2, 1, 1},
+		{"third_small", 3, 1, 2},
+		{"third_mid", 30, 10, 20},
+		{"at_cap", maxHeadSize * 3, maxHeadSize, maxHeadSize * 2},
+		{"above_cap", maxHeadSize * 4, maxHeadSize, maxHeadSize * 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			ids, weights, routing := buildFollows(c.bound)
+			head, tail := splitHeadTail(ids, weights, routing)
+			if len(head) != c.wantHead || len(tail) != c.wantTail {
+				t.Fatalf("head/tail = %d/%d, want %d/%d", len(head), len(tail), c.wantHead, c.wantTail)
+			}
+			if len(head)+len(tail) != c.bound {
+				t.Fatalf("head+tail = %d, want %d (not a partition)", len(head)+len(tail), c.bound)
+			}
+			if c.bound == 0 {
+				return
+			}
+			// Head holds the top-K by weight. Descending weights mean
+			// ids[:k] is the expected head set.
+			wantHeadSet := make(map[core.Identity]bool, len(head))
+			for _, id := range ids[:c.wantHead] {
+				wantHeadSet[id] = true
+			}
+			for _, id := range head {
+				if !wantHeadSet[id] {
+					t.Errorf("head contains %v, want only the top-%d by weight", id, c.wantHead)
+				}
+			}
+		})
+	}
+
+	// Ties: cold-start follows share a weight and are ordered by the
+	// identity-string tiebreak. A boundary that cuts through a tied group
+	// splits it deterministically by identity, not arbitrarily.
+	t.Run("ties", func(t *testing.T) {
+		const n = 6
+		ids := make([]core.Identity, n)
+		weights := make(map[core.Identity]float64, n)
+		routing := make(map[core.Identity]string, n)
+		for i := 0; i < n; i++ {
+			id := core.Identity(fmt.Sprintf("driftnode:%04d", i))
+			ids[i] = id
+			weights[id] = 1.0 // all tied
+			routing[id] = "tok"
+		}
+		head, tail := splitHeadTail(ids, weights, routing)
+		if len(head) != 2 || len(tail) != 4 {
+			t.Fatalf("ties: head/tail = %d/%d, want 2/4", len(head), len(tail))
+		}
+		// Identity-string tiebreak: the lexicographically smallest 2 ids
+		// are the head.
+		sortedIDs := append([]core.Identity(nil), ids...)
+		sort.Slice(sortedIDs, func(i, j int) bool { return sortedIDs[i] < sortedIDs[j] })
+		for _, id := range head {
+			if id != sortedIDs[0] && id != sortedIDs[1] {
+				t.Errorf("ties: head contains %v, want the two smallest by identity tiebreak", id)
+			}
+		}
+	})
 }

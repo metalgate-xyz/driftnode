@@ -69,10 +69,6 @@ type Daemon struct {
 	// sync RPC. Buffered with capacity 1 so a pending signal is dropped
 	// if one is already queued.
 	crawlNow chan struct{}
-	// headSize caps the head-set size K (Dunbar). Tests override it by
-	// setting this field directly (same package); production leaves it
-	// zero so the split uses defaultHeadSize.
-	headSize int
 	// splitMu guards headSet and tailSet, the head/tail split computed once
 	// per assess pass and read by both lanes. assess is the sole writer
 	// (the only routine that derives weights); it holds splitMu around the
@@ -1695,9 +1691,10 @@ const (
 	// assessPeriod is the ticker period for the assess thread: how fast
 	// weights are recomputed and head/tail re-derived.
 	assessPeriod = 60 * time.Second
-	// defaultHeadSize is K, the head-set size (Dunbar). Tests override via
-	// the unexported headSize field.
-	defaultHeadSize = 150
+	// maxHeadSize is the ceiling on K, the head-set size. K scales with
+	// the bound follows (about a third, Dunbar's layer ratio) up to this
+	// cap.
+	maxHeadSize = 150
 	// headDialTimeout is the head lane's fast-skip per-dial timeout: a
 	// non-answering head follow releases its slot in seconds.
 	headDialTimeout = 5 * time.Second
@@ -1861,7 +1858,7 @@ func (d *Daemon) deriveSplit(ids []core.Identity) int {
 		d.logger.Warn("derive split: read routing", "err", err)
 		return len(weights)
 	}
-	d.headSet, d.tailSet = splitHeadTail(ids, weights, routing, d.headSize)
+	d.headSet, d.tailSet = splitHeadTail(ids, weights, routing)
 	return len(weights)
 }
 
@@ -1884,7 +1881,7 @@ func (d *Daemon) refreshSplit() {
 // the lanes; computing the split in two places (one per lane) would run the
 // sort twice and, worse, could race a weight derivation between the two
 // calls so head and tail derive from different weight snapshots.
-func splitHeadTail(ids []core.Identity, weights map[core.Identity]float64, routing map[core.Identity]string, headSize int) (head, tail []core.Identity) {
+func splitHeadTail(ids []core.Identity, weights map[core.Identity]float64, routing map[core.Identity]string) (head, tail []core.Identity) {
 	type entry struct {
 		id core.Identity
 		w  float64
@@ -1902,12 +1899,17 @@ func splitHeadTail(ids []core.Identity, weights map[core.Identity]float64, routi
 		}
 		return entries[i].id < entries[j].id
 	})
-	k := headSize
-	if k <= 0 {
-		k = defaultHeadSize
+	// The head is the inner "meaningful" layer: about one-third of the
+	// bound follows, capped at maxHeadSize (Dunbar's active network
+	// ceiling). Each Dunbar layer is ~3x the one inside it, so a third
+	// keeps the head a true inner circle and leaves the tail real work
+	// rather than putting the whole graph in the fast lane.
+	k := len(entries) / 3
+	if k > maxHeadSize {
+		k = maxHeadSize
 	}
-	if k > len(entries) {
-		k = len(entries)
+	if k < 1 && len(entries) > 0 {
+		k = 1
 	}
 	for i, e := range entries {
 		if i < k {
@@ -1951,7 +1953,7 @@ func (d *Daemon) seedSplit() {
 		d.logger.Warn("seed split: read weighted graph", "err", err)
 		return
 	}
-	d.headSet, d.tailSet = splitHeadTail(ids, weights, routing, d.headSize)
+	d.headSet, d.tailSet = splitHeadTail(ids, weights, routing)
 }
 
 // resolvePendingFollows dials known tokens to find the routing for followed
