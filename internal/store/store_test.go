@@ -346,10 +346,10 @@ func TestAllPostsScopedToFollowGraph(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign bob post: %v", err)
 	}
-	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
 		t.Fatalf("put alice post: %v", err)
 	}
-	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(bobPost, 1); err != nil {
 		t.Fatalf("put bob post: %v", err)
 	}
 
@@ -432,7 +432,7 @@ func TestAllPostsOneTxMatchesAllPosts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign alice: %v", err)
 	}
-	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
 		t.Fatalf("put alice: %v", err)
 	}
 
@@ -511,12 +511,12 @@ func TestReceivedFollowers(t *testing.T) {
 	// Alice and Bob follow Carol (the local identity). Dave follows Bob.
 	for _, follower := range []*core.KeyPair{alice, bob} {
 		se := makeFollowEventFor(t, follower, 1, carol.Identity())
-		if _, err := s.PutCrawledEvent(se, 1); err != nil {
-			t.Fatalf("PutCrawledEvent: %v", err)
+		if _, err := s.PutRemoteEvent(se, 1); err != nil {
+			t.Fatalf("PutRemoteEvent: %v", err)
 		}
 	}
 	daveFollow := makeFollowEventFor(t, dave, 1, bob.Identity())
-	_, _ = s.PutCrawledEvent(daveFollow, 1)
+	_, _ = s.PutRemoteEvent(daveFollow, 1)
 
 	got, err := s.ReceivedFollowers()
 	if err != nil {
@@ -554,8 +554,8 @@ func TestReceivedFollowEvents(t *testing.T) {
 	alice, _ := core.NewKeyPair()
 
 	se := makeFollowEventFor(t, alice, 1, carol.Identity())
-	if _, err := s.PutCrawledEvent(se, 1); err != nil {
-		t.Fatalf("PutCrawledEvent: %v", err)
+	if _, err := s.PutRemoteEvent(se, 1); err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
 	}
 
 	events, err := s.ReceivedFollowEvents()
@@ -789,7 +789,7 @@ func TestOutboundReplies(t *testing.T) {
 		Post: &core.Post{Text: "alice's post"},
 	})
 	aliceID, _ := alicePost.ID()
-	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
 		t.Fatalf("put alice post: %v", err)
 	}
 	bobPost, _ := bob.Sign(core.Event{
@@ -797,7 +797,7 @@ func TestOutboundReplies(t *testing.T) {
 		Post: &core.Post{Text: "bob's post"},
 	})
 	bobID, _ := bobPost.ID()
-	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(bobPost, 1); err != nil {
 		t.Fatalf("put bob post: %v", err)
 	}
 
@@ -886,7 +886,7 @@ func TestOutboundLikes(t *testing.T) {
 		Post: &core.Post{Text: "alice's post"},
 	})
 	aliceID, _ := alicePost.ID()
-	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
 		t.Fatalf("put alice post: %v", err)
 	}
 	bobPost, _ := bob.Sign(core.Event{
@@ -894,7 +894,7 @@ func TestOutboundLikes(t *testing.T) {
 		Post: &core.Post{Text: "bob's post"},
 	})
 	bobID, _ := bobPost.ID()
-	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(bobPost, 1); err != nil {
 		t.Fatalf("put bob post: %v", err)
 	}
 
@@ -943,7 +943,7 @@ func TestLikesForPosts(t *testing.T) {
 		Post: &core.Post{Text: "alice's post"},
 	})
 	aliceID, _ := alicePost.ID()
-	if _, err := s.PutCrawledEvent(alicePost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
 		t.Fatalf("put alice post: %v", err)
 	}
 
@@ -962,7 +962,7 @@ func TestLikesForPosts(t *testing.T) {
 		Kind: core.KindLike, Log: core.PostLog, Timestamp: 300, Sequence: 1,
 		Like: &core.Like{TargetID: aliceID},
 	})
-	if _, err := s.PutCrawledEvent(carolLike, 1); err != nil {
+	if _, err := s.PutRemoteEvent(carolLike, 1); err != nil {
 		t.Fatalf("put carol like: %v", err)
 	}
 
@@ -1165,7 +1165,7 @@ func TestRecomputeWeights(t *testing.T) {
 			Post: &core.Post{Text: "bob's post"},
 		})
 		pid, _ := post.ID()
-		if _, err := s.PutCrawledEvent(post, 1); err != nil {
+		if _, err := s.PutRemoteEvent(post, 1); err != nil {
 			t.Fatalf("put bob post %d: %v", i, err)
 		}
 		like, _ := me.Sign(core.Event{
@@ -1182,7 +1182,7 @@ func TestRecomputeWeights(t *testing.T) {
 		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 60, Sequence: 1,
 		Follow: &core.Follow{TargetPubkey: [32]byte(me.Public)},
 	})
-	if _, err := s.PutCrawledEvent(carolFollow, 1); err != nil {
+	if _, err := s.PutRemoteEvent(carolFollow, 1); err != nil {
 		t.Fatalf("put carol follow: %v", err)
 	}
 
@@ -1284,7 +1284,7 @@ func TestRecomputeWeightsRefreshes(t *testing.T) {
 		Post: &core.Post{Text: "bob's post"},
 	})
 	bobID, _ := bobPost.ID()
-	if _, err := s.PutCrawledEvent(bobPost, 1); err != nil {
+	if _, err := s.PutRemoteEvent(bobPost, 1); err != nil {
 		t.Fatalf("put bob post: %v", err)
 	}
 	like, _ := me.Sign(core.Event{
@@ -1336,3 +1336,4 @@ func TestWeightUnknownIdentity(t *testing.T) {
 		t.Fatalf("unknown identity: want 0, got %g", w)
 	}
 }
+

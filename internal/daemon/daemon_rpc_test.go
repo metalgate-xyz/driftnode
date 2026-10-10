@@ -780,8 +780,8 @@ func TestFollowsAndFollowersRPC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
-	if _, err := s.PutCrawledEvent(followEvent, 1); err != nil {
-		t.Fatalf("PutCrawledEvent: %v", err)
+	if _, err := s.PutRemoteEvent(followEvent, 1); err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
 	}
 
 	fresp, err := cl.Followers(context.Background(), &driftnodepb.Empty{})
@@ -1281,12 +1281,12 @@ func TestDuplicateOtherLikeCountsAsOne(t *testing.T) {
 		if err != nil {
 			t.Fatalf("sign like %d: %v", i, err)
 		}
-		inserted, err := s.PutCrawledEvent(like, uint64(i))
+		inserted, err := s.PutRemoteEvent(like, uint64(i))
 		if err != nil {
 			t.Fatalf("put like %d: %v", i, err)
 		}
 		if i == 2 && inserted {
-			t.Fatal("duplicate like should be dropped by PutCrawledEvent")
+			t.Fatal("duplicate like should be dropped by PutRemoteEvent")
 		}
 	}
 

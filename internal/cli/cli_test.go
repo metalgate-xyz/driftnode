@@ -459,7 +459,7 @@ func TestFollowsAndFollowersOffline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sign follow: %v", err)
 	}
-	if _, err := s.PutCrawledEvent(followEvent, 1); err != nil {
+	if _, err := s.PutRemoteEvent(followEvent, 1); err != nil {
 		t.Fatalf("put followed event: %v", err)
 	}
 	s.Close()

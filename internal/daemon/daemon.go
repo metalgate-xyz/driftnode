@@ -1218,7 +1218,7 @@ func (d *Daemon) handleFetchLikes(targetIDs []core.EventID) ([]core.SignedEvent,
 			continue
 		}
 		for _, se := range r.events {
-			inserted, err := d.store.PutCrawledEvent(&se, uint64(se.Event.Sequence))
+			inserted, err := d.store.PutRemoteEvent(&se, uint64(se.Event.Sequence))
 			if err != nil {
 				d.logger.Warn("fetch likes: store", "err", err)
 				continue

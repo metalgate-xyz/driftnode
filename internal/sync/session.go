@@ -218,7 +218,7 @@ func (c *Client) SyncLog(r io.Reader, w io.Writer, log core.LogName, after int64
 	}
 	merged := 0
 	for i := range events {
-		inserted, err := c.mergeEvent(&events[i])
+		inserted, err := c.routeSyncedEvent(&events[i])
 		if err != nil {
 			c.log.Warn("sync: merge failed", "err", err)
 			continue
@@ -342,10 +342,10 @@ func (c *Client) FetchLikes(r io.Reader, w io.Writer, targetIDs []core.EventID) 
 	}
 }
 
-// mergeEvent stores a synced event into the local store: own events go to
+// routeSyncedEvent stores a synced event into the local store: own events go to
 // the own bucket, crawled events go to the crawl bucket keyed by author.
 // Returns true if the event was newly stored.
-func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
+func (c *Client) routeSyncedEvent(se *core.SignedEvent) (bool, error) {
 	ownID, _, err := c.store.Identity()
 	if err != nil {
 		return false, err
@@ -354,7 +354,7 @@ func (c *Client) mergeEvent(se *core.SignedEvent) (bool, error) {
 		return true, c.store.AppendOwnEvent(se.Event.Log, se)
 	}
 	seq := uint64(se.Event.Sequence)
-	return c.store.PutCrawledEvent(se, seq)
+	return c.store.PutRemoteEvent(se, seq)
 }
 
 // Session runs a full bidirectional sync between two zens over a single
@@ -608,7 +608,7 @@ func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int6
 					s.log.Warn("sync: rejected unverified event", "err", err)
 					continue
 				}
-				inserted, err := s.mergeEvent(&se)
+				inserted, err := s.routeSyncedEvent(&se)
 				if err != nil {
 					s.log.Warn("sync: merge failed", "err", err)
 					continue
@@ -633,7 +633,7 @@ func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int6
 // advancing a pull cursor, so events with slightly earlier timestamps
 // (clock skew, out-of-order delivery) are re-requested and deduped rather
 // than dropped. Re-transfer within the window is cheap because
-// PutCrawledEvent is idempotent.
+// PutRemoteEvent is idempotent.
 const cursorSkewWindow = 5 * time.Minute
 
 // advanceCursor records the new high-water timestamp for (zen, log) when
@@ -793,7 +793,7 @@ func zensFromMsg(msg *Message) []ZenRef {
 	return out
 }
 
-func (s *Session) mergeEvent(se *core.SignedEvent) (bool, error) {
+func (s *Session) routeSyncedEvent(se *core.SignedEvent) (bool, error) {
 	ownID, _, err := s.store.Identity()
 	if err != nil {
 		return false, err
@@ -804,7 +804,7 @@ func (s *Session) mergeEvent(se *core.SignedEvent) (bool, error) {
 		inserted = true
 	} else {
 		seq := uint64(se.Event.Sequence)
-		inserted, err = s.store.PutCrawledEvent(se, seq)
+		inserted, err = s.store.PutRemoteEvent(se, seq)
 	}
 	if s.onMerge != nil {
 		s.onMerge(se, inserted)

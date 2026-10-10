@@ -291,7 +291,7 @@ func benchPopulatePosts(b *testing.B, d *Daemon, n int) {
 		if err != nil {
 			b.Fatalf("sign post %d: %v", i, err)
 		}
-		if _, err := d.store.PutCrawledEvent(se, uint64(i+1)); err != nil {
+		if _, err := d.store.PutRemoteEvent(se, uint64(i+1)); err != nil {
 			b.Fatalf("put post %d: %v", i, err)
 		}
 	}

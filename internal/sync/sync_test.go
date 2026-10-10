@@ -162,7 +162,7 @@ func TestSyncFollowers(t *testing.T) {
 	serverStore.InitIdentity(serverKP, ek)
 
 	// Two followers follow the server. Their Follow events live in their
-	// own logs and arrive at the server via sync (PutCrawledEvent).
+	// own logs and arrive at the server via sync (PutRemoteEvent).
 	followerA := makeKey(t)
 	followerB := makeKey(t)
 	for _, fkp := range []*core.KeyPair{followerA, followerB} {
@@ -176,8 +176,8 @@ func TestSyncFollowers(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Sign: %v", err)
 		}
-		if _, err := serverStore.PutCrawledEvent(se, 1); err != nil {
-			t.Fatalf("PutCrawledEvent: %v", err)
+		if _, err := serverStore.PutRemoteEvent(se, 1); err != nil {
+			t.Fatalf("PutRemoteEvent: %v", err)
 		}
 	}
 
@@ -450,10 +450,10 @@ func TestSyncLikesForPosts(t *testing.T) {
 	})
 	postBID, _ := postB.ID()
 
-	if _, err := serverStore.PutCrawledEvent(postA, 1); err != nil {
+	if _, err := serverStore.PutRemoteEvent(postA, 1); err != nil {
 		t.Fatalf("put postA: %v", err)
 	}
-	if _, err := serverStore.PutCrawledEvent(postB, 1); err != nil {
+	if _, err := serverStore.PutRemoteEvent(postB, 1); err != nil {
 		t.Fatalf("put postB: %v", err)
 	}
 
@@ -470,8 +470,8 @@ func TestSyncLikesForPosts(t *testing.T) {
 		Like: &core.Like{TargetID: postBID},
 	})
 	for _, se := range []*core.SignedEvent{likeA1, likeA2, likeB} {
-		if _, err := serverStore.PutCrawledEvent(se, 1); err != nil {
-			t.Fatalf("PutCrawledEvent like: %v", err)
+		if _, err := serverStore.PutRemoteEvent(se, 1); err != nil {
+			t.Fatalf("PutRemoteEvent like: %v", err)
 		}
 	}
 

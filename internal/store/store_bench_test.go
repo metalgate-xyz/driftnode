@@ -103,7 +103,7 @@ func benchSetup(b *testing.B) {
 			if err != nil {
 				b.Fatalf("peer sign %d: %v", i, err)
 			}
-			if _, err := s.PutCrawledEvent(peerPost, 1); err != nil {
+			if _, err := s.PutRemoteEvent(peerPost, 1); err != nil {
 				b.Fatalf("crawled post %d: %v", i, err)
 			}
 		}
@@ -176,7 +176,7 @@ func addBenchPosts(b *testing.B, n int) {
 		if err != nil {
 			b.Fatalf("sign post %d: %v", i, err)
 		}
-		if _, err := benchStore.PutCrawledEvent(se, uint64(benchPosts+i+1)); err != nil {
+		if _, err := benchStore.PutRemoteEvent(se, uint64(benchPosts+i+1)); err != nil {
 			b.Fatalf("put post %d: %v", i, err)
 		}
 	}

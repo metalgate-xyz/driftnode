@@ -257,7 +257,7 @@ func TestPromoteDemote(t *testing.T) {
 	}
 	for _, se := range carolPost {
 		if se.Event.Kind == core.KindPost {
-			if _, err := aliceStore.PutCrawledEvent(&se, uint64(se.Event.Sequence)); err != nil {
+			if _, err := aliceStore.PutRemoteEvent(&se, uint64(se.Event.Sequence)); err != nil {
 				t.Fatalf("seed carol post: %v", err)
 			}
 		}
