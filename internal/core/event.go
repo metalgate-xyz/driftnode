@@ -42,6 +42,28 @@ const (
 	KindDetail   Kind = 7
 )
 
+// Per-kind size caps on the canonical Event bytes (the signed payload the
+// signature covers). The author side refuses to sign over the cap, so a
+// legitimate author can never produce an oversized event. A receiver seeing
+// a valid signature on an oversized event knows the author forged it. Fixed
+// events (Like, Delete, Follow, Unfollow) have an exact max equal to their
+// canonical size; variable events (Post, Profile, Detail) have an upper
+// bound that leaves room for the largest legitimate payload.
+const (
+	CapPost    = 5120
+	CapLike    = 72
+	CapDelete  = 72
+	CapProfile = 1024
+	CapFollow  = 75
+	CapUnfollow = 75
+	CapDetail  = 2048
+)
+
+// ErrEventOversized is returned by Sign when the canonical encoding of the
+// event exceeds the per-kind cap. The author side enforces it so a legitimate
+// author never signs an oversized event.
+var ErrEventOversized = errors.New("event exceeds per-kind size cap")
+
 // Event is an unsigned event. Its canonical CBOR encoding is what the signature
 // covers and what the event ID hashes. Field order and cbor tag numbers are
 // fixed: reordering fields or renumbering tags changes every event ID.
@@ -122,7 +144,8 @@ type SignedEvent struct {
 }
 
 // Sign produces a SignedEvent by signing the canonical encoding of ev with
-// the author's private key.
+// the author's private key. Events over the per-kind size cap are rejected,
+// so a legitimate author can never produce an oversized event.
 func (k *KeyPair) Sign(ev Event) (*SignedEvent, error) {
 	if err := validateEvent(ev); err != nil {
 		return nil, err
@@ -130,6 +153,9 @@ func (k *KeyPair) Sign(ev Event) (*SignedEvent, error) {
 	canon, err := CanonicalEncode(ev)
 	if err != nil {
 		return nil, fmt.Errorf("canonical encode: %w", err)
+	}
+	if len(canon) > CapForKind(ev.Kind) {
+		return nil, ErrEventOversized
 	}
 	sig := ed25519.Sign(k.Private, canon)
 	return &SignedEvent{
@@ -200,6 +226,28 @@ func validateEvent(ev Event) error {
 		}
 	}
 	return fmt.Errorf("event kind %d not valid for log %q", ev.Kind, ev.Log)
+}
+
+// CapForKind returns the per-kind size cap on canonical Event bytes.
+func CapForKind(k Kind) int {
+	switch k {
+	case KindPost:
+		return CapPost
+	case KindLike:
+		return CapLike
+	case KindDelete:
+		return CapDelete
+	case KindProfile:
+		return CapProfile
+	case KindFollow:
+		return CapFollow
+	case KindUnfollow:
+		return CapUnfollow
+	case KindDetail:
+		return CapDetail
+	default:
+		return 0
+	}
 }
 
 // Now64 returns the current time as unix nanoseconds, the timestamp unit used

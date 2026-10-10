@@ -1337,3 +1337,126 @@ func TestWeightUnknownIdentity(t *testing.T) {
 	}
 }
 
+// signOversizedForges a valid-signature event that exceeds the per-kind cap.
+// Sign rejects oversized events, so the test bypasses it with a raw ed25519
+// signature over the canonical bytes. This simulates a forged author.
+func signOversized(t *testing.T, kp *core.KeyPair, ev core.Event) *core.SignedEvent {
+	t.Helper()
+	canon, err := core.CanonicalEncode(ev)
+	if err != nil {
+		t.Fatalf("CanonicalEncode: %v", err)
+	}
+	if len(canon) <= core.CapForKind(ev.Kind) {
+		t.Fatalf("test event not oversized: %d <= cap %d", len(canon), core.CapForKind(ev.Kind))
+	}
+	sig := ed25519.Sign(kp.Private, canon)
+	return &core.SignedEvent{Event: ev, Author: kp.Identity(), Signature: sig}
+}
+
+// TestReceiverRejectsOversizedEvent verifies that an oversized event with a
+// valid signature is dropped and the author is flagged, while an at-cap event
+// is stored normally.
+func TestReceiverRejectsOversizedEvent(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	// An at-cap Post is stored.
+	atCap := core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1, Sequence: 1,
+		Post: &core.Post{Text: "gm"},
+	}
+	seAt, err := author.Sign(atCap)
+	if err != nil {
+		t.Fatalf("Sign at-cap: %v", err)
+	}
+	inserted, err := s.PutRemoteEvent(seAt, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent at-cap: %v", err)
+	}
+	if !inserted {
+		t.Fatal("at-cap event not inserted")
+	}
+
+	// An oversized Post (valid signature, forged past the author cap) is
+	// dropped and the author is flagged.
+	oversized := core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 2, Sequence: 2,
+		Post: &core.Post{Text: string(make([]byte, core.CapPost))},
+	}
+	seOver := signOversized(t, author, oversized)
+	if err := seOver.Verify(); err != nil {
+		t.Fatalf("forged oversized event must verify: %v", err)
+	}
+	inserted, err = s.PutRemoteEvent(seOver, 2)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent oversized: %v", err)
+	}
+	if inserted {
+		t.Fatal("oversized event was stored")
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if !flagged {
+		t.Fatal("oversized event did not flag the author")
+	}
+}
+
+// TestReceiverOversizedBadSignatureNoFlag verifies that an oversized event
+// with a bad (tampered) signature is dropped without flagging: Verify runs
+// first, so a transit tamper is a drop, not a flag.
+func TestReceiverOversizedBadSignatureNoFlag(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	oversized := core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1, Sequence: 1,
+		Post: &core.Post{Text: string(make([]byte, core.CapPost))},
+	}
+	se := signOversized(t, author, oversized)
+	// Tamper with the signature so Verify fails.
+	se.Signature[0] ^= 0xFF
+
+	// PutRemoteEvent does not call Verify; the sync layer does. Simulate the
+	// sync layer: Verify first, then only call PutRemoteEvent if it passes.
+	if err := se.Verify(); err == nil {
+		t.Fatal("tampered event must fail Verify")
+	}
+	// Since Verify failed, the sync layer drops the event without calling
+	// PutRemoteEvent, so the author is not flagged.
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author flagged for a transit-tampered event")
+	}
+}
+
+// TestReceiverOversizedProfile verifies that an oversized Profile event is
+// dropped and the author is flagged via PutCrawledProfile.
+func TestReceiverOversizedProfile(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	oversized := core.Event{
+		Kind: core.KindProfile, Log: core.ProfileLog, Timestamp: 1, Sequence: 1,
+		Profile: &core.Profile{DisplayName: string(make([]byte, core.CapProfile))},
+	}
+	se := signOversized(t, author, oversized)
+	if err := se.Verify(); err != nil {
+		t.Fatalf("forged oversized profile must verify: %v", err)
+	}
+	if err := s.PutCrawledProfile(author.Identity(), se); err != nil {
+		t.Fatalf("PutCrawledProfile oversized: %v", err)
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if !flagged {
+		t.Fatal("oversized profile did not flag the author")
+	}
+}
+

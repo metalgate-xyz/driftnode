@@ -32,17 +32,17 @@ import (
 // the signed, synced ProfileLog), pinned=1 when the user has marked the
 // follow for top sync priority. It is rebuilt from the log on backup restore.
 var (
-	bucketMeta       = []byte("meta")
-	bucketKey        = []byte("key")        // single EncryptedKey value under key "key"
-	bucketOwn        = []byte("own")        // own logs: sub-buckets per log name
-	bucketRemote      = []byte("remote")    // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
-	bucketMedia      = []byte("media")      // content-addressed blobs
-	bucketRouting    = []byte("routing")    // identity -> tailcat token
-	bucketVerified   = []byte("verified")   // identity -> presence (out-of-band confirmed)
-	bucketFollowState = []byte("followstate") // identity -> [2]byte{followed, pinned}
-	bucketTransport  = []byte("transport")  // tailcat private key, so the node's address token stays stable across restarts
-	bucketCursor     = []byte("cursor")     // per-(author,log) high-water timestamp of last successful pull
-	bucketWeight     = []byte("weight")     // identity -> float64 sync-priority weight, recomputed each sync round
+	bucketMeta        = []byte("meta")
+	bucketKey         = []byte("key")         // single EncryptedKey value under key "key"
+	bucketOwn         = []byte("own")         // own logs: sub-buckets per log name
+	bucketRemote      = []byte("remote")      // remote events (synced PostLogs + crawled Profiles), keyed by author+eventID
+	bucketMedia       = []byte("media")       // content-addressed blobs
+	bucketRouting     = []byte("routing")     // identity -> tailcat token
+	bucketVerified    = []byte("verified")    // identity -> presence (out-of-band confirmed)
+	bucketFollowState = []byte("followstate") // identity -> [3]byte{followed, pinned, flagged}
+	bucketTransport   = []byte("transport")   // tailcat private key, so the node's address token stays stable across restarts
+	bucketCursor      = []byte("cursor")      // per-(author,log) high-water timestamp of last successful pull
+	bucketWeight      = []byte("weight")      // identity -> float64 sync-priority weight, recomputed each sync round
 )
 
 // meta keys
@@ -52,32 +52,41 @@ var metaKeyIdentity = []byte("identity") // own identity string
 // the current follow graph. A pin is a property of the follow edge.
 var ErrPinRequiresFollow = errors.New("can only pin a followed identity")
 
-// followState is the two local flags cached per identity: whether it is
-// followed and whether the follow is pinned. Stored as a fixed 2-byte value
-// so reads and writes are single-record and the flags can't drift apart.
+// followState is the set of local flags cached per identity: whether it is
+// followed, whether the follow is pinned, and whether the author has been
+// flagged for a protocol violation (oversized event, rate-limit breach, etc).
+// Stored as a fixed 3-byte value so reads and writes are single-record and
+// the flags can't drift apart.
 type followState struct {
 	followed bool
 	pinned   bool
+	flagged  bool
 }
 
 func (f followState) encode() []byte {
-	out := make([]byte, 2)
+	out := make([]byte, 3)
 	if f.followed {
 		out[0] = 1
 	}
 	if f.pinned {
 		out[1] = 1
 	}
+	if f.flagged {
+		out[2] = 1
+	}
 	return out
 }
 
 func decodeFollowState(v []byte) followState {
 	var f followState
-	if len(v) >= 2 && v[0] != 0 {
+	if len(v) >= 1 && v[0] != 0 {
 		f.followed = true
 	}
 	if len(v) >= 2 && v[1] != 0 {
 		f.pinned = true
+	}
+	if len(v) >= 3 && v[2] != 0 {
+		f.flagged = true
 	}
 	return f
 }
@@ -271,7 +280,20 @@ func (s *Store) AllOwnEvents() ([]core.SignedEvent, error) {
 // PutRemoteEvent stores a remote event (synced PostLog or crawled Profile
 // log), keyed by event ID for set-union deduplication (an event already
 // present is not overwritten). Returns true if the event was newly inserted.
+// An oversized event (canonical Event bytes over the per-kind cap) is
+// dropped and the author is flagged: a valid signature on an oversized
+// event means the author's key signed something their own client would
+// have blocked. The caller must have already called Verify; this check
+// runs on the verified event so the flag is never raised on a transit
+// tamper.
 func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
+	canon, err := core.CanonicalEncode(se.Event)
+	if err != nil {
+		return false, fmt.Errorf("canonical event bytes: %w", err)
+	}
+	if len(canon) > core.CapForKind(se.Event.Kind) {
+		return false, s.flagAuthor(se.Author)
+	}
 	id, err := se.ID()
 	if err != nil {
 		return false, fmt.Errorf("event id: %w", err)
@@ -472,8 +494,16 @@ func (s *Store) SetIdentity(id core.Identity) error {
 // PutCrawledProfile stores a Profile-log event from a crawled (not followed)
 // identity in the shared remote bucket. The crawler stores only Profile logs;
 // PostLog events arrive via PutRemoteEvent from sync. Both share the same
-// per-author dedup by event ID.
+// per-author dedup by event ID. An oversized event is dropped and the author
+// is flagged, as in PutRemoteEvent.
 func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) error {
+	canon, err := core.CanonicalEncode(se.Event)
+	if err != nil {
+		return fmt.Errorf("canonical event bytes: %w", err)
+	}
+	if len(canon) > core.CapForKind(se.Event.Kind) {
+		return s.flagAuthor(author)
+	}
 	id, err := se.ID()
 	if err != nil {
 		return fmt.Errorf("event id: %w", err)
@@ -795,6 +825,7 @@ func decodeWeight(raw []byte) float64 {
 	}
 	return math.Float64frombits(binary.BigEndian.Uint64(raw))
 }
+
 // identity that this zen has received (section 9.3). A follower's Follow
 // event lives in the follower's own Profile log and arrives at the followed
 // zen during a normal bidirectional sync, so the followed zen derives its
@@ -1397,14 +1428,26 @@ func (s *Store) PutVerifiedIdentities(ids []core.Identity) error {
 	})
 }
 
-// putFollowState writes the cached follow+pin flags for an identity.
+// putFollowState writes the cached follow+pin+flag flags for an identity.
 func (s *Store) putFollowState(id core.Identity, st followState) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		return tx.Bucket(bucketFollowState).Put([]byte(id), st.encode())
 	})
 }
 
-// deleteFollowState removes the cached follow+pin flags for an identity,
+// flagAuthor marks an identity as flagged for a protocol violation. A flag
+// means the author's key signed the offending event, so the author is
+// compromised or misbehaving, never framed.
+func (s *Store) flagAuthor(id core.Identity) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket(bucketFollowState)
+		st := decodeFollowState(b.Get([]byte(id)))
+		st.flagged = true
+		return b.Put([]byte(id), st.encode())
+	})
+}
+
+// deleteFollowState removes the cached follow+pin+flag flags for an identity,
 // clearing both the follow edge and any pin on it.
 func (s *Store) deleteFollowState(id core.Identity) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
@@ -1412,7 +1455,7 @@ func (s *Store) deleteFollowState(id core.Identity) error {
 	})
 }
 
-// getFollowState reads the cached follow+pin flags for an identity.
+// getFollowState reads the cached follow+pin+flag flags for an identity.
 func (s *Store) getFollowState(id core.Identity) (followState, error) {
 	var st followState
 	err := s.db.View(func(tx *bolt.Tx) error {
@@ -1430,6 +1473,14 @@ func (s *Store) getFollowState(id core.Identity) (followState, error) {
 func (s *Store) IsFollowed(id core.Identity) (bool, error) {
 	st, err := s.getFollowState(id)
 	return st.followed, err
+}
+
+// IsFlagged reports whether an identity has been flagged for a protocol
+// violation (oversized event, rate-limit breach, etc). A flag means the
+// author's key signed the offending event.
+func (s *Store) IsFlagged(id core.Identity) (bool, error) {
+	st, err := s.getFollowState(id)
+	return st.flagged, err
 }
 
 // PinIdentity marks a follow as pinned for top sync priority. A pin is a

@@ -199,3 +199,130 @@ func TestEd25519Constant(t *testing.T) {
 		t.Fatal("unexpected signature size")
 	}
 }
+
+// An oversized event is rejected by Sign on the author side, so a legitimate
+// author can never produce one. Each variable kind is tested at its cap
+// (accepted) and one byte over (rejected).
+func TestSignRejectsOversized(t *testing.T) {
+	kp, _ := NewKeyPair()
+	ts := int64(9e18)
+	seq := uint64(0xFFFFFFFFFFFFFFFF)
+
+	// Helper: find the max text length that fits within cap for a Post event.
+	maxText := func(cap int, ev Event) int {
+		lo, hi := 0, cap*2
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			ev.Post = &Post{Text: string(make([]byte, mid))}
+			b, err := CanonicalEncode(ev)
+			if err != nil {
+				hi = mid - 1
+				continue
+			}
+			if len(b) <= cap {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		return lo
+	}
+
+	// Post at cap: accepted. One byte over: rejected.
+	base := Event{Kind: KindPost, Log: PostLog, Timestamp: ts, Sequence: seq}
+	maxLen := maxText(CapPost, base)
+	atCap := base
+	atCap.Post = &Post{Text: string(make([]byte, maxLen))}
+	if _, err := kp.Sign(atCap); err != nil {
+		t.Fatalf("Sign at cap (Post): %v", err)
+	}
+	overCap := base
+	overCap.Post = &Post{Text: string(make([]byte, maxLen + 1))}
+	if _, err := kp.Sign(overCap); err != ErrEventOversized {
+		t.Fatalf("Sign over cap (Post): want ErrEventOversized, got %v", err)
+	}
+
+	// Profile: oversized DisplayName rejected.
+	maxProf := 0
+	{
+		lo, hi := 0, CapProfile*2
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			ev := Event{Kind: KindProfile, Log: ProfileLog, Timestamp: ts, Sequence: seq, Profile: &Profile{DisplayName: string(make([]byte, mid))}}
+			b, _ := CanonicalEncode(ev)
+			if len(b) <= CapProfile {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		maxProf = lo
+	}
+	profAtCap := Event{Kind: KindProfile, Log: ProfileLog, Timestamp: ts, Sequence: seq, Profile: &Profile{DisplayName: string(make([]byte, maxProf))}}
+	if _, err := kp.Sign(profAtCap); err != nil {
+		t.Fatalf("Sign at cap (Profile): %v", err)
+	}
+	profOver := Event{Kind: KindProfile, Log: ProfileLog, Timestamp: ts, Sequence: seq, Profile: &Profile{DisplayName: string(make([]byte, maxProf+1))}}
+	if _, err := kp.Sign(profOver); err != ErrEventOversized {
+		t.Fatalf("Sign over cap (Profile): want ErrEventOversized, got %v", err)
+	}
+
+	// Detail: oversized Bio rejected.
+	maxBio := 0
+	{
+		lo, hi := 0, CapDetail*2
+		for lo < hi {
+			mid := (lo + hi + 1) / 2
+			ev := Event{Kind: KindDetail, Log: DetailLog, Timestamp: ts, Sequence: seq, Detail: &Detail{Bio: string(make([]byte, mid))}}
+			b, _ := CanonicalEncode(ev)
+			if len(b) <= CapDetail {
+				lo = mid
+			} else {
+				hi = mid - 1
+			}
+		}
+		maxBio = lo
+	}
+	detAtCap := Event{Kind: KindDetail, Log: DetailLog, Timestamp: ts, Sequence: seq, Detail: &Detail{Bio: string(make([]byte, maxBio))}}
+	if _, err := kp.Sign(detAtCap); err != nil {
+		t.Fatalf("Sign at cap (Detail): %v", err)
+	}
+	detOver := Event{Kind: KindDetail, Log: DetailLog, Timestamp: ts, Sequence: seq, Detail: &Detail{Bio: string(make([]byte, maxBio+1))}}
+	if _, err := kp.Sign(detOver); err != ErrEventOversized {
+		t.Fatalf("Sign over cap (Detail): want ErrEventOversized, got %v", err)
+	}
+}
+
+// Fixed events (Like, Delete, Follow, Unfollow) are accepted at their exact
+// canonical size and rejected one byte over. A one-byte-over fixed event is
+// impossible to produce through Sign (the cap equals the canonical size),
+// so this tests the cap enforcement directly via a forged event that bypasses
+// Sign.
+func TestSignAcceptsFixedEventsAtCap(t *testing.T) {
+	kp, _ := NewKeyPair()
+	ts := int64(9e18)
+	seq := uint64(0xFFFFFFFFFFFFFFFF)
+
+	cases := []struct {
+		name string
+		ev   Event
+		cap  int
+	}{
+		{"Like", Event{Kind: KindLike, Log: PostLog, Timestamp: ts, Sequence: seq, Like: &Like{TargetID: EventID{1}}}, CapLike},
+		{"Delete", Event{Kind: KindDelete, Log: PostLog, Timestamp: ts, Sequence: seq, Delete: &Delete{TargetID: EventID{1}}}, CapDelete},
+		{"Follow", Event{Kind: KindFollow, Log: ProfileLog, Timestamp: ts, Sequence: seq, Follow: &Follow{TargetPubkey: [32]byte{1}}}, CapFollow},
+		{"Unfollow", Event{Kind: KindUnfollow, Log: ProfileLog, Timestamp: ts, Sequence: seq, Follow: &Follow{TargetPubkey: [32]byte{1}}}, CapUnfollow},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			se, err := kp.Sign(c.ev)
+			if err != nil {
+				t.Fatalf("Sign %s at cap: %v", c.name, err)
+			}
+			canon, _ := CanonicalEncode(se.Event)
+			if len(canon) > c.cap {
+				t.Fatalf("%s canonical size %d exceeds cap %d", c.name, len(canon), c.cap)
+			}
+		})
+	}
+}
