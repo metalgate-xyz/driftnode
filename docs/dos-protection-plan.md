@@ -20,7 +20,9 @@ The bounds:
 3. **Bounded cumulative storage.** Stored events for one author cannot grow
    without limit over time. PostLog uses retention (reject old events at
    ingest and prune stored events that age out). ProfileLog uses compaction
-   (store only the current projected state, keeping signed originals).
+   (the author keeps the log tidy at write time: one Follow per currently
+   followed target, one Unfollow per previously-followed-but-now-unfollowed
+   target, one Profile, keeping signed originals).
 4. **Reject future events.** An author cannot stamp events far into the
    future to evade the rate limit.
 5. **Linked-event existence.** A Like or Reply that targets a post the
@@ -28,8 +30,10 @@ The bounds:
 6. **Max 5000 follows.** An author cannot sign more than 5000 net follows.
    The limit is enforced on the author side: `SignAndAppend` rejects the
    5001st Follow.
-7. **Compacted ProfileLog.** The receiver stores only the signed events
-   that contribute to the current state, not the full history.
+7. **Tidy ProfileLog.** The author keeps the ProfileLog tidy at write
+   time: it removes superseded events on each append, so the log always
+   holds only the signed events that contribute to the current state, not
+   the full history.
 
 No bound can frame an innocent author. Every check runs on events that
 passed `Verify`, so a flag means the author's key signed the offending
@@ -90,9 +94,9 @@ emit 1 Post, 1 Like, and 1 Delete per second, three independent operations,
 without flagging. PostLog events (Post, Like, Delete) are rate-limited at
 1/sec per kind. ProfileLog events (Follow, Unfollow, Profile) are not
 rate-limited, because bulk-follow during onboarding is a legitimate burst.
-ProfileLog volume is bounded instead by compaction (phase 7): the receiver
-stores only the current projected state, not the full history, so a burst
-of Follow events costs nothing durable.
+ProfileLog volume is bounded instead by compaction (phase 7): the author
+keeps the log tidy at write time, so a burst of Follow events removes the
+superseded ones and costs only the durable remainder.
 
 ### Phase 3: Retention
 
@@ -101,9 +105,9 @@ before they are written, and stored events that age past the window are
 pruned. This bounds cumulative storage: an author rate-limited at 1 event
 per second per kind, across the three PostLog kinds, can store at most
 three events per second times the retention window. ProfileLog does not use
-retention; it uses compaction (phase 7), because the projection replays
-Follow/Unfollow events in order and dropping old events by timestamp would
-corrupt the current follow set.
+retention; it uses compaction (phase 7), because the follow set is a
+projection over Follow/Unfollow events and dropping old events by
+timestamp would corrupt the current state.
 
 ### Phase 4: Reject future events
 
@@ -166,20 +170,44 @@ Each compacted Follow event is ~200 bytes: the author's 62-byte identity,
 the 64-byte signature, the 32-byte target pubkey, the Event envelope, and
 CBOR framing.
 
-### Phase 7: ProfileLog compaction
+### Phase 7: Tidy ProfileLog
 
-ProfileLog grows with every Follow, Unfollow, and Profile update over an
-identity's lifetime, and the projection replays the entire event set
-every time. The receiver compacts: it stores only the signed events that
-contribute to the current state (the signed Follow events whose targets
-are still followed, and the latest Profile), keeping signed originals so
-every kept event still verifies. A Delete is kept only if it targets an
-event still in the compacted set; a Delete targeting a Follow that was
-already dropped by Unfollow, or a Profile that was superseded, is dead
-weight and dropped. Compaction is incremental: the receiver maintains the
-compacted state and applies each new event as it arrives, O(1) per
-event. A full replay is O(n) and runs once, when a node first receives a
-batch of uncompacted events (cold start).
+The author keeps the ProfileLog tidy at write time, so the stored log
+always holds only the signed events that contribute to the current state.
+A Follow for a new target is appended; a Follow for an already-followed
+target supersedes the previous Follow, which is removed; an Unfollow for a
+followed target removes the matching Follow, and any prior Unfollow for that
+target, and is kept (it is the convergence tombstone for peers that synced
+the old Follow); a Follow for a not-currently-followed target also removes
+any prior Unfollow for that target, so a follow/unfollow cycle leaves one
+tombstone, not one per cycle; a Profile supersedes the previous one, which
+is removed. The tidy log holds one Follow per currently-followed target,
+one Unfollow per previously-followed-but-now-unfollowed target, and one
+Profile. Every kept event still verifies. Mutations are rare and serving is
+frequent (every sync round and every LRU re-crawl reads the log), so the
+work of removing a superseded event belongs at the rare mutation, not at
+the frequent read. A receiver that syncs a tidy log stores it directly: no
+dead events to filter, no cold-start replay, no per-receiver compacted
+state.
+
+The Unfollow tombstones are the irreducible cost of convergence with
+unknown peer cursors in an append-only-plus-projection model. A peer that
+synced the old Follow before the author compacted it still holds its copy;
+the Unfollow is how that peer learns the edge is gone. New peers never
+saw the Follow, so the Unfollow is a no-op for them. Removing a stale
+tombstone when the target is re-followed is safe: a peer whose cursor
+predates the removed tombstone re-requests from there, and the skew-window
+re-request plus set-union dedup delivers the newer Follow or the newer
+Unfollow, whichever is current. The tombstones are bounded (one per
+target ever unfollowed, ~200 B each) and never grow the log past one event
+per target per edge state.
+
+ProfileLog Delete events are not supported. Unfollow already covers the
+Follow case (and converges with peers via the tombstone), and a new Profile
+covers the Profile case. A ProfileLog Delete that removes a Follow without
+leaving a tombstone would break convergence: peers holding the old Follow
+would never learn the edge is gone. `validateEvent` rejects `KindDelete`
+in `ProfileLog` so no author can sign one.
 
 ## Low level design
 
@@ -263,7 +291,7 @@ The index entry removal is the tombstone; the bytes are the dedup
 guard. The index covers PostLog events only: the existence gate is a
 PostLog concern (Like targets a post, Reply targets a post, Delete
 targets a post or a like). ProfileLog events are not indexed;
-ProfileLog Deletes are handled by compaction (phase 7), not by the
+ProfileLog Deletes are handled by tidy-at-write (phase 7), not by the
 existence gate. The crawler stores only ProfileLog events via
 `PutCrawledProfile`, which does not touch the index.
 
@@ -324,20 +352,39 @@ eviction, no linear scan over all authors. The composite key (timestamp
 + identity) handles collisions when two authors are touched in the same
 nanosecond.
 
-### Phase 7: ProfileLog compaction
+### Phase 7: Tidy ProfileLog
 
-The receiver maintains a compacted state per author: the current
-`FollowSet` and the latest signed `Profile`. Each incoming ProfileLog
-event is applied incrementally to this state, O(1) per event: a `Follow`
-for a new target is kept and the target added; an `Unfollow` for a known
-target removes the target and drops the corresponding `Follow` event; a
-`Profile` supersedes the previous one; a `Delete` is kept only if it
-targets an event still in the compacted set (a Delete targeting a Follow
-already dropped by Unfollow, or a Profile that was superseded, is dead
-weight and dropped). Only the signed events that contribute to the
-current state are written to the bucket. A full replay is O(n) and runs
-once, when a node first receives a batch of uncompacted events (cold
-start).
+The author maintains a tidy own ProfileLog at write time. On each
+ProfileLog append, before signing, the author removes the superseded
+event from the own log: a Follow for an already-followed target removes
+the previous Follow for that target; a Follow for a
+not-currently-followed target removes any prior Unfollow for that
+target; an Unfollow for a followed target removes the matching Follow
+and any prior Unfollow for that target; a Profile removes the previous
+Profile. The new event is then signed and appended. The tidy log holds
+one Follow per currently-followed target, one Unfollow per
+previously-followed-but-now-unfollowed target, and one Profile.
+
+`validateEvent` rejects `KindDelete` in `ProfileLog`: Unfollow covers
+the Follow case and converges with a tombstone, a new Profile covers
+the Profile case, and a ProfileLog Delete that removes a Follow without
+a tombstone would break convergence with peers holding the old Follow.
+
+The lookup for the superseded event is by target pubkey (Follow,
+Unfollow) or by kind (Profile), bounded by the follow cap (phase 6):
+the scan covers Follows plus Unfollows plus one Profile, so at most
+~10001 events, and the removal is O(n) in the follow set, not in the
+history. A persisted monotonic sequence counter is required, independent
+of bucket key count: `stampSignAppend` today derives `Sequence` from
+`OwnEventCount` (key count), which drops when events are removed, so the
+next event could get a lower or colliding sequence. The counter never
+decreases.
+
+The receiver needs no compaction. A tidy log has no dead events, so the
+receiver stores what it receives directly. The projection
+(`FollowSet.Apply` over Follow/Unfollow) is unchanged: it still replays
+the events it holds, which for a tidy log are exactly the contributing
+ones. No per-receiver compacted state, no cold-start replay.
 
 ## Security considerations
 
@@ -361,7 +408,7 @@ false accusation.
 compromised and the node still follows them, the follow state passes. For
 PostLog, their flood is rate-bounded (1/sec per kind) and retention-bounded
 but not stopped. For ProfileLog, the net-follow cap bounds the follow set
-and compaction bounds the history, but an attacker who stays within the
+and tidy-at-write bounds the history, but an attacker who stays within the
 caps is not stopped. This is correct: the node opted into the follow. The
 bounds limit the damage; unfollowing is the manual stop.
 
@@ -445,22 +492,28 @@ stops. An author with 150 net follows is stored normally. A crawl
 exceeding `maxCache` authors evicts the coldest so the on-disk count
 stays at `maxCache`.
 
-### Phase 7: ProfileLog compaction
+### Phase 7: Tidy ProfileLog
 
-Tests: cold start compaction of 20,000 events (10,000 follows, 9,999
-unfollows, 1 net follow) is stored in full on buggy code; after the fix,
-a full replay compacts to the current state (1 signed Follow, the latest
-signed Profile), and the FollowSet and Profile projected from the stored
-set equal those projected from the full set. Incremental: after
-cold-start compaction, a new Follow is added in O(1), a new Unfollow
-drops the matching Follow in O(1), a new Profile supersedes the previous
-one. Every kept event still passes `Verify`. A Delete targeting a Follow
-already dropped by Unfollow is not kept. A Delete targeting a superseded
-Profile is not kept. An author who follows Alice, unfollows Alice, then
-follows Alice again compacts to exactly one Follow for Alice (the
-latest), and it still verifies. An author who emits two Profile events
-then cold-starts compacts to exactly one Profile (the later one), and
-the DisplayName projected from the stored set matches the full set.
+Tests: after a Follow for a new target, the own ProfileLog holds exactly
+one Follow for that target. After a second Follow for the same target, the
+first is removed and only the second remains, and it still verifies.
+After an Unfollow for a followed target, the matching Follow is removed
+and the Unfollow is kept. After a second Profile event, the first is
+removed and only the second remains. An author who follows Alice,
+unfollows Alice, then follows Alice again has exactly one Follow for
+Alice (the latest) and one Unfollow for Alice (the convergence tombstone
+from the first cycle), and both verify. An author who follows Alice,
+unfollows Alice, follows Alice, then unfollows Alice again has exactly
+one Follow and one Unfollow for Alice: the second Follow removed the
+first Unfollow, and the second Unfollow removed the second Follow, so
+no tombstone from the first cycle survives. An author who emits two
+Profile events has exactly one Profile (the later one). A ProfileLog
+Delete event is rejected by `validateEvent`. The persisted sequence
+counter is monotonic: after a tidy-at-write removes an event, the next
+event gets a sequence strictly greater than the last, never lower or
+colliding. A tidy log served to a cold-start receiver is stored directly,
+and the FollowSet and Profile projected from the stored set equal those
+projected from the full history.
 
 ## Comparison to other P2P social networks
 
@@ -482,20 +535,21 @@ with, not about malicious intermediaries.
 | Rate limit | 1/sec per author per kind (phase 2; up to 3/sec across PostLog kinds), receiver-enforced by signed timestamp | None protocol-level, "replicate only who you follow" | Relay-set (e.g. 10/60s), NIP-42 auth | PDS-enforced: 5000/hr per DID |
 | Future timestamp | Reject if > now + 60s (phase 4) | Not addressed | Not addressed | Not addressed |
 | Retention | Reject-at-ingest + local pruning (phase 3) | None, full feed replicated forever | Relay-set, often oldest-first LRU eviction | Full repo history retained |
-| Follow graph | Append-only ProfileLog, receiver compacts | Append-only `contact` messages | Replaceable kind-3, latest only | Records in repo, latest wins |
+| Follow graph | Append-only ProfileLog, author compacts at write | Append-only `contact` messages | Replaceable kind-3, latest only | Records in repo, latest wins |
 | Follow cap | 5000 net follows, author-side (phase 6) | None, replication is the bound | None protocol-level | None protocol-level |
 | Linked-event existence | Like and Reply dropped if target missing (phase 5) | N/A | N/A | N/A |
-| Compaction | Receiver-side, keeps signed originals (phase 7) | None, full feed history | Replaceable events overwrite | Latest record wins, no history |
+| Compaction | Author-side, tidy at write, keeps signed originals (phase 7) | None, full feed history | Replaceable events overwrite | Latest record wins, no history |
 | Defeats relay framing | Yes (signatures + transport-only) | Yes (signatures + chain) | Yes (signatures) | Yes (signatures + MST) |
-| Defeats author flood | Size cap + 1/sec-per-kind rate (flag stops sync) + retention + compaction | "Don't follow them" + manual unfollow | Relay rate limits + unfollow | PDS rate limits + unfollow |
+| Defeats author flood | Size cap + 1/sec-per-kind rate (flag stops sync) + retention + tidy-at-write | "Don't follow them" + manual unfollow | Relay rate limits + unfollow | PDS rate limits + unfollow |
 
 The rows where driftnode is stricter follow from a deliberate posture:
 descoping in-band media removes the single largest DOS and abuse surface
 that the other three carry (SSB 5MB blobs, Nostr media via relays, AT
 Protocol 1MB blobs), which is what makes a per-kind cap in the low KB
-range possible at all. driftnode bounds volume at the receiver, by
-construction, instead of leaving it to relay discretion or a manual
-unfollow.
+range possible at all. driftnode bounds volume at the source: ProfileLog
+is tidy at the author, PostLog is bounded at the receiver by retention and
+the rate limit, by construction, instead of leaving it to relay discretion
+or a manual unfollow.
 
 The rate limit is receiver-enforced from the signed timestamp, against a
 threat model where the author is the adversary and the transport is pure.
