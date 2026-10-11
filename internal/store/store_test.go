@@ -2706,3 +2706,455 @@ func TestReceiverFollowCapViaCrawledProfile(t *testing.T) {
 		t.Fatal("author with too many net follows was not flagged via crawled profile")
 	}
 }
+
+// profileLogForTarget returns the ProfileLog events whose Follow.TargetPubkey
+// matches target. Used by the Phase 7 tidy-at-write tests.
+func profileLogForTarget(t *testing.T, s *Store, target [32]byte) []core.SignedEvent {
+	t.Helper()
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("own profile events: %v", err)
+	}
+	var out []core.SignedEvent
+	for _, se := range events {
+		if se.Event.Follow != nil && se.Event.Follow.TargetPubkey == target {
+			out = append(out, se)
+		}
+	}
+	return out
+}
+
+// profileLogProfiles returns the ProfileLog events of kind Profile in the
+// own log.
+func profileLogProfiles(t *testing.T, s *Store) []core.SignedEvent {
+	t.Helper()
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("own profile events: %v", err)
+	}
+	var out []core.SignedEvent
+	for _, se := range events {
+		if se.Event.Kind == core.KindProfile {
+			out = append(out, se)
+		}
+	}
+	return out
+}
+
+// TestTidyRepeatedFollowLeavesOneEvent verifies that following the same
+// target more than once leaves exactly one Follow, not one per call.
+func TestTidyRepeatedFollowLeavesOneEvent(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+	tgt := [32]byte(target.Public)
+
+	for i := 0; i < 3; i++ {
+		if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+			Kind:   core.KindFollow,
+			Follow: &core.Follow{TargetPubkey: tgt},
+		}); err != nil {
+			t.Fatalf("follow %d: %v", i, err)
+		}
+	}
+
+	evs := profileLogForTarget(t, s, tgt)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event after repeated follow, got %d", len(evs))
+	}
+	if evs[0].Event.Kind != core.KindFollow {
+		t.Fatalf("want KindFollow, got %d", evs[0].Event.Kind)
+	}
+	if err := evs[0].Verify(); err != nil {
+		t.Fatalf("kept follow does not verify: %v", err)
+	}
+}
+
+// TestTidyRepeatedUnfollowLeavesOneEvent verifies that unfollowing the same
+// target more than once leaves exactly one Unfollow, not one per call.
+func TestTidyRepeatedUnfollowLeavesOneEvent(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+	tgt := [32]byte(target.Public)
+
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+			Kind:   core.KindUnfollow,
+			Follow: &core.Follow{TargetPubkey: tgt},
+		}); err != nil {
+			t.Fatalf("unfollow %d: %v", i, err)
+		}
+	}
+
+	evs := profileLogForTarget(t, s, tgt)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event after repeated unfollow, got %d", len(evs))
+	}
+	if evs[0].Event.Kind != core.KindUnfollow {
+		t.Fatalf("want KindUnfollow, got %d", evs[0].Event.Kind)
+	}
+	if err := evs[0].Verify(); err != nil {
+		t.Fatalf("kept unfollow does not verify: %v", err)
+	}
+}
+
+// TestTidyUnfollowFollowedTargetLeavesOneEvent verifies that an Unfollow for
+// a followed target removes the matching Follow, so the log holds only the
+// Unfollow as the convergence tombstone. The FollowSet projection shows
+// the target as no longer followed.
+func TestTidyUnfollowFollowedTargetLeavesOneEvent(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+	tgt := [32]byte(target.Public)
+
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("unfollow: %v", err)
+	}
+
+	// The FollowSet projection must show the target as not followed.
+	fs, err := s.ownFollowSet()
+	if err != nil {
+		t.Fatalf("follow set: %v", err)
+	}
+	if fs.Contains(tgt) {
+		t.Fatal("target still in follow set after unfollow")
+	}
+
+	// The log holds only the Unfollow: the matching Follow was removed.
+	evs := profileLogForTarget(t, s, tgt)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event (unfollow) after unfollow, got %d", len(evs))
+	}
+	if evs[0].Event.Kind != core.KindUnfollow {
+		t.Fatalf("want KindUnfollow, got %d", evs[0].Event.Kind)
+	}
+	if err := evs[0].Verify(); err != nil {
+		t.Fatalf("kept unfollow does not verify: %v", err)
+	}
+}
+
+// TestTidyProfileLeavesOneEvent verifies that a second Profile event removes
+// the first, so only the later one remains.
+func TestTidyProfileLeavesOneEvent(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:    core.KindProfile,
+		Profile: &core.Profile{DisplayName: "first"},
+	}); err != nil {
+		t.Fatalf("profile 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:    core.KindProfile,
+		Profile: &core.Profile{DisplayName: "second"},
+	}); err != nil {
+		t.Fatalf("profile 2: %v", err)
+	}
+
+	profs := profileLogProfiles(t, s)
+	if len(profs) != 1 {
+		t.Fatalf("want 1 profile event, got %d", len(profs))
+	}
+	if profs[0].Event.Profile == nil || profs[0].Event.Profile.DisplayName != "second" {
+		t.Fatalf("want second profile, got %+v", profs[0].Event.Profile)
+	}
+}
+
+// TestTidyFollowUnfollowFollowLeavesOneEvent verifies that an author who
+// follows Alice, unfollows Alice, then follows Alice again has exactly one
+// event for Alice: the latest Follow. The second Follow removes both the
+// first Follow and the Unfollow, so no tombstone survives the cycle.
+func TestTidyFollowUnfollowFollowLeavesOneEvent(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+	tgt := [32]byte(target.Public)
+
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("unfollow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow 2: %v", err)
+	}
+
+	evs := profileLogForTarget(t, s, tgt)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event (latest follow), got %d", len(evs))
+	}
+	if evs[0].Event.Kind != core.KindFollow {
+		t.Fatalf("want KindFollow, got %d", evs[0].Event.Kind)
+	}
+	if err := evs[0].Verify(); err != nil {
+		t.Fatalf("kept follow does not verify: %v", err)
+	}
+
+	// The target must be in the follow set.
+	fs, err := s.ownFollowSet()
+	if err != nil {
+		t.Fatalf("follow set: %v", err)
+	}
+	if !fs.Contains(tgt) {
+		t.Fatal("target not in follow set after re-follow")
+	}
+}
+
+// TestTidyFollowUnfollowFollowUnfollowLeavesOneEvent verifies that an author
+// who follows Alice, unfollows Alice, follows Alice, then unfollows Alice
+// again has exactly one event for Alice: the latest Unfollow. Each event in
+// the cycle removes all prior events for the target, so no event from an
+// earlier cycle survives.
+func TestTidyFollowUnfollowFollowUnfollowLeavesOneEvent(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+	tgt := [32]byte(target.Public)
+
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("unfollow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow 2: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("unfollow 2: %v", err)
+	}
+
+	evs := profileLogForTarget(t, s, tgt)
+	if len(evs) != 1 {
+		t.Fatalf("want 1 event (latest unfollow), got %d", len(evs))
+	}
+	if evs[0].Event.Kind != core.KindUnfollow {
+		t.Fatalf("want KindUnfollow, got %d", evs[0].Event.Kind)
+	}
+	if err := evs[0].Verify(); err != nil {
+		t.Fatalf("kept unfollow does not verify: %v", err)
+	}
+
+	// The target must not be in the follow set.
+	fs, err := s.ownFollowSet()
+	if err != nil {
+		t.Fatalf("follow set: %v", err)
+	}
+	if fs.Contains(tgt) {
+		t.Fatal("target still in follow set after final unfollow")
+	}
+}
+
+// TestTidyProfileLogDeleteRejected verifies that a ProfileLog Delete event is
+// rejected by validateEvent (called by Sign).
+func TestTidyProfileLogDeleteRejected(t *testing.T) {
+	kp, _ := core.NewKeyPair()
+	_, err := kp.Sign(core.Event{
+		Kind:   core.KindDelete,
+		Log:    core.ProfileLog,
+		Delete: &core.Delete{TargetID: core.EventID{1}},
+	})
+	if err == nil {
+		t.Fatal("Sign accepted KindDelete in ProfileLog")
+	}
+}
+
+// TestTidySequenceMonotonic verifies that the persisted sequence counter is
+// monotonic: after a tidy-at-write removes an event, the next event gets a
+// sequence strictly greater than the last, never lower or colliding.
+func TestTidySequenceMonotonic(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+	tgt := [32]byte(target.Public)
+
+	// Follow, then re-follow (which removes the first). The second event
+	// must have a sequence strictly greater than the first.
+	se1, id1, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	})
+	if err != nil {
+		t.Fatalf("follow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: tgt},
+	}); err != nil {
+		t.Fatalf("follow 2: %v", err)
+	}
+	_ = se1
+	_ = id1
+
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("own events: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("want 1 event after re-follow, got %d", len(events))
+	}
+	// The surviving event's sequence must be 2, not 1 (which it would be
+	// if derived from key count after the first was removed).
+	if events[0].Event.Sequence != 2 {
+		t.Fatalf("want sequence 2, got %d", events[0].Event.Sequence)
+	}
+
+	// A third event (a Profile) must get sequence 3, strictly greater.
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:    core.KindProfile,
+		Profile: &core.Profile{DisplayName: "x"},
+	}); err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+	events, err = s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("own events after profile: %v", err)
+	}
+	var profSeq uint64
+	for _, se := range events {
+		if se.Event.Kind == core.KindProfile {
+			profSeq = se.Event.Sequence
+		}
+	}
+	if profSeq != 3 {
+		t.Fatalf("want profile sequence 3, got %d", profSeq)
+	}
+}
+
+// TestTidyLogStoredDirectly verifies that a tidy log served to a cold-start
+// receiver is stored directly, and the FollowSet and Profile projected from
+// the stored set equal those projected from the full history.
+func TestTidyLogStoredDirectly(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	target1, _ := core.NewKeyPair()
+	target2, _ := core.NewKeyPair()
+
+	// Build a tidy own log through SignAndAppend: follow two targets,
+	// unfollow one, set a profile.
+	if _, _, err := s.SignAndAppend(author, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: [32]byte(target1.Public)},
+	}); err != nil {
+		t.Fatalf("follow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(author, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: [32]byte(target2.Public)},
+	}); err != nil {
+		t.Fatalf("follow 2: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(author, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: [32]byte(target1.Public)},
+	}); err != nil {
+		t.Fatalf("unfollow 1: %v", err)
+	}
+	if _, _, err := s.SignAndAppend(author, core.ProfileLog, core.Event{
+		Kind:    core.KindProfile,
+		Profile: &core.Profile{DisplayName: "author"},
+	}); err != nil {
+		t.Fatalf("profile: %v", err)
+	}
+
+	// Read the tidy own log.
+	tidyEvents, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("own events: %v", err)
+	}
+	// The tidy log holds: U(t1) as the convergence tombstone for the
+	// unfollowed target, F(t2) for the followed target, and one Profile.
+	// One event per target, never a Follow+Unfollow pair.
+	kinds := make(map[core.Kind]int)
+	for _, se := range tidyEvents {
+		kinds[se.Event.Kind]++
+	}
+	if kinds[core.KindFollow] != 1 || kinds[core.KindUnfollow] != 1 || kinds[core.KindProfile] != 1 {
+		t.Fatalf("tidy log shape wrong: %+v", kinds)
+	}
+
+	// Serve the tidy log to a cold-start receiver: store each event via
+	// PutRemoteEvent. The receiver should store them directly.
+	receiver := newTestStore(t)
+	for _, se := range tidyEvents {
+		if _, err := receiver.PutRemoteEvent(&se, se.Event.Sequence); err != nil {
+			t.Fatalf("put remote event: %v", err)
+		}
+	}
+
+	// Project FollowSet and Profile from the stored set.
+	storedEvents, err := receiver.CrawledProfiles(author.Identity())
+	if err != nil {
+		t.Fatalf("crawled profiles: %v", err)
+	}
+	storedFS := core.NewLog(storedEvents).FollowSet()
+	storedProf := core.NewLog(storedEvents).Profile()
+
+	// Project from the full history (the tidy events are the full history
+	// here, since the log is already tidy, but the point is the receiver
+	// stores them directly and the projections match).
+	fullFS := core.NewLog(tidyEvents).FollowSet()
+	fullProf := core.NewLog(tidyEvents).Profile()
+
+	// The follow set should contain only target2 (target1 was unfollowed).
+	if storedFS.Len() != 1 {
+		t.Fatalf("stored follow set: want 1, got %d", storedFS.Len())
+	}
+	if !storedFS.Contains([32]byte(target2.Public)) {
+		t.Fatal("stored follow set missing target2")
+	}
+	if storedFS.Contains([32]byte(target1.Public)) {
+		t.Fatal("stored follow set contains unfollowed target1")
+	}
+	if fullFS.Len() != storedFS.Len() {
+		t.Fatalf("follow set mismatch: full=%d stored=%d", fullFS.Len(), storedFS.Len())
+	}
+
+	// The profile should be "author".
+	if storedProf == nil || storedProf.DisplayName != "author" {
+		t.Fatalf("stored profile: want author, got %+v", storedProf)
+	}
+	if fullProf == nil || fullProf.DisplayName != "author" {
+		t.Fatalf("full profile: want author, got %+v", fullProf)
+	}
+}

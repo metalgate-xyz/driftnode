@@ -232,7 +232,7 @@ func validateEvent(ev Event) error {
 	switch ev.Log {
 	case ProfileLog:
 		switch ev.Kind {
-		case KindProfile, KindFollow, KindUnfollow, KindDelete:
+		case KindProfile, KindFollow, KindUnfollow:
 			return nil
 		}
 	case DetailLog:

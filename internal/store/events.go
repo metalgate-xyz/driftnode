@@ -72,25 +72,47 @@ func (s *Store) existingLikeEventID(kp *core.KeyPair, ev core.Event) (core.Event
 
 // stampSignAppend assigns the next sequence number, stamps with the current
 // wall clock, signs, and appends to the own log. Shared by the synchronous
-// (SignAndAppend) and rate-limited (postQueue.process) paths.
+// (SignAndAppend) and rate-limited (postQueue.process) paths. The sequence
+// counter, the ProfileLog tidy-at-write, and the append run in one
+// transaction, so concurrent callers never collide on a sequence number and
+// the tidy log is updated atomically with the new event.
 func (s *Store) stampSignAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
-	seq, err := s.OwnEventCount(log)
-	if err != nil {
-		return nil, core.EventID{}, fmt.Errorf("get sequence: %w", err)
-	}
 	ev.Log = log
-	ev.Timestamp = core.Now64()
-	ev.Sequence = seq + 1
-	se, err := kp.Sign(ev)
+	var se *core.SignedEvent
+	var id core.EventID
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		if log == core.ProfileLog {
+			if err := tidyProfileLogTx(tx, kp.Identity(), ev); err != nil {
+				return fmt.Errorf("tidy profile log: %w", err)
+			}
+		}
+		seq, err := nextSequence(tx, log)
+		if err != nil {
+			return fmt.Errorf("get sequence: %w", err)
+		}
+		ev.Sequence = seq
+		ev.Timestamp = core.Now64()
+		signed, err := kp.Sign(ev)
+		if err != nil {
+			return fmt.Errorf("sign: %w", err)
+		}
+		eventID, err := signed.ID()
+		if err != nil {
+			return fmt.Errorf("event id: %w", err)
+		}
+		eventBytes, err := core.CanonicalEncode(signed)
+		if err != nil {
+			return fmt.Errorf("encode event: %w", err)
+		}
+		if err := appendOwnEventTx(tx, log, signed, eventID, eventBytes); err != nil {
+			return fmt.Errorf("append: %w", err)
+		}
+		se = signed
+		id = eventID
+		return nil
+	})
 	if err != nil {
-		return nil, core.EventID{}, fmt.Errorf("sign: %w", err)
-	}
-	if err := s.AppendOwnEvent(log, se); err != nil {
-		return nil, core.EventID{}, fmt.Errorf("append: %w", err)
-	}
-	id, err := se.ID()
-	if err != nil {
-		return nil, core.EventID{}, fmt.Errorf("event id: %w", err)
+		return nil, core.EventID{}, err
 	}
 	return se, id, nil
 }

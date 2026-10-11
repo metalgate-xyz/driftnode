@@ -90,7 +90,7 @@ func TestValidateEventLogConsistency(t *testing.T) {
 		{"like in postlog", Event{Kind: KindLike, Log: PostLog, Timestamp: 1, Sequence: 1, Like: &Like{TargetID: EventID{1}}}, false},
 		{"like in profilelog", Event{Kind: KindLike, Log: ProfileLog, Timestamp: 1, Sequence: 1, Like: &Like{TargetID: EventID{1}}}, true},
 		{"delete in postlog", Event{Kind: KindDelete, Log: PostLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, false},
-		{"delete in profilelog", Event{Kind: KindDelete, Log: ProfileLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, false},
+		{"delete in profilelog", Event{Kind: KindDelete, Log: ProfileLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, true},
 		{"delete in detaillog", Event{Kind: KindDelete, Log: DetailLog, Timestamp: 1, Sequence: 1, Delete: &Delete{TargetID: EventID{1}}}, false},
 	}
 	for _, c := range cases {

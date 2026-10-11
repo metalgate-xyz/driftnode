@@ -2,6 +2,7 @@ package store
 
 import (
 	"crypto/ed25519"
+	"encoding/binary"
 	"fmt"
 
 	"driftnode/internal/core"
@@ -94,4 +95,33 @@ func postAuthorIndex(tx *bolt.Tx, follows []core.Identity) map[core.EventID]core
 		})
 	}
 	return authors
+}
+
+// nextSequence returns the next value for the per-log monotonic sequence
+// counter, advancing it in place. The counter never decreases, even when
+// events are removed from the own log by tidy-at-write: deriving Sequence
+// from key count would produce a lower or colliding number after a removal.
+// On first use, the counter is seeded from the current key count so existing
+// logs continue from the same numbering.
+func nextSequence(tx *bolt.Tx, log core.LogName) (uint64, error) {
+	b := tx.Bucket(bucketSeq)
+	key := []byte(log)
+	raw := b.Get(key)
+	var cur uint64
+	if raw != nil {
+		cur = binary.BigEndian.Uint64(raw)
+	} else {
+		// Seed from the current own-log key count so a pre-existing log
+		// continues from its highest sequence, not from 1.
+		if lb := tx.Bucket(bucketOwn).Bucket(key); lb != nil {
+			cur = uint64(lb.Stats().KeyN)
+		}
+	}
+	cur++
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], cur)
+	if err := b.Put(key, buf[:]); err != nil {
+		return 0, fmt.Errorf("put sequence: %w", err)
+	}
+	return cur, nil
 }

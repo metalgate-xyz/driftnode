@@ -48,6 +48,7 @@ var (
 	bucketEventRef    = []byte("eventref")    // composite TargetEventID+SourceEventID -> source author + kind byte
 	bucketCrawlLRU   = []byte("crawllru")    // composite int64BE(touchedNs)+Identity -> presence; crawl cache LRU
 	bucketCrawlTS    = []byte("crawlts")    // Identity -> int64BE last-touched ns; reverse index for crawl LRU touch
+	bucketSeq         = []byte("seq")        // per-log monotonic sequence counter (uint64 BE), never decreases
 )
 
 // meta keys
@@ -183,7 +184,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef, bucketCrawlLRU, bucketCrawlTS} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef, bucketCrawlLRU, bucketCrawlTS, bucketSeq} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -270,7 +271,7 @@ func (s *Store) PutKey(kp *core.KeyPair, enc *core.EncryptedKey) error {
 // added to bucketEventIndex, a referencing own event to bucketEventRef) but
 // the target is not looked up: the own path is a pure set-union write and does
 // not gate. Indexes cover PostLog events only; ProfileLog compaction is
-// handled in phase 7.
+// handled at write time by tidyProfileLogTx in the SignAndAppend path.
 func (s *Store) AppendOwnEvent(log core.LogName, se *core.SignedEvent) error {
 	id, err := se.ID()
 	if err != nil {
@@ -281,34 +282,42 @@ func (s *Store) AppendOwnEvent(log core.LogName, se *core.SignedEvent) error {
 		return fmt.Errorf("encode event: %w", err)
 	}
 	return s.db.Update(func(tx *bolt.Tx) error {
-		logBucket, err := tx.Bucket(bucketOwn).CreateBucketIfNotExists([]byte(log))
-		if err != nil {
-			return fmt.Errorf("create log bucket: %w", err)
-		}
-		// Set union: skip if already present.
-		if logBucket.Get(id[:]) != nil {
+		return appendOwnEventTx(tx, log, se, id, eventBytes)
+	})
+}
+
+// appendOwnEventTx writes a signed event to the own log within an existing
+// transaction. Set-union dedup by event ID; one Like per author per target.
+// PostLog events maintain the existence and reference indexes. The caller
+// has already computed the event ID and canonical bytes.
+func appendOwnEventTx(tx *bolt.Tx, log core.LogName, se *core.SignedEvent, id core.EventID, eventBytes []byte) error {
+	logBucket, err := tx.Bucket(bucketOwn).CreateBucketIfNotExists([]byte(log))
+	if err != nil {
+		return fmt.Errorf("create log bucket: %w", err)
+	}
+	// Set union: skip if already present.
+	if logBucket.Get(id[:]) != nil {
+		return nil
+	}
+	if se.Event.Kind == core.KindLike && se.Event.Like != nil {
+		if _, dup := existingLikeID(se.Author, se.Event.Like.TargetID, logBucket); dup {
 			return nil
 		}
-		if se.Event.Kind == core.KindLike && se.Event.Like != nil {
-			if _, dup := existingLikeID(se.Author, se.Event.Like.TargetID, logBucket); dup {
-				return nil
-			}
-		}
-		if err := logBucket.Put(id[:], eventBytes); err != nil {
+	}
+	if err := logBucket.Put(id[:], eventBytes); err != nil {
+		return err
+	}
+	if log == core.PostLog {
+		if err := indexEventAdd(tx, id, se.Author, se.Event.Kind); err != nil {
 			return err
 		}
-		if log == core.PostLog {
-			if err := indexEventAdd(tx, id, se.Author, se.Event.Kind); err != nil {
+		if target := referenceTarget(se); !target.IsZero() {
+			if err := indexRefAdd(tx, target, id, se.Author, se.Event.Kind); err != nil {
 				return err
 			}
-			if target := referenceTarget(se); !target.IsZero() {
-				if err := indexRefAdd(tx, target, id, se.Author, se.Event.Kind); err != nil {
-					return err
-				}
-			}
 		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // OwnEvents returns all signed events from the user's own log of the given
