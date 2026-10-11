@@ -10,6 +10,8 @@ import (
 
 	"driftnode/internal/core"
 	"driftnode/internal/weight"
+
+	bolt "go.etcd.io/bbolt"
 )
 
 func newTestStore(t *testing.T) *Store {
@@ -2448,5 +2450,259 @@ func TestPruneDropsLikeTargetingPrunedPost(t *testing.T) {
 	}
 	if inserted {
 		t.Fatal("like targeting pruned post was stored")
+	}
+}
+
+// signRemoteFollowFor signs a KindFollow event by author targeting target.
+func signRemoteFollowFor(t *testing.T, author *core.KeyPair, seq uint64, ts int64, target [32]byte) *core.SignedEvent {
+	t.Helper()
+	se, err := author.Sign(core.Event{
+		Kind:      core.KindFollow,
+		Log:       core.ProfileLog,
+		Timestamp: ts,
+		Sequence:  seq,
+		Follow:    &core.Follow{TargetPubkey: target},
+	})
+	if err != nil {
+		t.Fatalf("sign follow: %v", err)
+	}
+	return se
+}
+
+// bulkOwnFollows writes n signed Follow events for distinct targets into the
+// own ProfileLog bucket in a single transaction. Used to seed the author-side
+// follow cap boundary without the O(n^2) cost of SignAndAppend projecting the
+// log on every append. The boundary call itself goes through SignAndAppend.
+func bulkOwnFollows(t *testing.T, s *Store, kp *core.KeyPair, n int) {
+	t.Helper()
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		logBucket, err := tx.Bucket(bucketOwn).CreateBucketIfNotExists([]byte(core.ProfileLog))
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			target, _ := core.NewKeyPair()
+			se, err := kp.Sign(core.Event{
+				Kind:      core.KindFollow,
+				Log:       core.ProfileLog,
+				Timestamp:  int64(5e9 + i),
+				Sequence:  uint64(i + 1),
+				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public)},
+			})
+			if err != nil {
+				return err
+			}
+			id, err := se.ID()
+			if err != nil {
+				return err
+			}
+			buf, err := core.CanonicalEncode(se)
+			if err != nil {
+				return err
+			}
+			if err := logBucket.Put(id[:], buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bulk own follows: %v", err)
+	}
+}
+
+// bulkRemoteFollows writes n signed Follow events for distinct targets into a
+// remote author's sub-bucket in a single transaction. Used to seed the
+// receiver-side follow cap boundary without the O(n^2) cost of PutRemoteEvent
+// projecting the log on every event. The boundary call itself goes through
+// PutRemoteEvent (or PutCrawledProfile).
+func bulkRemoteFollows(t *testing.T, s *Store, author *core.KeyPair, n int) {
+	t.Helper()
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		ab, err := tx.Bucket(bucketRemote).CreateBucketIfNotExists([]byte(author.Identity()))
+		if err != nil {
+			return err
+		}
+		for i := 0; i < n; i++ {
+			target, _ := core.NewKeyPair()
+			se, err := author.Sign(core.Event{
+				Kind:      core.KindFollow,
+				Log:       core.ProfileLog,
+				Timestamp: int64(5e9 + i),
+				Sequence:  uint64(i + 1),
+				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public)},
+			})
+			if err != nil {
+				return err
+			}
+			id, err := se.ID()
+			if err != nil {
+				return err
+			}
+			buf, err := core.CanonicalEncode(se)
+			if err != nil {
+				return err
+			}
+			if err := ab.Put(id[:], buf); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("bulk remote follows: %v", err)
+	}
+}
+
+// TestAuthorFollowCapRejectsExceeding verifies that SignAndAppend rejects a
+// Follow that would push the net follow count past MaxFollows. The author
+// side enforces the cap, so a legitimate author can never sign more than
+// MaxFollows net follows.
+func TestAuthorFollowCapRejectsExceeding(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Seed the own ProfileLog with MaxFollows net follows directly, so the
+	// boundary call through SignAndAppend projects the log once rather than
+	// re-projecting on each of MaxFollows appends.
+	bulkOwnFollows(t, s, kp, core.MaxFollows)
+
+	// The MaxFollows+1th distinct target is rejected.
+	target, _ := core.NewKeyPair()
+	_, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: [32]byte(target.Public)},
+	})
+	if !errors.Is(err, core.ErrFollowCapExceeded) {
+		t.Fatalf("want ErrFollowCapExceeded, got %v", err)
+	}
+
+	// Re-following an already-followed target does not change the net
+	// count, so it is allowed even at the cap. Use the first seeded target.
+	// Resolve it by reading the own log's first follow event.
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		t.Fatalf("own events: %v", err)
+	}
+	if len(events) == 0 {
+		t.Fatal("no own follow events")
+	}
+	existing := events[0].Event.Follow.TargetPubkey
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: existing},
+	}); err != nil {
+		t.Fatalf("re-follow at cap: %v", err)
+	}
+
+	// Unfollowing one makes room; a new distinct target is then accepted.
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindUnfollow,
+		Follow: &core.Follow{TargetPubkey: existing},
+	}); err != nil {
+		t.Fatalf("unfollow to make room: %v", err)
+	}
+	newTarget, _ := core.NewKeyPair()
+	if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
+		Kind:   core.KindFollow,
+		Follow: &core.Follow{TargetPubkey: [32]byte(newTarget.Public)},
+	}); err != nil {
+		t.Fatalf("follow after unfollow: %v", err)
+	}
+}
+
+// TestReceiverFollowCapFlagsExceeding verifies that on the receiver side, an
+// author whose net follows exceed MaxFollows is flagged in bucketFollowState
+// and the offending event is not stored.
+func TestReceiverFollowCapFlagsExceeding(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	// Seed MaxFollows net follows directly, then drive the boundary
+	// through PutRemoteEvent so the projection runs once at the cap.
+	bulkRemoteFollows(t, s, author, core.MaxFollows)
+
+	// The MaxFollows+1th distinct Follow trips the cap: flagged, not stored.
+	target, _ := core.NewKeyPair()
+	se := signRemoteFollowFor(t, author, uint64(core.MaxFollows+1), int64(5e9+core.MaxFollows), [32]byte(target.Public))
+	inserted, err := s.PutRemoteEvent(se, uint64(core.MaxFollows+1))
+	if err != nil {
+		t.Fatalf("PutRemoteEvent cap follow: %v", err)
+	}
+	if inserted {
+		t.Fatal("cap-exceeding follow was stored")
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if !flagged {
+		t.Fatal("author with too many net follows was not flagged")
+	}
+
+	// A further ProfileLog event from the flagged author is not stored.
+	target2, _ := core.NewKeyPair()
+	se2 := signRemoteFollowFor(t, author, uint64(core.MaxFollows+2), int64(5e9+core.MaxFollows+1), [32]byte(target2.Public))
+	inserted, err = s.PutRemoteEvent(se2, uint64(core.MaxFollows+2))
+	if err != nil {
+		t.Fatalf("PutRemoteEvent after flag: %v", err)
+	}
+	if inserted {
+		t.Fatal("event from flagged author was stored")
+	}
+}
+
+// TestReceiverFollowCapNormalAuthorStored verifies that an author with 150
+// net follows (well under the cap) is stored normally and not flagged.
+func TestReceiverFollowCapNormalAuthorStored(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	for i := 0; i < 150; i++ {
+		target, _ := core.NewKeyPair()
+		se := signRemoteFollowFor(t, author, uint64(i+1), int64(5e9+i), [32]byte(target.Public))
+		inserted, err := s.PutRemoteEvent(se, uint64(i+1))
+		if err != nil {
+			t.Fatalf("PutRemoteEvent follow %d: %v", i, err)
+		}
+		if !inserted {
+			t.Fatalf("follow %d not inserted", i)
+		}
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author with 150 follows was flagged")
+	}
+}
+
+// TestReceiverFollowCapViaCrawledProfile verifies the same cap check fires
+// through PutCrawledProfile (the crawler path).
+func TestReceiverFollowCapViaCrawledProfile(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	// Seed MaxFollows net follows directly, then drive the boundary
+	// through PutCrawledProfile.
+	bulkRemoteFollows(t, s, author, core.MaxFollows)
+
+	target, _ := core.NewKeyPair()
+	se := signRemoteFollowFor(t, author, uint64(core.MaxFollows+1), int64(5e9+core.MaxFollows), [32]byte(target.Public))
+	if err := s.PutCrawledProfile(author.Identity(), se); err != nil {
+		t.Fatalf("PutCrawledProfile cap follow: %v", err)
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if !flagged {
+		t.Fatal("author with too many net follows was not flagged via crawled profile")
 	}
 }

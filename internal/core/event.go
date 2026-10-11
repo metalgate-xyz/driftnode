@@ -72,6 +72,19 @@ const MaxFutureSkew = 60 * time.Second
 // author never signs an oversized event.
 var ErrEventOversized = errors.New("event exceeds per-kind size cap")
 
+// MaxFollows is the maximum number of net follows an author may sign. The
+// author side rejects a Follow that would push the net count past this cap,
+// so a legitimate author can never sign more. The cap bounds the crawl cache
+// and matches the Twitter platform cap and the sizing in the
+// weighted-follow-graph plan.
+const MaxFollows = 5000
+
+// ErrFollowCapExceeded is returned by SignAndAppend when a Follow event would
+// push the author's net follow count past MaxFollows. The author side
+// enforces it so a ProfileLog with more than MaxFollows net follows is a
+// protocol violation by a signed key.
+var ErrFollowCapExceeded = errors.New("follow cap exceeded")
+
 // Event is an unsigned event. Its canonical CBOR encoding is what the signature
 // covers and what the event ID hashes. Field order and cbor tag numbers are
 // fixed: reordering fields or renumbering tags changes every event ID.

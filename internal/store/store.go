@@ -46,6 +46,8 @@ var (
 	bucketRateSecond  = []byte("ratesecond")  // per-(author,kind) last event second, for same-second rate check
 	bucketEventIndex  = []byte("eventindex")  // EventID -> author Identity + kind byte; covers every stored event
 	bucketEventRef    = []byte("eventref")    // composite TargetEventID+SourceEventID -> source author + kind byte
+	bucketCrawlLRU   = []byte("crawllru")    // composite int64BE(touchedNs)+Identity -> presence; crawl cache LRU
+	bucketCrawlTS    = []byte("crawlts")    // Identity -> int64BE last-touched ns; reverse index for crawl LRU touch
 )
 
 // meta keys
@@ -181,7 +183,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef, bucketCrawlLRU, bucketCrawlTS} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -400,6 +402,29 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 		}
 		if se.Event.Kind == core.KindLike && se.Event.Like != nil {
 			if _, dup := existingLikeID(se.Author, se.Event.Like.TargetID, authorBucket); dup {
+				return nil
+			}
+		}
+		// Follow cap: an author whose net follows exceed MaxFollows has
+		// signed a ProfileLog their own client would have blocked, so the
+		// receiver flags them and skips the store. The author's own client
+		// blocks the 5001st Follow, so this is a protocol violation by a
+		// signed key. Runs only for ProfileLog events; PostLog volume is
+		// bounded by retention and the rate limit. An already-flagged
+		// author is skipped without re-projecting.
+		if se.Event.Log == core.ProfileLog {
+			fsb := tx.Bucket(bucketFollowState)
+			if st := decodeFollowState(fsb.Get([]byte(se.Author))); st.flagged {
+				return nil
+			}
+			count, err := remoteFollowCount(tx, se.Author, se)
+			if err != nil {
+				return fmt.Errorf("project follow count: %w", err)
+			}
+			if count > core.MaxFollows {
+				if err := flagAuthorTx(tx, se.Author); err != nil {
+					return err
+				}
 				return nil
 			}
 		}
@@ -662,6 +687,20 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 		// Set union: skip if already present.
 		if authorBucket.Get(id[:]) != nil {
 			return nil
+		}
+		// Follow cap: same check as PutRemoteEvent. The crawler stores
+		// only ProfileLog events, so every crawled event is subject to
+		// the net-follow cap.
+		fsb := tx.Bucket(bucketFollowState)
+		if st := decodeFollowState(fsb.Get([]byte(author))); st.flagged {
+			return nil
+		}
+		count, err := remoteFollowCount(tx, author, se)
+		if err != nil {
+			return fmt.Errorf("project follow count: %w", err)
+		}
+		if count > core.MaxFollows {
+			return flagAuthorTx(tx, author)
 		}
 		return authorBucket.Put(id[:], eventBytes)
 	})
@@ -1481,11 +1520,42 @@ func (s *Store) putFollowState(id core.Identity, st followState) error {
 // compromised or misbehaving, never framed.
 func (s *Store) flagAuthor(id core.Identity) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket(bucketFollowState)
-		st := decodeFollowState(b.Get([]byte(id)))
-		st.flagged = true
-		return b.Put([]byte(id), st.encode())
+		return flagAuthorTx(tx, id)
 	})
+}
+
+// flagAuthorTx marks an identity as flagged within an existing transaction.
+func flagAuthorTx(tx *bolt.Tx, id core.Identity) error {
+	b := tx.Bucket(bucketFollowState)
+	st := decodeFollowState(b.Get([]byte(id)))
+	st.flagged = true
+	return b.Put([]byte(id), st.encode())
+}
+
+// remoteFollowCount projects the author's held ProfileLog plus the candidate
+// event and returns the net follow count. Used by the receiver-side follow
+// cap check: an author whose net follows exceed MaxFollows has signed a
+// ProfileLog their own client would have blocked, so the receiver flags them
+// and skips the store. The candidate is applied in timestamp+sequence order
+// alongside the held events so the projection matches the post-insert state.
+func remoteFollowCount(tx *bolt.Tx, author core.Identity, candidate *core.SignedEvent) (int, error) {
+	var events []core.SignedEvent
+	if ab := tx.Bucket(bucketRemote).Bucket([]byte(author)); ab != nil {
+		if err := ab.ForEach(func(k, v []byte) error {
+			var se core.SignedEvent
+			if err := core.CanonicalDecode(v, &se); err != nil {
+				return nil
+			}
+			if se.Event.Log == core.ProfileLog {
+				events = append(events, se)
+			}
+			return nil
+		}); err != nil {
+			return 0, err
+		}
+	}
+	events = append(events, *candidate)
+	return core.NewLog(events).FollowSet().Len(), nil
 }
 
 // deleteFollowState removes the cached follow+pin+flag flags for an identity,

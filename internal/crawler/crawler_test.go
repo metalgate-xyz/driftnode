@@ -190,7 +190,11 @@ func TestCrawlFollowersDirection(t *testing.T) {
 	if c.VisitedCount() != 2 {
 		t.Fatalf("visited: want 2, got %d", c.VisitedCount())
 	}
-	if !c.visited[alice.Identity()] {
+	visited, err := c.store.IsCrawlVisited(alice.Identity())
+	if err != nil {
+		t.Fatalf("IsCrawlVisited: %v", err)
+	}
+	if !visited {
 		t.Fatalf("alice not visited: follower direction not walked")
 	}
 }
@@ -224,5 +228,66 @@ func TestCrawlBothDirectionsDedup(t *testing.T) {
 	fetched, _ := c.Run(context.Background(), fetcher)
 	if fetched != 2 {
 		t.Fatalf("fetched: want 2 (mutual follow dedup), got %d", fetched)
+	}
+}
+
+// TestCrawlLRUEvictsColdest verifies that a crawl exceeding maxCache authors
+// evicts the coldest so the on-disk tracked count stays at maxCache. The
+// graph is a linear chain so no back-edge re-enqueues an evicted identity;
+// walking it touches each identity once in order, so the earliest crawled
+// (the seed) is evicted and the latest crawled stays.
+func TestCrawlLRUEvictsColdest(t *testing.T) {
+	s := newTestStore(t)
+
+	const maxCache = 4
+	const total = 10
+	kps := make([]*core.KeyPair, total)
+	profiles := make(map[core.Identity][]core.SignedEvent, total)
+	for i := 0; i < total; i++ {
+		kps[i], _ = core.NewKeyPair()
+	}
+	for i := 0; i < total-1; i++ {
+		profiles[kps[i].Identity()] = []core.SignedEvent{
+			makeFollowEvent(kps[i], 1, kps[i+1].Identity()),
+		}
+	}
+	// The last identity follows nobody.
+	profiles[kps[total-1].Identity()] = nil
+	fetcher := &fakeFetcher{profiles: profiles}
+
+	c := New(s, nil)
+	c.SetMaxDepth(total) // walk the whole chain
+	c.SetMaxCache(maxCache)
+	c.Seed(kps[0].Identity())
+
+	if _, err := c.Run(context.Background(), fetcher); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// The on-disk tracked crawl count stays at maxCache.
+	got, err := s.CrawlVisitedCount()
+	if err != nil {
+		t.Fatalf("CrawlVisitedCount: %v", err)
+	}
+	if got != maxCache {
+		t.Fatalf("tracked count: want %d, got %d", maxCache, got)
+	}
+
+	// The seed (touched first, coldest) was evicted.
+	seedVisited, err := s.IsCrawlVisited(kps[0].Identity())
+	if err != nil {
+		t.Fatalf("IsCrawlVisited seed: %v", err)
+	}
+	if seedVisited {
+		t.Fatal("seed still tracked; expected the coldest identity to be evicted")
+	}
+
+	// The last-touched identity (end of the chain) is still tracked.
+	lastVisited, err := s.IsCrawlVisited(kps[total-1].Identity())
+	if err != nil {
+		t.Fatalf("IsCrawlVisited last: %v", err)
+	}
+	if !lastVisited {
+		t.Fatal("last-touched identity was evicted; expected the hottest to stay")
 	}
 }

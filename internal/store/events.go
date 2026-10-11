@@ -99,7 +99,11 @@ func (s *Store) stampSignAppend(kp *core.KeyPair, log core.LogName, ev core.Even
 // it to the user's own log, and returns the signed event and its event ID.
 // This is the synchronous entry point for ProfileLog and DetailLog events,
 // which are not rate-limited: bulk-follow onboarding is a legitimate burst,
-// and ProfileLog volume is bounded by compaction (phase 7). Liking is
+// and ProfileLog volume is bounded by compaction (phase 7). A Follow that
+// would push the net follow count past MaxFollows is rejected: the author
+// side enforces the cap so a ProfileLog with more than MaxFollows net follows
+// is a protocol violation by a signed key. Re-following an already-followed
+// target does not change the net count, so it is allowed. Liking is
 // idempotent: if the author already liked the target post, no new event is
 // created and the existing like event's ID is returned.
 func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
@@ -108,7 +112,26 @@ func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event)
 			return nil, existing, nil
 		}
 	}
+	if ev.Kind == core.KindFollow && ev.Follow != nil {
+		fs, err := s.ownFollowSet()
+		if err != nil {
+			return nil, core.EventID{}, fmt.Errorf("follow set: %w", err)
+		}
+		if !fs.Contains(ev.Follow.TargetPubkey) && fs.Len() >= core.MaxFollows {
+			return nil, core.EventID{}, core.ErrFollowCapExceeded
+		}
+	}
 	return s.stampSignAppend(kp, log, ev)
+}
+
+// ownFollowSet returns the current follow set projected from the user's own
+// ProfileLog. Used by the author-side follow cap check in SignAndAppend.
+func (s *Store) ownFollowSet() (*core.FollowSet, error) {
+	events, err := s.OwnEvents(core.ProfileLog)
+	if err != nil {
+		return nil, err
+	}
+	return core.NewLog(events).FollowSet(), nil
 }
 
 // EnqueuePostEvent enqueues a PostLog event (Post, Like, Delete) for

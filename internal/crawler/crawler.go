@@ -15,11 +15,15 @@ import (
 // Crawler performs a breadth-first walk of the public follow-graph, syncing
 // only Profile logs (section 9.3). Profile logs contain no post history, so
 // crawling thousands of accounts never touches anyone's content stream.
+//
+// The set of visited identities is a persisted LRU in the store
+// (bucketCrawlLRU), not an in-memory map. Touching an identity on crawl moves
+// it to the hot end; when the on-disk cache exceeds maxCache the coldest
+// entries are evicted, so the cache stays bounded across runs and restarts.
 type Crawler struct {
 	store    *store.Store
 	logger   *slog.Logger
 	mu       sync.Mutex
-	visited  map[core.Identity]bool
 	queue    []core.Identity
 	maxDepth int
 	maxCache int
@@ -35,7 +39,6 @@ func New(s *store.Store, logger *slog.Logger) *Crawler {
 	return &Crawler{
 		store:    s,
 		logger:   logger,
-		visited:  make(map[core.Identity]bool),
 		maxDepth: 5,
 		maxCache: 10000,
 	}
@@ -64,15 +67,14 @@ func (c *Crawler) Seed(seeds ...core.Identity) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for _, s := range seeds {
-		if !c.visited[s] {
-			c.queue = append(c.queue, s)
-		}
+		c.queue = append(c.queue, s)
 	}
 }
 
 // Run performs a single crawl pass up to maxDepth, fetching Profile logs via
 // the given Fetcher. It is safe to call Run again to continue from where the
-// last crawl left off; visited identities are not re-crawled.
+// last crawl left off; identities tracked in the crawl LRU are not
+// re-crawled. The on-disk cache is kept at maxCache via LRU eviction.
 func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 	c.mu.Lock()
 	if c.running {
@@ -104,13 +106,21 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 			if ctx.Err() != nil {
 				return fetched, ctx.Err()
 			}
-			c.mu.Lock()
-			if c.visited[id] || len(c.visited) >= c.maxCache {
-				c.mu.Unlock()
+			visited, err := c.store.IsCrawlVisited(id)
+			if err != nil {
+				c.logger.Warn("crawl: visit check failed", "identity", id, "err", err)
 				continue
 			}
-			c.visited[id] = true
-			c.mu.Unlock()
+			if visited {
+				continue
+			}
+			if err := c.store.TouchCrawl(id, c.nowNanos()); err != nil {
+				c.logger.Warn("crawl: touch failed", "identity", id, "err", err)
+				continue
+			}
+			if err := c.store.EvictCrawl(c.maxCache); err != nil {
+				c.logger.Warn("crawl: evict failed", "err", err)
+			}
 
 			events, err := f.FetchProfileLog(ctx, id)
 			if err != nil {
@@ -141,13 +151,9 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 			// scanning the local cache, because a zen knows its own
 			// followers as first-class state derived from received events.
 			log := core.NewLog(events)
+			candidates := make(map[core.Identity]struct{})
 			log.FollowSet().Each(func(target [32]byte) {
-				nextID := core.IdentityFromPubkey(target[:])
-				c.mu.Lock()
-				if !c.visited[nextID] {
-					nextBatch = append(nextBatch, nextID)
-				}
-				c.mu.Unlock()
+				candidates[core.IdentityFromPubkey(target[:])] = struct{}{}
 			})
 			followEvents, err := f.FetchFollowers(ctx, id)
 			if err != nil {
@@ -157,12 +163,17 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 				if se.Verify() != nil {
 					continue
 				}
-				if !c.visited[se.Author] {
-					nextBatch = append(nextBatch, se.Author)
-				}
+				candidates[se.Author] = struct{}{}
+			}
+			for nextID := range candidates {
+				nextBatch = append(nextBatch, nextID)
 			}
 		}
 
+		// De-dup the next frontier against the LRU so already-visited
+		// identities are not re-enqueued, and cap the queue at maxCache
+		// to bound the working set.
+		nextBatch = c.filterFrontier(nextBatch)
 		c.mu.Lock()
 		c.queue = append(c.queue, nextBatch...)
 		c.mu.Unlock()
@@ -170,11 +181,37 @@ func (c *Crawler) Run(ctx context.Context, f Fetcher) (int, error) {
 	return fetched, nil
 }
 
-// VisitedCount returns the number of identities visited so far.
+// filterFrontier drops identities already tracked in the crawl LRU and caps
+// the queue at maxCache entries, so the breadth-first frontier does not grow
+// without bound ahead of the eviction that bounds the stored cache.
+func (c *Crawler) filterFrontier(batch []core.Identity) []core.Identity {
+	seen := make(map[core.Identity]struct{}, len(batch))
+	out := make([]core.Identity, 0, len(batch))
+	for _, id := range batch {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		visited, err := c.store.IsCrawlVisited(id)
+		if err != nil || visited {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// nowNanos returns the current time as unix nanoseconds for LRU touch keys.
+func (c *Crawler) nowNanos() int64 { return time.Now().UnixNano() }
+
+// VisitedCount returns the number of identities currently tracked in the
+// crawl LRU.
 func (c *Crawler) VisitedCount() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return len(c.visited)
+	n, err := c.store.CrawlVisitedCount()
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // LastRun returns the time of the last completed crawl.
@@ -184,10 +221,12 @@ func (c *Crawler) LastRun() time.Time {
 	return c.lastRun
 }
 
-// Reset clears the crawl state so it can start fresh.
+// Reset clears the crawl LRU so the crawler can start fresh.
 func (c *Crawler) Reset() {
+	if err := c.store.ResetCrawl(); err != nil {
+		c.logger.Warn("crawl: reset failed", "err", err)
+	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.visited = make(map[core.Identity]bool)
 	c.queue = nil
+	c.mu.Unlock()
 }
