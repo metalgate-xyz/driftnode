@@ -78,9 +78,9 @@ type Daemon struct {
 	// consistent snapshot even if assess publishes the next split mid-pass.
 	// Separate from d.mu so the lanes do not contend with control-socket
 	// handlers.
-	splitMu   sync.Mutex
-	headSet   []core.Identity
-	tailSet   []core.Identity
+	splitMu sync.Mutex
+	headSet []core.Identity
+	tailSet []core.Identity
 	// done is closed when Stop is called, allowing Start's Wait to return.
 	done chan struct{}
 

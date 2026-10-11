@@ -40,10 +40,10 @@ func main() {
 	// Single read transaction: derive follow set, own events, crawl index,
 	// and all four metrics without re-scanning.
 	var follows []core.Identity
-	var ownLikes []core.EventID  // target IDs of own Like events
-	var ownReplies []core.EventID // parent IDs of own reply Posts
+	var ownLikes []core.EventID                     // target IDs of own Like events
+	var ownReplies []core.EventID                   // parent IDs of own reply Posts
 	authors := make(map[core.EventID]core.Identity) // event ID -> author, over all held PostLogs
-	recip := make(map[string]int)                    // followed author -> 1 if they follow back
+	recip := make(map[string]int)                   // followed author -> 1 if they follow back
 	pinSet := make(map[string]bool)
 
 	ownID, ok, err := readMetaIdentity(db)

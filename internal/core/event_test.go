@@ -237,7 +237,7 @@ func TestSignRejectsOversized(t *testing.T) {
 		t.Fatalf("Sign at cap (Post): %v", err)
 	}
 	overCap := base
-	overCap.Post = &Post{Text: string(make([]byte, maxLen + 1))}
+	overCap.Post = &Post{Text: string(make([]byte, maxLen+1))}
 	if _, err := kp.Sign(overCap); err != ErrEventOversized {
 		t.Fatalf("Sign over cap (Post): want ErrEventOversized, got %v", err)
 	}

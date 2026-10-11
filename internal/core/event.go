@@ -50,13 +50,13 @@ const (
 // canonical size; variable events (Post, Profile, Detail) have an upper
 // bound that leaves room for the largest legitimate payload.
 const (
-	CapPost    = 5120
-	CapLike    = 72
-	CapDelete  = 72
-	CapProfile = 1024
-	CapFollow  = 75
+	CapPost     = 5120
+	CapLike     = 72
+	CapDelete   = 72
+	CapProfile  = 1024
+	CapFollow   = 75
 	CapUnfollow = 75
-	CapDetail  = 2048
+	CapDetail   = 2048
 )
 
 // MaxFutureSkew is the maximum amount a signed event timestamp may be ahead

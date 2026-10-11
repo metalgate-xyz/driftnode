@@ -46,9 +46,9 @@ var (
 	bucketRateSecond  = []byte("ratesecond")  // per-(author,kind) last event second, for same-second rate check
 	bucketEventIndex  = []byte("eventindex")  // EventID -> author Identity + kind byte; covers every stored event
 	bucketEventRef    = []byte("eventref")    // composite TargetEventID+SourceEventID -> source author + kind byte
-	bucketCrawlLRU   = []byte("crawllru")    // composite int64BE(touchedNs)+Identity -> presence; crawl cache LRU
-	bucketCrawlTS    = []byte("crawlts")    // Identity -> int64BE last-touched ns; reverse index for crawl LRU touch
-	bucketSeq         = []byte("seq")        // per-log monotonic sequence counter (uint64 BE), never decreases
+	bucketCrawlLRU    = []byte("crawllru")    // composite int64BE(touchedNs)+Identity -> presence; crawl cache LRU
+	bucketCrawlTS     = []byte("crawlts")     // Identity -> int64BE last-touched ns; reverse index for crawl LRU touch
+	bucketSeq         = []byte("seq")         // per-log monotonic sequence counter (uint64 BE), never decreases
 )
 
 // meta keys

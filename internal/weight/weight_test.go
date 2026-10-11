@@ -183,7 +183,7 @@ func TestWeightsOnlyFollowsGetWeights(t *testing.T) {
 	nonFollowed := mkID(t, 2)
 	in := Inputs{
 		Follows: []core.Identity{followed},
-		Likes:  map[core.Identity]int{followed: 3, nonFollowed: 100},
+		Likes:   map[core.Identity]int{followed: 3, nonFollowed: 100},
 	}
 	w := Weights(in)
 	if _, ok := w[nonFollowed]; ok {

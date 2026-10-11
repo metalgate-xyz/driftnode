@@ -2427,7 +2427,7 @@ func TestPruneDropsLikeTargetingPrunedPost(t *testing.T) {
 	}
 
 	// Advance the clock past the retention window so the post ages out.
-	s.SetNow(func() int64 { return now + 20 * 1e9 })
+	s.SetNow(func() int64 { return now + 20*1e9 })
 
 	// Prune: the post and the like are now stale.
 	pruned, err = s.PruneRemotePosts()
@@ -2485,7 +2485,7 @@ func bulkOwnFollows(t *testing.T, s *Store, kp *core.KeyPair, n int) {
 			se, err := kp.Sign(core.Event{
 				Kind:      core.KindFollow,
 				Log:       core.ProfileLog,
-				Timestamp:  int64(5e9 + i),
+				Timestamp: int64(5e9 + i),
 				Sequence:  uint64(i + 1),
 				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public)},
 			})

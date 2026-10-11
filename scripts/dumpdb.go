@@ -27,7 +27,7 @@ func main() {
 	ownID, ok, _ := readMetaIdentity(db)
 	fmt.Printf("== own identity: %q (present=%v) ==\n\n", string(ownID), ok)
 
-	fmt.Println("== own/post ==", )
+	fmt.Println("== own/post ==")
 	db.View(func(tx *bolt.Tx) error {
 		ownBucket := tx.Bucket([]byte("own"))
 		if ownBucket == nil {
