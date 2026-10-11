@@ -1116,12 +1116,20 @@ func (d *Daemon) handlePost(text, parentID string, kp *core.KeyPair) Response {
 	if !parent.IsZero() {
 		post.ParentID = parent
 	}
-	se, id, err := d.store.SignAndAppend(kp, core.PostLog, core.Event{
+	ch, err := d.store.EnqueuePostEvent(kp, core.PostLog, core.Event{
 		Kind: core.KindPost,
 		Post: post,
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrHeld) {
 		return Response{Error: err.Error()}
+	}
+	res := <-ch
+	if res.Err != nil {
+		return Response{Error: res.Err.Error()}
+	}
+	id := res.ID
+	if res.SE == nil {
+		return Response{Result: map[string]string{"event_id": id.String()}}
 	}
 	d.invalidateFeed()
 	d.touchSignAt()
@@ -1130,7 +1138,7 @@ func (d *Daemon) handlePost(text, parentID string, kp *core.KeyPair) Response {
 	name := d.displayName(ownID)
 	d.emitFeedAdd([]feedItem{{
 		ID:        id.String(),
-		Timestamp: se.Event.Timestamp,
+		Timestamp: res.SE.Event.Timestamp,
 		Author:    ownID.String(),
 		Name:      name,
 		Text:      text,
@@ -1150,16 +1158,23 @@ func (d *Daemon) handleLike(postID string, kp *core.KeyPair) Response {
 	if target.IsZero() {
 		return Response{Error: "post id required"}
 	}
-	_, id, err := d.store.SignAndAppend(kp, core.PostLog, core.Event{
+	ch, err := d.store.EnqueuePostEvent(kp, core.PostLog, core.Event{
 		Kind: core.KindLike,
 		Like: &core.Like{TargetID: target},
 	})
-	if err != nil {
+	if err != nil && !errors.Is(err, store.ErrHeld) {
 		return Response{Error: err.Error()}
 	}
-	d.invalidateFeed()
-	d.touchSignAt()
-	d.triggerCrawlNow()
+	res := <-ch
+	if res.Err != nil {
+		return Response{Error: res.Err.Error()}
+	}
+	id := res.ID
+	if res.SE != nil {
+		d.invalidateFeed()
+		d.touchSignAt()
+		d.triggerCrawlNow()
+	}
 	return Response{Result: map[string]string{"event_id": id.String()}}
 }
 

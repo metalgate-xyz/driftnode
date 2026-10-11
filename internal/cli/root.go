@@ -284,14 +284,18 @@ func postCmd() *cobra.Command {
 				}
 				post.ParentID = pid
 			}
-			_, id, err := s.SignAndAppend(kp, core.PostLog, core.Event{
+			ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
 				Kind: core.KindPost,
 				Post: post,
 			})
-			if err != nil {
+			if err != nil && !errors.Is(err, store.ErrHeld) {
 				return err
 			}
-			cmd.Println(id)
+			res := <-ch
+			if res.Err != nil {
+				return res.Err
+			}
+			cmd.Println(res.ID)
 			return nil
 		},
 	}
@@ -338,14 +342,18 @@ func likeCmd() *cobra.Command {
 			if target.IsZero() {
 				return fmt.Errorf("post id required")
 			}
-			_, id, err := s.SignAndAppend(kp, core.PostLog, core.Event{
+			ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
 				Kind: core.KindLike,
 				Like: &core.Like{TargetID: target},
 			})
-			if err != nil {
+			if err != nil && !errors.Is(err, store.ErrHeld) {
 				return err
 			}
-			cmd.Println(id)
+			res := <-ch
+			if res.Err != nil {
+				return res.Err
+			}
+			cmd.Println(res.ID)
 			return nil
 		},
 	}

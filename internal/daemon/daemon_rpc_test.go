@@ -899,10 +899,31 @@ func TestSubscribeSnapshotFeedIsCapped(t *testing.T) {
 	defer d.Stop()
 
 	cl, _ := testClient(t, sock)
+	ownID, _, _ := s.Identity()
+	name := d.displayName(ownID)
+	// Seed the feed directly instead of via the Post RPC: the rate limiter
+	// (1/sec per kind) would make 300 sequential posts take minutes.
 	for i := 0; i < feedPageLimit+50; i++ {
-		if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{Text: "post"}); err != nil {
-			t.Fatalf("post %d: %v", i, err)
+		se, err := kp.Sign(core.Event{
+			Kind:      core.KindPost,
+			Log:       core.PostLog,
+			Timestamp: core.Now64(),
+			Sequence:  uint64(i + 1),
+			Post:      &core.Post{Text: "post"},
+		})
+		if err != nil {
+			t.Fatalf("sign post %d: %v", i, err)
 		}
+		if err := s.AppendOwnEvent(core.PostLog, se); err != nil {
+			t.Fatalf("append post %d: %v", i, err)
+		}
+		d.emitFeedAdd([]feedItem{{
+			ID:        mustEventID(t, se).String(),
+			Timestamp: se.Event.Timestamp,
+			Author:    ownID.String(),
+			Name:      name,
+			Text:      "post",
+		}})
 	}
 
 	_, ev := subscribeStream(t, cl)
@@ -986,7 +1007,7 @@ func TestSubscribeNoLostEvents(t *testing.T) {
 	}
 	defer d.Stop()
 
-	const iterations = 50
+	const iterations = 10
 	for i := 0; i < iterations; i++ {
 		postCl, _ := testClient(t, sock)
 		text := "race-post-" + itoa10(i)

@@ -43,6 +43,7 @@ var (
 	bucketTransport   = []byte("transport")   // tailcat private key, so the node's address token stays stable across restarts
 	bucketCursor      = []byte("cursor")      // per-(author,log) high-water timestamp of last successful pull
 	bucketWeight      = []byte("weight")      // identity -> float64 sync-priority weight, recomputed each sync round
+	bucketRateSecond  = []byte("ratesecond")  // per-(author,kind) last event second, for same-second rate check
 )
 
 // meta keys
@@ -93,8 +94,9 @@ func decodeFollowState(v []byte) followState {
 
 // Store is the local persistent store. It wraps a bbolt DB.
 type Store struct {
-	db   *bolt.DB
-	path string
+	db    *bolt.DB
+	path  string
+	posts *postQueue
 }
 
 // Open opens or creates the store at path. The parent directory is created if
@@ -112,11 +114,17 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	s.posts = newPostQueue(s)
 	return s, nil
 }
 
 // Close closes the underlying database.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.posts != nil {
+		s.posts.Stop()
+	}
+	return s.db.Close()
+}
 
 // DB returns the underlying bbolt database, for batch writes that the
 // per-event store methods do not support.
@@ -127,7 +135,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -315,6 +323,26 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 		if se.Event.Kind == core.KindLike && se.Event.Like != nil {
 			if _, dup := existingLikeID(se.Author, se.Event.Like.TargetID, authorBucket); dup {
 				return nil
+			}
+		}
+		if se.Event.Log == core.PostLog {
+			rsb := tx.Bucket(bucketRateSecond)
+			key := rateSecondKey(se.Author, se.Event.Kind)
+			evSec := secondOf(se.Event.Timestamp)
+			if raw := rsb.Get(key); raw != nil {
+				lastSec := int64(binary.BigEndian.Uint64(raw))
+				if evSec == lastSec {
+					fsb := tx.Bucket(bucketFollowState)
+					st := decodeFollowState(fsb.Get([]byte(se.Author)))
+					st.flagged = true
+					_ = fsb.Put([]byte(se.Author), st.encode())
+					return nil
+				}
+			}
+			var buf [8]byte
+			binary.BigEndian.PutUint64(buf[:], uint64(evSec))
+			if err := rsb.Put(key, buf[:]); err != nil {
+				return fmt.Errorf("put rate second: %w", err)
 			}
 		}
 		inserted = true
@@ -1020,6 +1048,19 @@ func cursorKey(author core.Identity, log core.LogName) []byte {
 	k = append(k, []byte(log)...)
 	return k
 }
+
+// rateSecondKey is the bucketRateSecond key for (author, kind): the author
+// identity bytes followed by the single kind byte. The bucket stores the
+// unix-second of the last accepted event of that kind from that author.
+func rateSecondKey(author core.Identity, kind core.Kind) []byte {
+	k := make([]byte, 0, len(author)+1)
+	k = append(k, []byte(author)...)
+	k = append(k, byte(kind))
+	return k
+}
+
+// secondOf returns the unix-second floor of a nanosecond timestamp.
+func secondOf(ns int64) int64 { return ns / int64(time.Second) }
 
 // PutTransportKey stores the tailcat private key bytes, so the node's address
 // token stays stable across restarts (section 5.2). The bytes are the JSON

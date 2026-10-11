@@ -47,29 +47,33 @@ func ownLogBucket(tx *bolt.Tx, log core.LogName) *bolt.Bucket {
 	return tx.Bucket(bucketOwn).Bucket([]byte(log))
 }
 
-// SignAndAppend signs an event of the given kind in the given log, appends
-// it to the user's own log, and returns the signed event and its event ID.
-// This is the single entry point for creating own events: the CLI offline
-// path and the daemon handlers share it so the store operation (sequence,
-// sign, append, dedup) is defined once. Liking is idempotent: if the author
-// already liked the target post, no new event is created and the existing
-// like event's ID is returned.
-func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
-	if ev.Kind == core.KindLike && ev.Like != nil {
-		var existing core.EventID
-		var found bool
-		_ = s.db.View(func(tx *bolt.Tx) error {
-			b := ownLogBucket(tx, core.PostLog)
-			if b == nil {
-				return nil
-			}
-			existing, found = existingLikeID(kp.Identity(), ev.Like.TargetID, b)
+// ErrHeld is returned by EnqueuePostEvent when the event has been enqueued
+// for rate-limited signing. The caller blocks on the returned result channel
+// for the signed event and its ID.
+var ErrHeld = errors.New("event held for rate-limited signing")
+
+// existingLikeEventID returns the event ID of the author's existing Like
+// event targeting ev.Like.TargetID in the own PostLog, if any. One Like per
+// author per post: a re-like returns the existing event's ID instead of
+// creating a new one.
+func (s *Store) existingLikeEventID(kp *core.KeyPair, ev core.Event) (core.EventID, bool) {
+	var existing core.EventID
+	var found bool
+	_ = s.db.View(func(tx *bolt.Tx) error {
+		b := ownLogBucket(tx, core.PostLog)
+		if b == nil {
 			return nil
-		})
-		if found {
-			return nil, existing, nil
 		}
-	}
+		existing, found = existingLikeID(kp.Identity(), ev.Like.TargetID, b)
+		return nil
+	})
+	return existing, found
+}
+
+// stampSignAppend assigns the next sequence number, stamps with the current
+// wall clock, signs, and appends to the own log. Shared by the synchronous
+// (SignAndAppend) and rate-limited (postQueue.process) paths.
+func (s *Store) stampSignAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
 	seq, err := s.OwnEventCount(log)
 	if err != nil {
 		return nil, core.EventID{}, fmt.Errorf("get sequence: %w", err)
@@ -89,6 +93,77 @@ func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event)
 		return nil, core.EventID{}, fmt.Errorf("event id: %w", err)
 	}
 	return se, id, nil
+}
+
+// SignAndAppend signs an event of the given kind in the given log, appends
+// it to the user's own log, and returns the signed event and its event ID.
+// This is the synchronous entry point for ProfileLog and DetailLog events,
+// which are not rate-limited: bulk-follow onboarding is a legitimate burst,
+// and ProfileLog volume is bounded by compaction (phase 7). Liking is
+// idempotent: if the author already liked the target post, no new event is
+// created and the existing like event's ID is returned.
+func (s *Store) SignAndAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
+	if ev.Kind == core.KindLike && ev.Like != nil {
+		if existing, found := s.existingLikeEventID(kp, ev); found {
+			return nil, existing, nil
+		}
+	}
+	return s.stampSignAppend(kp, log, ev)
+}
+
+// EnqueuePostEvent enqueues a PostLog event (Post, Like, Delete) for
+// rate-limited signing at 1/sec per kind. The actual stamp, sign, and append
+// happen in the background goroutine, not in the caller. It returns a result
+// channel the caller blocks on for the signed event and its ID, with
+// ErrHeld indicating the event was enqueued. Liking is idempotent: if the
+// author already liked the target post, the existing like event's ID is
+// returned synchronously with no hold. If the queue is full,
+// ErrRateLimitQueueFull is returned.
+func (s *Store) EnqueuePostEvent(kp *core.KeyPair, log core.LogName, ev core.Event) (chan signResult, error) {
+	if ev.Kind == core.KindLike && ev.Like != nil {
+		if existing, found := s.existingLikeEventID(kp, ev); found {
+			ch := make(chan signResult, 1)
+			ch <- signResult{ID: existing}
+			return ch, nil
+		}
+	}
+	lastSec, err := s.lastStoredSecondOfKind(ev.Kind)
+	if err != nil {
+		return nil, fmt.Errorf("last stored second: %w", err)
+	}
+	ch, err := s.posts.tryEnqueue(kp, log, ev, lastSec)
+	if err != nil {
+		return nil, err
+	}
+	return ch, ErrHeld
+}
+
+// lastStoredSecondOfKind returns the second of the most recent event of the
+// given kind in the own PostLog, or 0 if none. Seeds the rate limiter's
+// per-kind second so a restart does not let two events land in the same
+// second as the last one before shutdown.
+func (s *Store) lastStoredSecondOfKind(kind core.Kind) (int64, error) {
+	var maxSec int64
+	err := s.db.View(func(tx *bolt.Tx) error {
+		b := ownLogBucket(tx, core.PostLog)
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(_, v []byte) error {
+			var se core.SignedEvent
+			if err := core.CanonicalDecode(v, &se); err != nil {
+				return nil
+			}
+			if se.Event.Kind == kind {
+				sec := secondOf(se.Event.Timestamp)
+				if sec > maxSec {
+					maxSec = sec
+				}
+			}
+			return nil
+		})
+	})
+	return maxSec, err
 }
 
 // Follow signs a Follow event for target and records the local follow edge.

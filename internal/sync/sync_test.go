@@ -80,8 +80,8 @@ func TestSyncFullRoundTrip(t *testing.T) {
 	ek, _ := enc.Encrypt(kp.Private, []byte("pass"))
 	serverStore.InitIdentity(kp, ek)
 
-	se1 := signPost(t, kp, 1, 100, "first")
-	se2 := signPost(t, kp, 2, 200, "second")
+	se1 := signPost(t, kp, 1, 1e9, "first")
+	se2 := signPost(t, kp, 2, 2e9, "second")
 	serverStore.AppendOwnEvent(core.PostLog, se1)
 	serverStore.AppendOwnEvent(core.PostLog, se2)
 
@@ -126,9 +126,9 @@ func TestSyncAfterTimestamp(t *testing.T) {
 	ek, _ := enc.Encrypt(kp.Private, []byte("pass"))
 	serverStore.InitIdentity(kp, ek)
 
-	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 1, 100, "first"))
-	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 2, 200, "second"))
-	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 3, 300, "third"))
+	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 1, 1e9, "first"))
+	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 2, 2e9, "second"))
+	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 3, 3e9, "third"))
 
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
@@ -142,12 +142,12 @@ func TestSyncAfterTimestamp(t *testing.T) {
 	defer clientW.Close()
 
 	cl := NewClient(clientStore, nil)
-	merged, err := cl.SyncLog(clientR, clientW, core.PostLog, 150, "")
+	merged, err := cl.SyncLog(clientR, clientW, core.PostLog, int64(1.5e9), "")
 	if err != nil {
 		t.Fatalf("SyncLog: %v", err)
 	}
 	if merged != 2 {
-		t.Fatalf("merged: want 2 (after 150), got %d", merged)
+		t.Fatalf("merged: want 2 (after 1.5s), got %d", merged)
 	}
 }
 
@@ -440,12 +440,12 @@ func TestSyncLikesForPosts(t *testing.T) {
 	likerB := makeKey(t)
 
 	postA, _ := authorA.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
 		Post: &core.Post{Text: "post a"},
 	})
 	postAID, _ := postA.ID()
 	postB, _ := authorB.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 200, Sequence: 1,
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
 		Post: &core.Post{Text: "post b"},
 	})
 	postBID, _ := postB.ID()
@@ -458,15 +458,15 @@ func TestSyncLikesForPosts(t *testing.T) {
 	}
 
 	likeA1, _ := likerA.Sign(core.Event{
-		Kind: core.KindLike, Log: core.PostLog, Timestamp: 300, Sequence: 1,
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 3e9, Sequence: 1,
 		Like: &core.Like{TargetID: postAID},
 	})
 	likeA2, _ := likerB.Sign(core.Event{
-		Kind: core.KindLike, Log: core.PostLog, Timestamp: 310, Sequence: 1,
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 4e9, Sequence: 1,
 		Like: &core.Like{TargetID: postAID},
 	})
 	likeB, _ := likerB.Sign(core.Event{
-		Kind: core.KindLike, Log: core.PostLog, Timestamp: 320, Sequence: 2,
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 5e9, Sequence: 2,
 		Like: &core.Like{TargetID: postBID},
 	})
 	for _, se := range []*core.SignedEvent{likeA1, likeA2, likeB} {

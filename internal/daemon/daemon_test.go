@@ -68,6 +68,16 @@ func initTestIdentity(t *testing.T, s *store.Store) *core.KeyPair {
 	return kp
 }
 
+// mustEventID returns the event ID of a signed event, failing the test on error.
+func mustEventID(t *testing.T, se *core.SignedEvent) core.EventID {
+	t.Helper()
+	id, err := se.ID()
+	if err != nil {
+		t.Fatalf("event id: %v", err)
+	}
+	return id
+}
+
 func TestDaemonWhoami(t *testing.T) {
 	s := newTestStore(t)
 	initTestIdentity(t, s)

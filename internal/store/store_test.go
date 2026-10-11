@@ -1161,7 +1161,7 @@ func TestRecomputeWeights(t *testing.T) {
 	// requires distinct target posts.
 	for i := 0; i < 3; i++ {
 		post, _ := bob.Sign(core.Event{
-			Kind: core.KindPost, Log: core.PostLog, Timestamp: int64(100 + i), Sequence: uint64(1 + i),
+			Kind: core.KindPost, Log: core.PostLog, Timestamp: int64(1+i) * 1e9, Sequence: uint64(1 + i),
 			Post: &core.Post{Text: "bob's post"},
 		})
 		pid, _ := post.ID()
@@ -1169,7 +1169,7 @@ func TestRecomputeWeights(t *testing.T) {
 			t.Fatalf("put bob post %d: %v", i, err)
 		}
 		like, _ := me.Sign(core.Event{
-			Kind: core.KindLike, Log: core.PostLog, Timestamp: int64(200 + i), Sequence: uint64(1 + i),
+			Kind: core.KindLike, Log: core.PostLog, Timestamp: int64(10+i) * 1e9, Sequence: uint64(1 + i),
 			Like: &core.Like{TargetID: pid},
 		})
 		if err := s.AppendOwnEvent(core.PostLog, like); err != nil {
@@ -1457,6 +1457,287 @@ func TestReceiverOversizedProfile(t *testing.T) {
 	}
 	if !flagged {
 		t.Fatal("oversized profile did not flag the author")
+	}
+}
+
+// TestAuthorRateLimitBumpsToNextSecond verifies that two SignAndAppendPost
+// calls for the same kind in the same second produce events in different
+// seconds. The author-side rate limiter holds the second event until the
+// next second.
+func TestAuthorRateLimitBumpsToNextSecond(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	ch1, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindPost,
+		Post: &core.Post{Text: "first"},
+	})
+	if err != nil && !errors.Is(err, ErrHeld) {
+		t.Fatalf("first post: %v", err)
+	}
+	res1 := <-ch1
+	if res1.Err != nil {
+		t.Fatalf("first result: %v", res1.Err)
+	}
+
+	ch2, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindPost,
+		Post: &core.Post{Text: "second"},
+	})
+	if err != nil && !errors.Is(err, ErrHeld) {
+		t.Fatalf("second post: %v", err)
+	}
+	res2 := <-ch2
+	if res2.Err != nil {
+		t.Fatalf("second result: %v", res2.Err)
+	}
+
+	sec1 := res1.SE.Event.Timestamp / int64(1e9)
+	sec2 := res2.SE.Event.Timestamp / int64(1e9)
+	if sec1 == sec2 {
+		t.Fatalf("two posts in the same second: sec1=%d sec2=%d", sec1, sec2)
+	}
+}
+
+// TestAuthorRateLimitQueueFull verifies that overflowing the bounded queue
+// rejects the incoming event with ErrRateLimitQueueFull, not the queued
+// ones.
+func TestAuthorRateLimitQueueFull(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// The first call takes the current second; the rest fill the queue.
+	// The queue cap is rateQueueCap (10). After filling, the next call
+	// is rejected.
+	channels := make([]chan signResult, 0, rateQueueCap+1)
+	ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindPost,
+		Post: &core.Post{Text: "first"},
+	})
+	if err != nil && !errors.Is(err, ErrHeld) {
+		t.Fatalf("first post: %v", err)
+	}
+	channels = append(channels, ch)
+	for i := 0; i < rateQueueCap; i++ {
+		ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+			Kind: core.KindPost,
+			Post: &core.Post{Text: "queued"},
+		})
+		if err != nil && !errors.Is(err, ErrHeld) {
+			t.Fatalf("queued post %d: %v", i, err)
+		}
+		channels = append(channels, ch)
+	}
+
+	// The next call must be rejected: the queue is full.
+	_, err = s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindPost,
+		Post: &core.Post{Text: "overflow"},
+	})
+	if !errors.Is(err, ErrRateLimitQueueFull) {
+		t.Fatalf("overflow post: want ErrRateLimitQueueFull, got %v", err)
+	}
+
+	// Drain all results; they must all succeed.
+	for i, ch := range channels {
+		res := <-ch
+		if res.Err != nil {
+			t.Fatalf("result %d: %v", i, res.Err)
+		}
+	}
+}
+
+// TestReceiverRejectsSameSecondSameKind verifies that two signed events of
+// the same kind from the same author in the same second: the second is
+// rejected and the author is flagged.
+func TestReceiverRejectsSameSecondSameKind(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	se1, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 5e9, Sequence: 1,
+		Post: &core.Post{Text: "first"},
+	})
+	se2, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 5e9 + 100, Sequence: 2,
+		Post: &core.Post{Text: "second"},
+	})
+
+	if _, err := s.PutRemoteEvent(se1, 1); err != nil {
+		t.Fatalf("put first: %v", err)
+	}
+	inserted, err := s.PutRemoteEvent(se2, 1)
+	if err != nil {
+		t.Fatalf("put second: %v", err)
+	}
+	if inserted {
+		t.Fatal("second same-second event was stored")
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if !flagged {
+		t.Fatal("author not flagged for same-second violation")
+	}
+}
+
+// TestReceiverSameSecondDifferentKind verifies that a Post and a Like from
+// the same author in the same second are both stored: the rate check is
+// per kind, so the bound is 1/sec per kind, not 1/sec total.
+func TestReceiverSameSecondDifferentKind(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 5e9, Sequence: 1,
+		Post: &core.Post{Text: "post"},
+	})
+	postID, _ := post.ID()
+	like, _ := author.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 5e9 + 100, Sequence: 2,
+		Like: &core.Like{TargetID: postID},
+	})
+
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	inserted, err := s.PutRemoteEvent(like, 1)
+	if err != nil {
+		t.Fatalf("put like: %v", err)
+	}
+	if !inserted {
+		t.Fatal("same-second like (different kind) was dropped")
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author flagged for same-second different-kind events")
+	}
+}
+
+// TestReceiverDuplicateNoFalseFlag verifies that a replayed duplicate event
+// does not false-flag the author: dedup runs before the rate check.
+func TestReceiverDuplicateNoFalseFlag(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	se, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 5e9, Sequence: 1,
+		Post: &core.Post{Text: "post"},
+	})
+
+	if _, err := s.PutRemoteEvent(se, 1); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	inserted, err := s.PutRemoteEvent(se, 1)
+	if err != nil {
+		t.Fatalf("replay put: %v", err)
+	}
+	if inserted {
+		t.Fatal("replayed duplicate was inserted")
+	}
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author false-flagged by a replayed duplicate")
+	}
+}
+
+// TestReceiverProfileLogExemptFromRate verifies that a burst of Follow
+// events from the same author in the same second does not flag: ProfileLog
+// is exempt from the rate limit because bulk-follow onboarding is legitimate.
+func TestReceiverProfileLogExemptFromRate(t *testing.T) {
+	s := newTestStore(t)
+	follower, _ := core.NewKeyPair()
+	target, _ := core.NewKeyPair()
+
+	for i := 0; i < 5; i++ {
+		se, _ := follower.Sign(core.Event{
+			Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 5e9 + int64(i), Sequence: uint64(i + 1),
+			Follow: &core.Follow{TargetPubkey: [32]byte(target.Public)},
+		})
+		if _, err := s.PutRemoteEvent(se, 1); err != nil {
+			t.Fatalf("put follow %d: %v", i, err)
+		}
+	}
+	flagged, err := s.IsFlagged(follower.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author flagged for same-second ProfileLog burst")
+	}
+}
+
+// TestAuthorLikeIdempotentNoHold verifies that a same-target like in the same
+// second returns the existing like's event ID without holding.
+func TestAuthorLikeIdempotentNoHold(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	// Seed a post to like.
+	postCh, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindPost,
+		Post: &core.Post{Text: "like me"},
+	})
+	if err != nil && !errors.Is(err, ErrHeld) {
+		t.Fatalf("post: %v", err)
+	}
+	postRes := <-postCh
+	if postRes.Err != nil {
+		t.Fatalf("post result: %v", postRes.Err)
+	}
+
+	// First like.
+	likeCh1, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindLike,
+		Like: &core.Like{TargetID: postRes.ID},
+	})
+	if err != nil && !errors.Is(err, ErrHeld) {
+		t.Fatalf("first like: %v", err)
+	}
+	likeRes1 := <-likeCh1
+	if likeRes1.Err != nil {
+		t.Fatalf("first like result: %v", likeRes1.Err)
+	}
+
+	// Second like of the same post: idempotent, returns existing ID, no hold.
+	likeCh2, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
+		Kind: core.KindLike,
+		Like: &core.Like{TargetID: postRes.ID},
+	})
+	if err != nil {
+		t.Fatalf("second like: %v", err)
+	}
+	likeRes2 := <-likeCh2
+	if likeRes2.Err != nil {
+		t.Fatalf("second like result: %v", likeRes2.Err)
+	}
+	if likeRes2.ID != likeRes1.ID {
+		t.Fatalf("idempotent like: want %s, got %s", likeRes1.ID, likeRes2.ID)
+	}
+	if likeRes2.SE != nil {
+		t.Fatal("idempotent like returned a new signed event")
 	}
 }
 
