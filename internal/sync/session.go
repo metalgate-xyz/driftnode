@@ -584,6 +584,16 @@ func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int6
 			after = c
 		}
 	}
+	// Raise the cursor to the retention cutoff for PostLog so the peer
+	// does not send stale events the receiver would drop at ingest.
+	// ProfileLog is exempt: its history is bounded by compaction, not
+	// retention, and dropping old ProfileLog events by timestamp would
+	// corrupt the follow set.
+	if log == core.PostLog {
+		if c := s.store.RetentionCutoff(); c > after {
+			after = c
+		}
+	}
 	if err := WriteMsg(w, NewRequest(log, after, author)); err != nil {
 		return 0, fmt.Errorf("write request: %w", err)
 	}

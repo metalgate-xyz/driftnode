@@ -790,6 +790,13 @@ func (d *Daemon) Stop() {
 	if socket != "" {
 		os.Remove(socket)
 	}
+	// Prune stale remote PostLog events so the on-disk store does not
+	// grow without bound across restarts. Own logs are retained in full.
+	if n, err := d.store.PruneRemotePosts(); err != nil {
+		d.logger.Warn("prune remote posts", "err", err)
+	} else if n > 0 {
+		d.logger.Info("pruned stale remote posts", "count", n)
+	}
 	// Signal Start's Wait (or the foreground blocker) to return. Guard so
 	// a double Stop is a no-op for the channel close.
 	select {

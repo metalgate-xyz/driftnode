@@ -100,6 +100,7 @@ func Root() *cobra.Command {
 		rotateKeyCmd(),
 		bootstrapCmd(),
 		relayCmd(),
+		pruneCmd(),
 	)
 	return root
 }
@@ -1931,5 +1932,47 @@ func detailCmd() *cobra.Command {
 	c.Flags().StringVar(&firstName, "first-name", "", "first name (shown only on direct request)")
 	c.Flags().StringVar(&lastName, "last-name", "", "last name (shown only on direct request)")
 	c.Flags().StringVar(&location, "location", "", "location (shown only on direct request)")
+	return c
+}
+
+// pruneCmd removes stale remote PostLog events older than the retention
+// window from the local store. Own PostLog events are retained in full.
+// When the daemon is running it prunes via RPC (so the TUI and a running
+// daemon share one path); otherwise it opens the store directly.
+func pruneCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "prune",
+		Short: "Remove remote PostLog events older than the retention window",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if cl, cc, derr := dialDaemon(); derr == nil {
+				defer cc.Close()
+				resp, err := cl.Prune(context.Background(), &driftnodepb.Empty{})
+				if err == nil {
+					cmd.Printf("pruned %d remote post events\n", resp.Pruned)
+					return nil
+				}
+				if !errors.Is(err, daemon.ErrNotRunning) {
+					return err
+				}
+			}
+			s, err := openStoreAt(dbPath)
+			if err != nil {
+				return err
+			}
+			defer s.Close()
+			if s.Retention() <= 0 {
+				cmd.Println("retention is disabled; nothing to prune")
+				return nil
+			}
+			n, err := s.PruneRemotePosts()
+			if err != nil {
+				return fmt.Errorf("prune: %w", err)
+			}
+			cmd.Printf("pruned %d remote post events\n", n)
+			return nil
+		},
+	}
+	addDBFlag(c)
 	return c
 }

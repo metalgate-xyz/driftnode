@@ -97,6 +97,15 @@ type Store struct {
 	db    *bolt.DB
 	path  string
 	posts *postQueue
+
+	// retention is the PostLog retention window. A non-zero value drops
+	// remote PostLog events older than now-retention at ingest and prunes
+	// aged events from the remote bucket. Zero retains everything (the
+	// default).
+	retention time.Duration
+	// now is the wall-clock source as unix nanoseconds. Tests override it
+	// to control retention and future-skew checks. nil means core.Now64.
+	now func() int64
 }
 
 // Open opens or creates the store at path. The parent directory is created if
@@ -109,13 +118,48 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open bbolt: %w", err)
 	}
-	s := &Store{db: db, path: path}
+	s := &Store{db: db, path: path, retention: retentionFromEnv()}
 	if err := s.initBuckets(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	s.posts = newPostQueue(s)
 	return s, nil
+}
+
+// retentionFromEnv reads the PostLog retention window from the
+// DRIFTNODE_RETENTION env var as a Go duration (e.g. "720h" for 30 days).
+// An empty or unparsable value disables retention (retain everything).
+func retentionFromEnv() time.Duration {
+	v := os.Getenv("DRIFTNODE_RETENTION")
+	if v == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+// SetRetention sets the PostLog retention window, overriding the env var.
+// A non-zero value drops and prunes remote PostLog events older than the
+// window; zero retains everything.
+func (s *Store) SetRetention(d time.Duration) { s.retention = d }
+
+// Retention returns the configured PostLog retention window.
+func (s *Store) Retention() time.Duration { return s.retention }
+
+// SetNow sets the wall-clock source for tests. The function must return
+// unix nanoseconds.
+func (s *Store) SetNow(fn func() int64) { s.now = fn }
+
+// now64 returns the current wall clock as unix nanoseconds.
+func (s *Store) now64() int64 {
+	if s.now != nil {
+		return s.now()
+	}
+	return core.Now64()
 }
 
 // Close closes the underlying database.
@@ -293,7 +337,8 @@ func (s *Store) AllOwnEvents() ([]core.SignedEvent, error) {
 // event means the author's key signed something their own client would
 // have blocked. The caller must have already called Verify; this check
 // runs on the verified event so the flag is never raised on a transit
-// tamper.
+// tamper. A PostLog event older than the retention window is dropped
+// silently: a stale event is not misconduct, so the author is not flagged.
 func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 	canon, err := core.CanonicalEncode(se.Event)
 	if err != nil {
@@ -301,6 +346,9 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 	}
 	if len(canon) > core.CapForKind(se.Event.Kind) {
 		return false, s.flagAuthor(se.Author)
+	}
+	if se.Event.Log == core.PostLog && s.retention > 0 && se.Event.Timestamp < s.now64()-s.retention.Nanoseconds() {
+		return false, nil
 	}
 	id, err := se.ID()
 	if err != nil {
@@ -1598,4 +1646,59 @@ func (s *Store) PutPinnedIdentities(ids []core.Identity) error {
 		}
 		return nil
 	})
+}
+
+// PruneRemotePosts removes remote PostLog events older than the retention
+// window from the remote bucket. It scans each per-author sub-bucket and
+// deletes any PostLog event whose timestamp is older than now-retention.
+// Own PostLog events are never pruned: own logs are backup-critical and
+// retained in full. Returns the number of events removed. A zero retention
+// window is a no-op (retain everything).
+func (s *Store) PruneRemotePosts() (int, error) {
+	if s.retention <= 0 {
+		return 0, nil
+	}
+	cutoff := s.now64() - s.retention.Nanoseconds()
+	pruned := 0
+	err := s.db.Update(func(tx *bolt.Tx) error {
+		remote := tx.Bucket(bucketRemote)
+		return remote.ForEach(func(authorKey, _ []byte) error {
+			authorBucket := remote.Bucket(authorKey)
+			if authorBucket == nil {
+				return nil
+			}
+			var stale [][]byte
+			if err := authorBucket.ForEach(func(k, v []byte) error {
+				var se core.SignedEvent
+				if err := core.CanonicalDecode(v, &se); err != nil {
+					return nil
+				}
+				if se.Event.Log == core.PostLog && se.Event.Timestamp < cutoff {
+					stale = append(stale, append([]byte(nil), k...))
+				}
+				return nil
+			}); err != nil {
+				return err
+			}
+			for _, k := range stale {
+				if err := authorBucket.Delete(k); err != nil {
+					return err
+				}
+				pruned++
+			}
+			return nil
+		})
+	})
+	return pruned, err
+}
+
+// RetentionCutoff returns the nanosecond timestamp below which a PostLog
+// event is stale and dropped at ingest, or 0 when retention is disabled.
+// The sync layer uses this to raise its pull cursor so peers do not send
+// events the receiver would drop.
+func (s *Store) RetentionCutoff() int64 {
+	if s.retention <= 0 {
+		return 0
+	}
+	return s.now64() - s.retention.Nanoseconds()
 }

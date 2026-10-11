@@ -6,6 +6,7 @@ import (
 	"math"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"driftnode/internal/core"
 	"driftnode/internal/weight"
@@ -1140,8 +1141,8 @@ func TestRecomputeWeights(t *testing.T) {
 	me, _ := core.NewKeyPair()
 	alice, _ := core.NewKeyPair() // pinned, no interaction
 	bob, _ := core.NewKeyPair()   // liked 3x
-	carol, _ := core.NewKeyPair()  // reciprocal follow, no interaction
-	dave, _ := core.NewKeyPair()   // cold-start: followed, no signal
+	carol, _ := core.NewKeyPair() // reciprocal follow, no interaction
+	dave, _ := core.NewKeyPair()  // cold-start: followed, no signal
 
 	enc := core.DefaultKeyEncryption()
 	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
@@ -1741,3 +1742,213 @@ func TestAuthorLikeIdempotentNoHold(t *testing.T) {
 	}
 }
 
+// TestRetentionRejectsOldPostLogEvent verifies that a PostLog event older
+// than the retention window is rejected at ingest, while one within the
+// window is stored.
+func TestRetentionRejectsOldPostLogEvent(t *testing.T) {
+	s := newTestStore(t)
+	s.SetRetention(10 * time.Second)
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+	author, _ := core.NewKeyPair()
+
+	// An event at the cutoff (now - retention) is kept.
+	atCutoff, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 10*1e9, Sequence: 1,
+		Post: &core.Post{Text: "kept"},
+	})
+	inserted, err := s.PutRemoteEvent(atCutoff, 1)
+	if err != nil {
+		t.Fatalf("put at-cutoff: %v", err)
+	}
+	if !inserted {
+		t.Fatal("at-cutoff event was dropped")
+	}
+
+	// An event one nanosecond older is dropped.
+	stale, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 10*1e9 - 1, Sequence: 2,
+		Post: &core.Post{Text: "stale"},
+	})
+	inserted, err = s.PutRemoteEvent(stale, 2)
+	if err != nil {
+		t.Fatalf("put stale: %v", err)
+	}
+	if inserted {
+		t.Fatal("stale event was stored")
+	}
+
+	// The author is not flagged: a stale event is not misconduct.
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author flagged for a stale event")
+	}
+}
+
+// TestRetentionProfileLogExempt verifies that ProfileLog events are never
+// rejected by retention: ProfileLog is bounded by compaction, not retention.
+func TestRetentionProfileLogExempt(t *testing.T) {
+	s := newTestStore(t)
+	s.SetRetention(1 * time.Second)
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+	author, _ := core.NewKeyPair()
+
+	// A Profile event far older than the window is still stored.
+	old, _ := author.Sign(core.Event{
+		Kind: core.KindProfile, Log: core.ProfileLog, Timestamp: now - 1000*1e9, Sequence: 1,
+		Profile: &core.Profile{DisplayName: "old"},
+	})
+	inserted, err := s.PutRemoteEvent(old, 1)
+	if err != nil {
+		t.Fatalf("put old profile: %v", err)
+	}
+	if !inserted {
+		t.Fatal("old Profile event was dropped by retention")
+	}
+}
+
+// TestRetentionDisabledStoresEverything verifies that with no retention
+// window configured, an arbitrarily old PostLog event is stored.
+func TestRetentionDisabledStoresEverything(t *testing.T) {
+	s := newTestStore(t)
+	// retention left at the default (disabled).
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+	author, _ := core.NewKeyPair()
+
+	ancient, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 1000*365*24*int64(1e9), Sequence: 1,
+		Post: &core.Post{Text: "ancient"},
+	})
+	inserted, err := s.PutRemoteEvent(ancient, 1)
+	if err != nil {
+		t.Fatalf("put ancient: %v", err)
+	}
+	if !inserted {
+		t.Fatal("ancient event dropped with retention disabled")
+	}
+}
+
+// TestPruneRemotePostsRemovesStale verifies that stored remote PostLog events
+// older than the window are pruned, while own PostLog events and remote
+// ProfileLog events are retained.
+func TestPruneRemotePostsRemovesStale(t *testing.T) {
+	s := newTestStore(t)
+	s.SetRetention(10 * time.Second)
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+	author, _ := core.NewKeyPair()
+
+	// Seed a stale remote post and a fresh remote post.
+	stale, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 20*1e9, Sequence: 1,
+		Post: &core.Post{Text: "stale"},
+	})
+	// Temporarily disable retention so the stale event is accepted at
+	// ingest, then re-enable for the prune.
+	s.SetRetention(0)
+	if _, err := s.PutRemoteEvent(stale, 1); err != nil {
+		t.Fatalf("seed stale: %v", err)
+	}
+	s.SetRetention(10 * time.Second)
+
+	fresh, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 1*1e9, Sequence: 2,
+		Post: &core.Post{Text: "fresh"},
+	})
+	if _, err := s.PutRemoteEvent(fresh, 2); err != nil {
+		t.Fatalf("seed fresh: %v", err)
+	}
+
+	// Seed a remote Profile event older than the window; it must survive
+	// the prune (ProfileLog is exempt).
+	prof, _ := author.Sign(core.Event{
+		Kind: core.KindProfile, Log: core.ProfileLog, Timestamp: now - 20*1e9, Sequence: 3,
+		Profile: &core.Profile{DisplayName: "old-profile"},
+	})
+	s.SetRetention(0)
+	if _, err := s.PutRemoteEvent(prof, 3); err != nil {
+		t.Fatalf("seed profile: %v", err)
+	}
+	s.SetRetention(10 * time.Second)
+
+	// Seed an own PostLog event older than the window; it must survive.
+	kp, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pw"))
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	ownOld, _ := kp.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 20*1e9, Sequence: 1,
+		Post: &core.Post{Text: "own-old"},
+	})
+	if err := s.AppendOwnEvent(core.PostLog, ownOld); err != nil {
+		t.Fatalf("seed own: %v", err)
+	}
+
+	n, err := s.PruneRemotePosts()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned count: want 1, got %d", n)
+	}
+
+	// The stale remote post is gone; the fresh remote post and the remote
+	// profile remain.
+	events, err := s.CrawledEvents(author.Identity())
+	if err != nil {
+		t.Fatalf("crawled events: %v", err)
+	}
+	var gotFresh, gotProfile bool
+	for _, se := range events {
+		if se.Event.Log == core.PostLog && se.Event.Kind == core.KindPost && se.Event.Post != nil && se.Event.Post.Text == "fresh" {
+			gotFresh = true
+		}
+		if se.Event.Log == core.ProfileLog && se.Event.Kind == core.KindProfile {
+			gotProfile = true
+		}
+	}
+	if !gotFresh {
+		t.Fatal("fresh remote post was pruned")
+	}
+	if !gotProfile {
+		t.Fatal("remote profile was pruned (ProfileLog is exempt)")
+	}
+	if gotProfile && len(events) != 2 {
+		t.Fatalf("remote bucket should have fresh post + profile, got %d events", len(events))
+	}
+
+	// The own old post survives.
+	own, err := s.OwnEvents(core.PostLog)
+	if err != nil {
+		t.Fatalf("own events: %v", err)
+	}
+	if len(own) != 1 || own[0].Event.Post.Text != "own-old" {
+		t.Fatalf("own old post was pruned; own logs are retained in full")
+	}
+}
+
+// TestRetentionCutoffForPullCursor verifies that RetentionCutoff returns the
+// ingest cutoff used to raise the pull cursor, and 0 when disabled.
+func TestRetentionCutoffForPullCursor(t *testing.T) {
+	s := newTestStore(t)
+	s.SetRetention(10 * time.Second)
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+
+	want := now - 10*1e9
+	if got := s.RetentionCutoff(); got != want {
+		t.Fatalf("RetentionCutoff: want %d, got %d", want, got)
+	}
+
+	s.SetRetention(0)
+	if got := s.RetentionCutoff(); got != 0 {
+		t.Fatalf("RetentionCutoff disabled: want 0, got %d", got)
+	}
+}

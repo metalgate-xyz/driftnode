@@ -42,6 +42,7 @@ const (
 	Driftnode_RotateKey_FullMethodName  = "/driftnode.v1.Driftnode/RotateKey"
 	Driftnode_Subscribe_FullMethodName  = "/driftnode.v1.Driftnode/Subscribe"
 	Driftnode_FeedPage_FullMethodName   = "/driftnode.v1.Driftnode/FeedPage"
+	Driftnode_Prune_FullMethodName      = "/driftnode.v1.Driftnode/Prune"
 )
 
 // DriftnodeClient is the client API for Driftnode service.
@@ -75,6 +76,7 @@ type DriftnodeClient interface {
 	RotateKey(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*RotateKeyResp, error)
 	Subscribe(ctx context.Context, in *SubscribeReq, opts ...grpc.CallOption) (grpc.ServerStreamingClient[Event], error)
 	FeedPage(ctx context.Context, in *FeedPageReq, opts ...grpc.CallOption) (*FeedPageResp, error)
+	Prune(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PruneResp, error)
 }
 
 type driftnodeClient struct {
@@ -324,6 +326,16 @@ func (c *driftnodeClient) FeedPage(ctx context.Context, in *FeedPageReq, opts ..
 	return out, nil
 }
 
+func (c *driftnodeClient) Prune(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PruneResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PruneResp)
+	err := c.cc.Invoke(ctx, Driftnode_Prune_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // DriftnodeServer is the server API for Driftnode service.
 // All implementations must embed UnimplementedDriftnodeServer
 // for forward compatibility.
@@ -355,6 +367,7 @@ type DriftnodeServer interface {
 	RotateKey(context.Context, *Empty) (*RotateKeyResp, error)
 	Subscribe(*SubscribeReq, grpc.ServerStreamingServer[Event]) error
 	FeedPage(context.Context, *FeedPageReq) (*FeedPageResp, error)
+	Prune(context.Context, *Empty) (*PruneResp, error)
 	mustEmbedUnimplementedDriftnodeServer()
 }
 
@@ -433,6 +446,9 @@ func (UnimplementedDriftnodeServer) Subscribe(*SubscribeReq, grpc.ServerStreamin
 }
 func (UnimplementedDriftnodeServer) FeedPage(context.Context, *FeedPageReq) (*FeedPageResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method FeedPage not implemented")
+}
+func (UnimplementedDriftnodeServer) Prune(context.Context, *Empty) (*PruneResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method Prune not implemented")
 }
 func (UnimplementedDriftnodeServer) mustEmbedUnimplementedDriftnodeServer() {}
 func (UnimplementedDriftnodeServer) testEmbeddedByValue()                   {}
@@ -862,6 +878,24 @@ func _Driftnode_FeedPage_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Driftnode_Prune_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(DriftnodeServer).Prune(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Driftnode_Prune_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(DriftnodeServer).Prune(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Driftnode_ServiceDesc is the grpc.ServiceDesc for Driftnode service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -956,6 +990,10 @@ var Driftnode_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "FeedPage",
 			Handler:    _Driftnode_FeedPage_Handler,
+		},
+		{
+			MethodName: "Prune",
+			Handler:    _Driftnode_Prune_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

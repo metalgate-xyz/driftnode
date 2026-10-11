@@ -358,6 +358,15 @@ func (s *grpcServer) Sync(ctx context.Context, _ *driftnodepb.Empty) (*driftnode
 	return &driftnodepb.EmptyResp{Status: "triggered"}, nil
 }
 
+func (s *grpcServer) Prune(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.PruneResp, error) {
+	n, err := s.d.store.PruneRemotePosts()
+	if err != nil {
+		return nil, statusErr(err.Error())
+	}
+	s.d.logger.Info("prune requested", "pruned", n)
+	return &driftnodepb.PruneResp{Pruned: int32(n)}, nil
+}
+
 func (s *grpcServer) Stop(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.EmptyResp, error) {
 	// Shut down asynchronously so this handler returns and the ack is
 	// written before Stop's GracefulStop waits for in-flight RPCs. Running

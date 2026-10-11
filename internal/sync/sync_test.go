@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"io"
 	"testing"
+	"time"
 
 	"driftnode/internal/core"
 	"driftnode/internal/store"
@@ -500,5 +501,139 @@ func TestSyncLikesForPosts(t *testing.T) {
 		if se.Event.Like.TargetID != postAID {
 			t.Fatalf("like targets wrong post: want %v, got %v", postAID, se.Event.Like.TargetID)
 		}
+	}
+}
+
+// TestSessionRetentionRaisesPullCursor verifies that the pull phase raises
+// its cursor to the retention cutoff so the peer does not send stale
+// PostLog events. The server holds a stale post (older than the window) and
+// a fresh post; the client should receive only the fresh one.
+func TestSessionRetentionRaisesPullCursor(t *testing.T) {
+	serverStore := newTestStore(t)
+	clientStore := newTestStore(t)
+
+	kp := makeKey(t)
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pass"))
+	serverStore.InitIdentity(kp, ek)
+
+	// Fixed "now" so the cutoff is deterministic.
+	const now = 100 * int64(1e9)
+	cutoff := now - 10*1e9
+
+	// A stale post (older than the cutoff) and a fresh post (within).
+	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 1, cutoff-1, "stale"))
+	serverStore.AppendOwnEvent(core.PostLog, signPost(t, kp, 2, cutoff+5*1e9, "fresh"))
+
+	// The client store has a low last-cursor (zero) so without the
+	// retention raise it would request everything. Retention is configured
+	// so the cutoff dominates the cursor.
+	clientStore.SetRetention(10 * time.Second)
+	clientStore.SetNow(func() int64 { return now })
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		defer serverW.Close()
+		defer serverR.Close()
+		sess := NewSession(serverStore, nil)
+		sess.SetKey(kp)
+		if _, err := sess.RunListener(serverR, serverW); err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	sess := NewSession(clientStore, nil)
+	sess.SetKey(kp)
+	sess.SetCursorSource(clientStore.SyncCursor)
+	sess.SetCursorSink(clientStore.PutSyncCursor)
+	if _, err := sess.RunInitiator(clientR, clientW); err != nil {
+		t.Fatalf("RunInitiator: %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	events, err := clientStore.CrawledEvents(kp.Identity())
+	if err != nil {
+		t.Fatalf("CrawledEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("client events: want 1 (fresh only), got %d", len(events))
+	}
+	if events[0].Event.Post == nil || events[0].Event.Post.Text != "fresh" {
+		t.Fatalf("client received the wrong event: %+v", events[0].Event)
+	}
+}
+
+// TestSessionRetentionExemptForProfileLog verifies that the retention cutoff
+// is not applied to ProfileLog pulls, so old Profile events are still
+// delivered (ProfileLog is bounded by compaction, not retention).
+func TestSessionRetentionExemptForProfileLog(t *testing.T) {
+	serverStore := newTestStore(t)
+	clientStore := newTestStore(t)
+
+	kp := makeKey(t)
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(kp.Private, []byte("pass"))
+	serverStore.InitIdentity(kp, ek)
+
+	const now = 100 * int64(1e9)
+	cutoff := now - 10*1e9
+
+	// A Profile event older than the cutoff.
+	oldProfile, err := kp.Sign(core.Event{
+		Kind: core.KindProfile, Log: core.ProfileLog, Timestamp: cutoff - 1, Sequence: 1,
+		Profile: &core.Profile{DisplayName: "old"},
+	})
+	if err != nil {
+		t.Fatalf("sign profile: %v", err)
+	}
+	serverStore.AppendOwnEvent(core.ProfileLog, oldProfile)
+
+	clientStore.SetRetention(10 * time.Second)
+	clientStore.SetNow(func() int64 { return now })
+
+	clientR, serverW := io.Pipe()
+	serverR, clientW := io.Pipe()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		defer serverW.Close()
+		defer serverR.Close()
+		sess := NewSession(serverStore, nil)
+		sess.SetKey(kp)
+		if _, err := sess.RunListener(serverR, serverW); err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+	defer clientR.Close()
+	defer clientW.Close()
+
+	sess := NewSession(clientStore, nil)
+	sess.SetKey(kp)
+	sess.SetCursorSource(clientStore.SyncCursor)
+	sess.SetCursorSink(clientStore.PutSyncCursor)
+	if _, err := sess.RunInitiator(clientR, clientW); err != nil {
+		t.Fatalf("RunInitiator: %v", err)
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatalf("server: %v", err)
+	}
+
+	events, err := clientStore.CrawledEvents(kp.Identity())
+	if err != nil {
+		t.Fatalf("CrawledEvents: %v", err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("client events: want 1 (old profile), got %d", len(events))
 	}
 }

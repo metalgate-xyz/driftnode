@@ -31,6 +31,7 @@ service Driftnode {
   rpc RotateKey(Empty) returns (RotateKeyResp);
   rpc Subscribe(SubscribeReq) returns (stream Event);
   rpc FeedPage(FeedPageReq) returns (FeedPageResp);
+  rpc Prune(Empty) returns (PruneResp);
 }
 
 // Empty carries no parameters. Used by RPCs that need no input.
@@ -39,6 +40,11 @@ message Empty {}
 // EmptyResp acknowledges a command with a status string.
 message EmptyResp {
   string status = 1;
+}
+
+// PruneResp reports how many stale remote PostLog events were removed.
+message PruneResp {
+  int32 pruned = 1;
 }
 
 // WhoamiResp is the node's own identity and optional profile fields projected
