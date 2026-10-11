@@ -1952,3 +1952,57 @@ func TestRetentionCutoffForPullCursor(t *testing.T) {
 		t.Fatalf("RetentionCutoff disabled: want 0, got %d", got)
 	}
 }
+
+// TestFutureSkewRejectsEvent verifies that a signed event whose timestamp is
+// more than MaxFutureSkew ahead of the receiver clock is rejected at ingest.
+// The author is not flagged: a fast clock is skew, not misconduct.
+func TestFutureSkewRejectsEvent(t *testing.T) {
+	s := newTestStore(t)
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+	author, _ := core.NewKeyPair()
+
+	// An event 2 minutes ahead is beyond MaxFutureSkew (60s): rejected.
+	tooFar, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now + 120*1e9, Sequence: 1,
+		Post: &core.Post{Text: "future"},
+	})
+	inserted, err := s.PutRemoteEvent(tooFar, 1)
+	if err != nil {
+		t.Fatalf("put too-far: %v", err)
+	}
+	if inserted {
+		t.Fatal("future-skewed event was stored")
+	}
+
+	// The author is not flagged: future skew is not misconduct.
+	flagged, err := s.IsFlagged(author.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author flagged for a future-skewed event")
+	}
+}
+
+// TestFutureSkewWithinMarginStoresEvent verifies that an event stamped within
+// MaxFutureSkew of the receiver clock is stored normally.
+func TestFutureSkewWithinMarginStoresEvent(t *testing.T) {
+	s := newTestStore(t)
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+	author, _ := core.NewKeyPair()
+
+	// An event 30s ahead is within MaxFutureSkew (60s): stored.
+	within, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now + 30*1e9, Sequence: 1,
+		Post: &core.Post{Text: "within"},
+	})
+	inserted, err := s.PutRemoteEvent(within, 1)
+	if err != nil {
+		t.Fatalf("put within: %v", err)
+	}
+	if !inserted {
+		t.Fatal("within-margin event was dropped")
+	}
+}

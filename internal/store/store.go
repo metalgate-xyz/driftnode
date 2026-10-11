@@ -347,6 +347,9 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 	if len(canon) > core.CapForKind(se.Event.Kind) {
 		return false, s.flagAuthor(se.Author)
 	}
+	if se.Event.Timestamp > s.now64()+core.MaxFutureSkew.Nanoseconds() {
+		return false, nil
+	}
 	if se.Event.Log == core.PostLog && s.retention > 0 && se.Event.Timestamp < s.now64()-s.retention.Nanoseconds() {
 		return false, nil
 	}

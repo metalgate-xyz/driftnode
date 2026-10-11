@@ -59,6 +59,14 @@ const (
 	CapDetail  = 2048
 )
 
+// MaxFutureSkew is the maximum amount a signed event timestamp may be ahead
+// of the receiver's wall clock before the event is rejected at ingest. An
+// author stamping events far into the future could evade the same-second rate
+// limit, so the receiver drops events beyond this margin. The check reads
+// the receiver clock, not the signed timestamp, so it does not flag the
+// author: a fast clock is skew, not misconduct.
+const MaxFutureSkew = 60 * time.Second
+
 // ErrEventOversized is returned by Sign when the canonical encoding of the
 // event exceeds the per-kind cap. The author side enforces it so a legitimate
 // author never signs an oversized event.
