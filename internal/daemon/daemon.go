@@ -1121,6 +1121,13 @@ func (d *Daemon) handlePost(text, parentID string, kp *core.KeyPair) Response {
 	}
 	post := &core.Post{Text: text}
 	if !parent.IsZero() {
+		exists, err := d.store.EventExists(parent)
+		if err != nil {
+			return Response{Error: err.Error()}
+		}
+		if !exists {
+			return Response{Error: "post not found locally"}
+		}
 		post.ParentID = parent
 	}
 	ch, err := d.store.EnqueuePostEvent(kp, core.PostLog, core.Event{
@@ -1164,6 +1171,13 @@ func (d *Daemon) handleLike(postID string, kp *core.KeyPair) Response {
 	}
 	if target.IsZero() {
 		return Response{Error: "post id required"}
+	}
+	exists, err := d.store.EventExists(target)
+	if err != nil {
+		return Response{Error: err.Error()}
+	}
+	if !exists {
+		return Response{Error: "post not found locally"}
 	}
 	ch, err := d.store.EnqueuePostEvent(kp, core.PostLog, core.Event{
 		Kind: core.KindLike,

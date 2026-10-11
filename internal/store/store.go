@@ -44,6 +44,8 @@ var (
 	bucketCursor      = []byte("cursor")      // per-(author,log) high-water timestamp of last successful pull
 	bucketWeight      = []byte("weight")      // identity -> float64 sync-priority weight, recomputed each sync round
 	bucketRateSecond  = []byte("ratesecond")  // per-(author,kind) last event second, for same-second rate check
+	bucketEventIndex  = []byte("eventindex")  // EventID -> author Identity + kind byte; covers every stored event
+	bucketEventRef    = []byte("eventref")    // composite TargetEventID+SourceEventID -> source author + kind byte
 )
 
 // meta keys
@@ -179,7 +181,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -261,7 +263,12 @@ func (s *Store) PutKey(kp *core.KeyPair, enc *core.EncryptedKey) error {
 // name. Events are keyed by their event ID (the BLAKE3 of the canonical signed
 // bytes), so importing a backup merges as a set union of immutable events
 // rather than resequencing (§7, §8). A duplicate Like (same author, same
-// target) is silently dropped: one Like per author per post.
+// target) is silently dropped: one Like per author per post. For PostLog
+// events, the existence and reference indexes are maintained (an own event is
+// added to bucketEventIndex, a referencing own event to bucketEventRef) but
+// the target is not looked up: the own path is a pure set-union write and does
+// not gate. Indexes cover PostLog events only; ProfileLog compaction is
+// handled in phase 7.
 func (s *Store) AppendOwnEvent(log core.LogName, se *core.SignedEvent) error {
 	id, err := se.ID()
 	if err != nil {
@@ -285,7 +292,20 @@ func (s *Store) AppendOwnEvent(log core.LogName, se *core.SignedEvent) error {
 				return nil
 			}
 		}
-		return logBucket.Put(id[:], eventBytes)
+		if err := logBucket.Put(id[:], eventBytes); err != nil {
+			return err
+		}
+		if log == core.PostLog {
+			if err := indexEventAdd(tx, id, se.Author, se.Event.Kind); err != nil {
+				return err
+			}
+			if target := referenceTarget(se); !target.IsZero() {
+				if err := indexRefAdd(tx, target, id, se.Author, se.Event.Kind); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
 	})
 }
 
@@ -339,6 +359,13 @@ func (s *Store) AllOwnEvents() ([]core.SignedEvent, error) {
 // runs on the verified event so the flag is never raised on a transit
 // tamper. A PostLog event older than the retention window is dropped
 // silently: a stale event is not misconduct, so the author is not flagged.
+// A PostLog referencing event (Like, Reply, Delete) is stored only if its
+// target resolves to a non-tombstoned event the receiver already holds:
+// existence is a receiver-local property, so an orphan is dropped without
+// flagging. When a PostLog Delete is stored, every event referencing the
+// deleted target is dropped from the store and its index entries removed,
+// so the projection stays clean. The existence and reference indexes cover
+// PostLog events only; ProfileLog compaction is handled in phase 7.
 func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 	canon, err := core.CanonicalEncode(se.Event)
 	if err != nil {
@@ -376,9 +403,20 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 				return nil
 			}
 		}
+		// Existence gate: a PostLog referencing event (Like, Reply, Delete)
+		// is stored only if its target exists in the local index.
+		// Existence is receiver-local, so an orphan is dropped without
+		// flagging. ProfileLog events are not gated: their compaction is
+		// handled in phase 7.
+		target := referenceTarget(se)
+		if se.Event.Log == core.PostLog && !target.IsZero() {
+			if _, _, exists := eventExists(tx, target); !exists {
+				return nil
+			}
+		}
 		if se.Event.Log == core.PostLog {
 			rsb := tx.Bucket(bucketRateSecond)
-			key := rateSecondKey(se.Author, se.Event.Kind)
+			key := authorKindKey(se.Author, se.Event.Kind)
 			evSec := secondOf(se.Event.Timestamp)
 			if raw := rsb.Get(key); raw != nil {
 				lastSec := int64(binary.BigEndian.Uint64(raw))
@@ -397,7 +435,32 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 			}
 		}
 		inserted = true
-		return authorBucket.Put(id[:], eventBytes)
+		if err := authorBucket.Put(id[:], eventBytes); err != nil {
+			return err
+		}
+		if se.Event.Log != core.PostLog {
+			return nil
+		}
+		if err := indexEventAdd(tx, id, se.Author, se.Event.Kind); err != nil {
+			return err
+		}
+		// Cascade on Delete: remove the target from the index and drop
+		// every event referencing it from the store, so the projection
+		// stays clean. The target's bytes stay in the bucket for dedup
+		// (a re-receive is skipped by the set-union check). Runs before
+		// the Delete's own ref entry is added, so the range scan by target
+		// does not find the Delete itself.
+		if se.Event.Kind == core.KindDelete && se.Event.Delete != nil {
+			if err := cascadeDelete(tx, target); err != nil {
+				return err
+			}
+		}
+		if !target.IsZero() {
+			if err := indexRefAdd(tx, target, id, se.Author, se.Event.Kind); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return inserted, err
 }
@@ -596,6 +659,10 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 		if err != nil {
 			return err
 		}
+		// Set union: skip if already present.
+		if authorBucket.Get(id[:]) != nil {
+			return nil
+		}
 		return authorBucket.Put(id[:], eventBytes)
 	})
 }
@@ -761,25 +828,14 @@ func (s *Store) gatherWeightInputs() (*weight.Inputs, error) {
 		}
 
 		// Follow set and pins from the own ProfileLog and follow-state cache.
-		var profEvents []core.SignedEvent
-		if pb := own.Bucket([]byte(core.ProfileLog)); pb != nil {
-			if err := pb.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return nil
-				}
-				profEvents = append(profEvents, se)
-				return nil
-			}); err != nil {
-				return err
-			}
+		follows, err = followGraphIdentities(tx)
+		if err != nil {
+			return err
 		}
 		followSet := make(map[string]bool)
-		core.NewLog(profEvents).FollowSet().Each(func(target [32]byte) {
-			id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
-			follows = append(follows, id)
+		for _, id := range follows {
 			followSet[id.String()] = true
-		})
+		}
 		if fb := tx.Bucket(bucketFollowState); fb != nil {
 			_ = fb.ForEach(func(k, v []byte) error {
 				if decodeFollowState(v).pinned {
@@ -1100,16 +1156,6 @@ func cursorKey(author core.Identity, log core.LogName) []byte {
 	return k
 }
 
-// rateSecondKey is the bucketRateSecond key for (author, kind): the author
-// identity bytes followed by the single kind byte. The bucket stores the
-// unix-second of the last accepted event of that kind from that author.
-func rateSecondKey(author core.Identity, kind core.Kind) []byte {
-	k := make([]byte, 0, len(author)+1)
-	k = append(k, []byte(author)...)
-	k = append(k, byte(kind))
-	return k
-}
-
 // secondOf returns the unix-second floor of a nanosecond timestamp.
 func secondOf(ns int64) int64 { return ns / int64(time.Second) }
 
@@ -1197,23 +1243,9 @@ func (s *Store) AllPostsOneTx() ([]core.SignedEvent, error) {
 		}
 		// Follow graph from own ProfileLog, then each followed identity's
 		// crawled PostLog events, all within this transaction.
-		var follows []core.Identity
-		if profBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.ProfileLog)); profBucket != nil {
-			var profEvents []core.SignedEvent
-			if err := profBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return fmt.Errorf("decode profile event at %x: %w", k, err)
-				}
-				profEvents = append(profEvents, se)
-				return nil
-			}); err != nil {
-				return err
-			}
-			fs := core.NewLog(profEvents).FollowSet()
-			fs.Each(func(target [32]byte) {
-				follows = append(follows, core.IdentityFromPubkey(ed25519.PublicKey(target[:])))
-			})
+		follows, err := followGraphIdentities(tx)
+		if err != nil {
+			return err
 		}
 		remote := tx.Bucket(bucketRemote)
 		for _, id := range follows {
@@ -1251,58 +1283,11 @@ func (s *Store) OutboundReplies() (map[core.Identity]int, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		// Build an event ID -> author index over all held PostLogs so a
 		// reply's parent can be resolved to an author in one pass.
-		authors := make(map[[32]byte]core.Identity)
-		// Own PostLog.
-		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
-			if err := ownBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return fmt.Errorf("decode own event at %x: %w", k, err)
-				}
-				var id [32]byte
-				copy(id[:], k)
-				authors[id] = se.Author
-				return nil
-			}); err != nil {
-				return err
-			}
+		follows, err := followGraphIdentities(tx)
+		if err != nil {
+			return err
 		}
-		// Followed identities' PostLogs from the remote bucket.
-		// First resolve the follow graph from the own ProfileLog.
-		var profEvents []core.SignedEvent
-		if profBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.ProfileLog)); profBucket != nil {
-			if err := profBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return fmt.Errorf("decode profile event at %x: %w", k, err)
-				}
-				profEvents = append(profEvents, se)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		fs := core.NewLog(profEvents).FollowSet()
-		fs.Each(func(target [32]byte) {
-			id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
-			authorBucket := tx.Bucket(bucketRemote).Bucket([]byte(id))
-			if authorBucket == nil {
-				return
-			}
-			_ = authorBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return nil
-				}
-				if se.Event.Log != core.PostLog {
-					return nil
-				}
-				var evID [32]byte
-				copy(evID[:], k)
-				authors[evID] = se.Author
-				return nil
-			})
-		})
+		authors := postAuthorIndex(tx, follows)
 		// Count the user's own replies grouped by the parent's author.
 		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
 			if err := ownBucket.ForEach(func(k, v []byte) error {
@@ -1338,55 +1323,11 @@ func (s *Store) OutboundLikes() (map[core.Identity]int, error) {
 	err := s.db.View(func(tx *bolt.Tx) error {
 		// Build an event ID -> author index over all held PostLogs so a
 		// like's target can be resolved to an author in one pass.
-		authors := make(map[[32]byte]core.Identity)
-		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
-			if err := ownBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return fmt.Errorf("decode own event at %x: %w", k, err)
-				}
-				var id [32]byte
-				copy(id[:], k)
-				authors[id] = se.Author
-				return nil
-			}); err != nil {
-				return err
-			}
+		follows, err := followGraphIdentities(tx)
+		if err != nil {
+			return err
 		}
-		var profEvents []core.SignedEvent
-		if profBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.ProfileLog)); profBucket != nil {
-			if err := profBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return fmt.Errorf("decode profile event at %x: %w", k, err)
-				}
-				profEvents = append(profEvents, se)
-				return nil
-			}); err != nil {
-				return err
-			}
-		}
-		fs := core.NewLog(profEvents).FollowSet()
-		fs.Each(func(target [32]byte) {
-			id := core.IdentityFromPubkey(ed25519.PublicKey(target[:]))
-			authorBucket := tx.Bucket(bucketRemote).Bucket([]byte(id))
-			if authorBucket == nil {
-				return
-			}
-			_ = authorBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return nil
-				}
-				if se.Event.Log != core.PostLog {
-					return nil
-				}
-				var evID [32]byte
-				copy(evID[:], k)
-				authors[evID] = se.Author
-				return nil
-			})
-		})
+		authors := postAuthorIndex(tx, follows)
 		// Count the user's own likes grouped by the liked post's author.
 		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
 			if err := ownBucket.ForEach(func(k, v []byte) error {
@@ -1432,7 +1373,11 @@ func (s *Store) LikesForPosts(targetIDs []core.EventID) ([]core.SignedEvent, err
 					return fmt.Errorf("decode own event at %x: %w", k, err)
 				}
 				if se.Event.Kind == core.KindLike && se.Event.Like != nil && wanted[se.Event.Like.TargetID] {
-					out = append(out, se)
+					var evID core.EventID
+					copy(evID[:], k)
+					if _, _, exists := eventExists(tx, evID); exists {
+						out = append(out, se)
+					}
 				}
 				return nil
 			}); err != nil {
@@ -1455,7 +1400,11 @@ func (s *Store) LikesForPosts(targetIDs []core.EventID) ([]core.SignedEvent, err
 					return nil
 				}
 				if se.Event.Kind == core.KindLike && se.Event.Like != nil && wanted[se.Event.Like.TargetID] {
-					out = append(out, se)
+					var evID core.EventID
+					copy(evID[:], k)
+					if _, _, exists := eventExists(tx, evID); exists {
+						out = append(out, se)
+					}
 				}
 				return nil
 			})
@@ -1684,7 +1633,15 @@ func (s *Store) PruneRemotePosts() (int, error) {
 				return err
 			}
 			for _, k := range stale {
+				var evID core.EventID
+				copy(evID[:], k)
 				if err := authorBucket.Delete(k); err != nil {
+					return err
+				}
+				if err := indexEventRemove(tx, evID); err != nil {
+					return err
+				}
+				if err := indexRefRemoveSource(tx, evID); err != nil {
 					return err
 				}
 				pruned++

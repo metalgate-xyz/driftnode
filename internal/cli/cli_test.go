@@ -196,6 +196,34 @@ func TestLikeCommand(t *testing.T) {
 	}
 }
 
+// TestLikeRejectsUnknownPostOffline verifies the author-side guard in the
+// offline CLI path: liking a post the local node does not hold is rejected.
+func TestLikeRejectsUnknownPostOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	unknownID := core.EventIDOf([]byte("unknown post id")).String()
+	_, err := runCLI(t, dbPath, []string{"like", unknownID, "--passphrase", "testpass"})
+	if err == nil {
+		t.Fatal("expected error for unknown post id")
+	}
+}
+
+// TestReplyRejectsUnknownParentOffline verifies the author-side guard in the
+// offline CLI path: replying to a post the local node does not hold is rejected.
+func TestReplyRejectsUnknownParentOffline(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	unknownID := core.EventIDOf([]byte("unknown parent id")).String()
+	_, err := runCLI(t, dbPath, []string{"post", "reply", "--parent", unknownID, "--passphrase", "testpass"})
+	if err == nil {
+		t.Fatal("expected error for unknown parent id")
+	}
+}
+
 func TestFeedShowsLikeCountOffline(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "node.db")
 	if _, err := runCLI(t, dbPath, []string{"init", "--passphrase", "testpass"}); err != nil {

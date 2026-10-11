@@ -2006,3 +2006,447 @@ func TestFutureSkewWithinMarginStoresEvent(t *testing.T) {
 		t.Fatal("within-margin event was dropped")
 	}
 }
+
+// --- Phase 5: Linked-event existence ---
+
+// TestLikeTargetingUnknownPostDropped verifies that a Like targeting a post
+// the receiver does not hold is dropped at ingest, not stored.
+func TestLikeTargetingUnknownPostDropped(t *testing.T) {
+	s := newTestStore(t)
+	liker, _ := core.NewKeyPair()
+
+	// A Like targeting a post we have never seen.
+	var unknown core.EventID
+	unknown[0] = 0xAB
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Like: &core.Like{TargetID: unknown},
+	})
+	inserted, err := s.PutRemoteEvent(like, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
+	}
+	if inserted {
+		t.Fatal("like targeting unknown post was stored")
+	}
+	// Not flagged: existence is receiver-local, not a protocol violation.
+	flagged, err := s.IsFlagged(liker.Identity())
+	if err != nil {
+		t.Fatalf("IsFlagged: %v", err)
+	}
+	if flagged {
+		t.Fatal("author flagged for an orphan like")
+	}
+}
+
+// TestLikeTargetingTombstonedPostDropped verifies that a Like targeting a
+// tombstoned (deleted) post is dropped at ingest.
+func TestLikeTargetingTombstonedPostDropped(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	// Author posts, then deletes their post.
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "doomed"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	del, _ := author.Sign(core.Event{
+		Kind: core.KindDelete, Log: core.PostLog, Timestamp: 2e9, Sequence: 2,
+		Delete: &core.Delete{TargetID: postID},
+	})
+	if _, err := s.PutRemoteEvent(del, 2); err != nil {
+		t.Fatalf("put delete: %v", err)
+	}
+
+	// A Like targeting the now-tombstoned post is dropped.
+	liker, _ := core.NewKeyPair()
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 3e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	inserted, err := s.PutRemoteEvent(like, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
+	}
+	if inserted {
+		t.Fatal("like targeting tombstoned post was stored")
+	}
+}
+
+// TestReplyTargetingUnknownParentDropped verifies that a Reply (a Post with
+// ParentID set) whose parent does not exist locally is dropped at ingest.
+func TestReplyTargetingUnknownParentDropped(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+
+	var unknown core.EventID
+	unknown[0] = 0xCD
+	reply, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "reply to nothing", ParentID: unknown},
+	})
+	inserted, err := s.PutRemoteEvent(reply, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
+	}
+	if inserted {
+		t.Fatal("reply targeting unknown parent was stored")
+	}
+}
+
+// TestDeleteDropsReferencingLikes verifies that when a Delete arrives for a
+// post that has stored likes, those likes are dropped from the store.
+func TestDeleteDropsReferencingLikes(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	liker, _ := core.NewKeyPair()
+
+	// Author posts.
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "delete me"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	// Liker likes the post.
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	if _, err := s.PutRemoteEvent(like, 1); err != nil {
+		t.Fatalf("put like: %v", err)
+	}
+	// The like is present before the delete.
+	likes, err := s.LikesForPosts([]core.EventID{postID})
+	if err != nil {
+		t.Fatalf("LikesForPosts before: %v", err)
+	}
+	if len(likes) != 1 {
+		t.Fatalf("want 1 like before delete, got %d", len(likes))
+	}
+	likeID, _ := like.ID()
+	exists, err := s.EventExists(likeID)
+	if err != nil {
+		t.Fatalf("EventExists before: %v", err)
+	}
+	if !exists {
+		t.Fatal("like should exist before delete")
+	}
+
+	// Author deletes the post. The like is cascaded.
+	del, _ := author.Sign(core.Event{
+		Kind: core.KindDelete, Log: core.PostLog, Timestamp: 3e9, Sequence: 2,
+		Delete: &core.Delete{TargetID: postID},
+	})
+	if _, err := s.PutRemoteEvent(del, 2); err != nil {
+		t.Fatalf("put delete: %v", err)
+	}
+
+	// The like is gone from the store and the index.
+	likes, err = s.LikesForPosts([]core.EventID{postID})
+	if err != nil {
+		t.Fatalf("LikesForPosts after: %v", err)
+	}
+	if len(likes) != 0 {
+		t.Fatalf("want 0 likes after delete, got %d", len(likes))
+	}
+	exists, err = s.EventExists(likeID)
+	if err != nil {
+		t.Fatalf("EventExists after: %v", err)
+	}
+	if exists {
+		t.Fatal("like should not exist in index after delete")
+	}
+}
+
+// TestDeleteDropsReferencingReplies verifies that when a Delete arrives for a
+// post that has stored replies, those replies are dropped from the store.
+func TestDeleteDropsReferencingReplies(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	replier, _ := core.NewKeyPair()
+
+	// Author posts.
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "parent"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	// Replier replies to the post.
+	reply, _ := replier.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Post: &core.Post{Text: "a reply", ParentID: postID},
+	})
+	replyID, _ := reply.ID()
+	if _, err := s.PutRemoteEvent(reply, 1); err != nil {
+		t.Fatalf("put reply: %v", err)
+	}
+	exists, err := s.EventExists(replyID)
+	if err != nil {
+		t.Fatalf("EventExists before: %v", err)
+	}
+	if !exists {
+		t.Fatal("reply should exist before delete")
+	}
+
+	// Author deletes the post. The reply is cascaded.
+	del, _ := author.Sign(core.Event{
+		Kind: core.KindDelete, Log: core.PostLog, Timestamp: 3e9, Sequence: 2,
+		Delete: &core.Delete{TargetID: postID},
+	})
+	if _, err := s.PutRemoteEvent(del, 2); err != nil {
+		t.Fatalf("put delete: %v", err)
+	}
+
+	exists, err = s.EventExists(replyID)
+	if err != nil {
+		t.Fatalf("EventExists after: %v", err)
+	}
+	if exists {
+		t.Fatal("reply should not exist in index after parent delete")
+	}
+	// The reply's bytes are gone from the store.
+	events, err := s.CrawledEvents(replier.Identity())
+	if err != nil {
+		t.Fatalf("CrawledEvents after: %v", err)
+	}
+	for _, se := range events {
+		seID, _ := se.ID()
+		if seID == replyID {
+			t.Fatal("reply bytes still in store after parent delete")
+		}
+	}
+}
+
+// TestLikeTargetingHeldPostStored verifies that a Like targeting a post the
+// receiver holds is stored normally (positive case).
+func TestLikeTargetingHeldPostStored(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	liker, _ := core.NewKeyPair()
+
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "held"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	inserted, err := s.PutRemoteEvent(like, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
+	}
+	if !inserted {
+		t.Fatal("like targeting held post was not stored")
+	}
+}
+
+// TestReplyTargetingHeldParentStored verifies that a Reply targeting a held
+// parent post is stored normally (positive case).
+func TestReplyTargetingHeldParentStored(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	replier, _ := core.NewKeyPair()
+
+	parent, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "parent"},
+	})
+	parentID, _ := parent.ID()
+	if _, err := s.PutRemoteEvent(parent, 1); err != nil {
+		t.Fatalf("put parent: %v", err)
+	}
+	reply, _ := replier.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Post: &core.Post{Text: "reply", ParentID: parentID},
+	})
+	inserted, err := s.PutRemoteEvent(reply, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
+	}
+	if !inserted {
+		t.Fatal("reply targeting held parent was not stored")
+	}
+}
+
+// TestLikeTargetingOwnPostStored verifies that a Like targeting the local
+// user's own post (in bucketOwn, not bucketRemote) is stored: the existence
+// index spans both buckets.
+func TestLikeTargetingOwnPostStored(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	liker, _ := core.NewKeyPair()
+
+	// I post to my own log.
+	post, _ := me.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "my post"},
+	})
+	postID, _ := post.ID()
+	if err := s.AppendOwnEvent(core.PostLog, post); err != nil {
+		t.Fatalf("append own post: %v", err)
+	}
+	// A remote liker likes my post. The existence index spans own + remote,
+	// so the like is stored.
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	inserted, err := s.PutRemoteEvent(like, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent: %v", err)
+	}
+	if !inserted {
+		t.Fatal("like targeting own post was not stored")
+	}
+}
+
+// TestDeleteTargetingLikeRemovesLike verifies that a Delete targeting a Like
+// (not a post) removes that Like from the store and the reference index.
+func TestDeleteTargetingLikeRemovesLike(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	liker, _ := core.NewKeyPair()
+
+	// Author posts.
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "post"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	// Liker likes the post.
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	likeID, _ := like.ID()
+	if _, err := s.PutRemoteEvent(like, 1); err != nil {
+		t.Fatalf("put like: %v", err)
+	}
+	// The like is present.
+	likes, err := s.LikesForPosts([]core.EventID{postID})
+	if err != nil {
+		t.Fatalf("LikesForPosts before: %v", err)
+	}
+	if len(likes) != 1 {
+		t.Fatalf("want 1 like, got %d", len(likes))
+	}
+
+	// Author deletes the Like itself.
+	del, _ := author.Sign(core.Event{
+		Kind: core.KindDelete, Log: core.PostLog, Timestamp: 3e9, Sequence: 2,
+		Delete: &core.Delete{TargetID: likeID},
+	})
+	if _, err := s.PutRemoteEvent(del, 2); err != nil {
+		t.Fatalf("put delete: %v", err)
+	}
+
+	// The like is gone from the store and the index.
+	likes, err = s.LikesForPosts([]core.EventID{postID})
+	if err != nil {
+		t.Fatalf("LikesForPosts after: %v", err)
+	}
+	if len(likes) != 0 {
+		t.Fatalf("want 0 likes after delete, got %d", len(likes))
+	}
+	exists, err := s.EventExists(likeID)
+	if err != nil {
+		t.Fatalf("EventExists after: %v", err)
+	}
+	if exists {
+		t.Fatal("like should not exist in index after delete")
+	}
+}
+
+// TestPruneDropsLikeTargetingPrunedPost verifies that after a prune removes a
+// post, a Like targeting the pruned post is dropped at ingest. The existence
+// and reference indexes are updated on prune.
+func TestPruneDropsLikeTargetingPrunedPost(t *testing.T) {
+	s := newTestStore(t)
+	s.SetRetention(10 * time.Second)
+	author, _ := core.NewKeyPair()
+	liker, _ := core.NewKeyPair()
+
+	now := int64(100 * 1e9)
+	s.SetNow(func() int64 { return now })
+
+	// Author posts within the retention window.
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: now - 5*1e9, Sequence: 1,
+		Post: &core.Post{Text: "recent"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+
+	// Prune: the post is within the window, so it is not pruned.
+	pruned, err := s.PruneRemotePosts()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if pruned != 0 {
+		t.Fatalf("want 0 pruned, got %d", pruned)
+	}
+
+	// A like targeting the still-held post is stored.
+	like, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: now - 4*1e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	inserted, err := s.PutRemoteEvent(like, 1)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent like: %v", err)
+	}
+	if !inserted {
+		t.Fatal("like targeting held post was not stored")
+	}
+
+	// Advance the clock past the retention window so the post ages out.
+	s.SetNow(func() int64 { return now + 20 * 1e9 })
+
+	// Prune: the post and the like are now stale.
+	pruned, err = s.PruneRemotePosts()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if pruned != 2 {
+		t.Fatalf("want 2 pruned (post + like), got %d", pruned)
+	}
+
+	// A new like targeting the pruned post is dropped: the index entry was
+	// removed on prune.
+	like2, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: now + 20*1e9, Sequence: 2,
+		Like: &core.Like{TargetID: postID},
+	})
+	inserted, err = s.PutRemoteEvent(like2, 2)
+	if err != nil {
+		t.Fatalf("PutRemoteEvent like2: %v", err)
+	}
+	if inserted {
+		t.Fatal("like targeting pruned post was stored")
+	}
+}

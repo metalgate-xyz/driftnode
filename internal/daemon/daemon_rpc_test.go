@@ -558,8 +558,7 @@ func TestLikeRPC(t *testing.T) {
 		t.Fatal("missing like event id")
 	}
 
-	// Liking a non-existent post id is fine (the event is still valid; it
-	// just references something we don't hold). But a bad format must fail.
+	// A bad format must fail.
 	if _, err := cl.Like(context.Background(), &driftnodepb.LikeReq{PostId: "not-valid!!!"}); err == nil {
 		t.Fatal("expected error for invalid post id")
 	}
@@ -620,6 +619,51 @@ func TestLikeOwnPost(t *testing.T) {
 	}
 	if len(feed.Items[0].Likers) != 1 {
 		t.Fatalf("likers: want 1, got %d", len(feed.Items[0].Likers))
+	}
+}
+
+// TestLikeRejectsUnknownPost verifies the author-side guard: liking a post
+// the local node does not hold is rejected before signing.
+func TestLikeRejectsUnknownPost(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	// A valid-format but unknown post ID: rejected by the author-side guard.
+	unknownID := core.EventIDOf([]byte("unknown post id"))
+	if _, err := cl.Like(context.Background(), &driftnodepb.LikeReq{
+		PostId: unknownID.String(), Passphrase: "pass",
+	}); err == nil {
+		t.Fatal("expected error for unknown post id")
+	}
+}
+
+// TestReplyRejectsUnknownParent verifies the author-side guard: replying to
+// a post the local node does not hold is rejected before signing.
+func TestReplyRejectsUnknownParent(t *testing.T) {
+	s := newTestStore(t)
+	initTestIdentity(t, s)
+	d := New(s, nil)
+	sock := testSocketPath(t)
+	if err := d.Start(sock); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer d.Stop()
+
+	cl, _ := testClient(t, sock)
+
+	unknownID := core.EventIDOf([]byte("unknown parent id"))
+	if _, err := cl.Post(context.Background(), &driftnodepb.PostReq{
+		Text: "reply", ParentId: unknownID.String(), Passphrase: "pass",
+	}); err == nil {
+		t.Fatal("expected error for unknown parent id")
 	}
 }
 

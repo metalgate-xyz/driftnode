@@ -127,6 +127,20 @@ targets a post. A user following Bob but not Alice will not see Bob's
 likes on Alice's posts, because the receiver never synced Alice's PostLog,
 so the target ID is not in the index.
 
+The existence gate is receiver-only. Linked-event existence is a
+receiver-local property, not a universal invariant: a Like's target may
+exist for its author and be absent from a given receiver, because the
+receiver does not sync every author's PostLog. The receiver drops an
+orphan without flagging the author; it is a local utility filter, not a
+protocol violation. The own path (`AppendOwnEvent`) is not gated: it is
+a pure set-union write, so a backup restore re-adds a user's likes on
+other authors' posts even though those posts (in the remote bucket) are
+not part of the backup. Own orphan volume is bounded by the rate limit
+(phase 2), and the projection tolerates the orphans that remain. The
+author side prevents orphans from being signed: the CLI and TUI offer
+Like and Reply only against posts the local node holds, so a legitimate
+author never signs an orphan in the first place.
+
 ### Phase 6: Follow cap
 
 An author cannot sign more than 5000 net follows. The limit is enforced
@@ -236,26 +250,56 @@ Add two persisted bbolt buckets, both maintained at ingest, delete, and
 prune time.
 
 The existence index (`bucketEventIndex`) maps EventID to the event's
-author and kind. It covers every stored event (own + crawl), so it
-answers in O(1): does this event exist, and is it tombstoned? A Like's
-`TargetID` and a Reply's `ParentID` both look up here. On event ingest:
-add. On Delete: remove (the bytes stay in the bucket, but the absent
-index entry makes any later reference drop). On prune: remove.
+author and kind. It covers every stored PostLog event (own + remote),
+so it answers in O(1): does this event exist, and is it tombstoned? A
+Like's `TargetID` and a Reply's `ParentID` both look up here. On event
+ingest: add. On Delete: remove (the bytes stay in the bucket, but the
+absent index entry makes any later reference drop). On prune: remove.
+The bytes must stay because sync is append-only: a peer re-sends events
+past the cursor, and the receiver dedups by event ID (set union).
+Deleting the bytes would break dedup, so the next sync round would
+re-store and re-index the deleted event, silently undoing the delete.
+The index entry removal is the tombstone; the bytes are the dedup
+guard. The index covers PostLog events only: the existence gate is a
+PostLog concern (Like targets a post, Reply targets a post, Delete
+targets a post or a like). ProfileLog events are not indexed;
+ProfileLog Deletes are handled by compaction (phase 7), not by the
+existence gate. The crawler stores only ProfileLog events via
+`PutCrawledProfile`, which does not touch the index.
 
 The reference index (`bucketEventRef`) is a composite key of
 `TargetEventID + SourceEventID` mapping to the source event's author and
-kind. It covers every referencing event (Like, Reply, Delete). A range
-scan by `TargetEventID` prefix finds every event referencing a target in
-O(k). On ingest of a referencing event: add (after the existence index
-confirms the target exists). On Delete of a target: range-scan by the
-deleted ID, drop every referencing event from the store, then remove
-their index entries. On prune: same.
+kind. It covers every referencing PostLog event (Like, Reply, Delete).
+A range scan by `TargetEventID` prefix finds every event referencing a
+target in O(k). On ingest of a referencing event: add (after the
+existence index confirms the target exists). On Delete of a target:
+range-scan by the deleted ID, drop every referencing event from the
+store, then remove their index entries. The cascade runs before the
+Delete's own ref entry is added, so the range scan does not find the
+Delete itself. On prune: same.
 
 The store has no such index today: `LikesForPosts` linear-scans every
 held bucket, and the weight-gathering code rebuilds an in-memory
 event-ID-to-author map per call. Both become O(1) or O(k) lookups against
 the persisted index. The index is an ingest accelerator; the projection
 (`Tombstoned`) still works from the stored Delete event.
+
+The existence gate runs only in `PutRemoteEvent`. `AppendOwnEvent` is a
+pure set-union write: it maintains the indexes (an ingested own event is
+added to `bucketEventIndex`, and a referencing own event to
+`bucketEventRef`) but does not look up the target. Existence is
+receiver-local, so the own path does not gate.
+
+The author side keeps orphans from being signed as a UX guard. The CLI
+and TUI offer Like and Reply only against posts the local node holds.
+The post ID comes from the feed or a held-post listing, never free-form
+entry of an unverified ID. A Reply's `--parent` is resolved against the
+local PostLog before the event is composed; a Like targets a post ID the
+feed already rendered from held events. A post ID the local node does
+not hold is rejected before signing with a "post not found locally"
+error. This mirrors phase 1: the author's own client bounds input
+before composing, the user gets immediate feedback, and a signed orphan
+is never produced.
 
 ### Phase 6: Follow cap
 
@@ -385,8 +429,10 @@ prune, a Like targeting the pruned post is dropped. A Like targeting a
 held post is stored; a Reply targeting a held parent is stored (positive
 cases). A Like targeting the local user's own post (in `bucketOwn`, not
 `bucketCrawl`) is stored: the existence index spans both buckets. A
-Delete targeting a Like (not a post) removes that Like from the store
-and the reference index.
+Delete targeting a Like (not a post) removes that Like from the
+existence index and the reference index (the bytes stay for dedup, but
+the absent index entry makes the Like invisible to queries that check
+the index, e.g. `LikesForPosts`).
 
 ### Phase 6: Follow cap
 

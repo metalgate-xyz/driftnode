@@ -283,6 +283,13 @@ func postCmd() *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("parent id: %w", err)
 				}
+				exists, err := s.EventExists(pid)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					return fmt.Errorf("post not found locally")
+				}
 				post.ParentID = pid
 			}
 			ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
@@ -342,6 +349,13 @@ func likeCmd() *cobra.Command {
 			}
 			if target.IsZero() {
 				return fmt.Errorf("post id required")
+			}
+			exists, err := s.EventExists(target)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return fmt.Errorf("post not found locally")
 			}
 			ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
 				Kind: core.KindLike,
