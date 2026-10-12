@@ -1735,12 +1735,12 @@ const (
 	// non-answering head follow releases its slot in seconds.
 	headDialTimeout = 5 * time.Second
 	// headFanout is the head lane's parallel dials per pass.
-	headFanout = 8
+	headFanout = 32
 	// tailDialTimeout is the tail lane's per-dial timeout: latency is OK
 	// here (liveness), but a never-answering follow still releases its slot.
 	tailDialTimeout = 10 * time.Second
 	// tailFanout is the tail lane's small fixed concurrency.
-	tailFanout = 2
+	tailFanout = 16
 	// laneBackoff is the sleep after each lane pass so a fast pass does
 	// not busy spin (shared by head and tail).
 	laneBackoff = 5 * time.Second

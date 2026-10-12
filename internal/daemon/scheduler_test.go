@@ -92,12 +92,11 @@ func peerServer(t *testing.T, name string) (*store.Store, *core.KeyPair, string,
 
 // TestHeadLaneFastSkipUnderUnreachableTail proves the head lane dials the
 // head set with fast-skip and is not starved by an unreachable tail. Alice
-// has 4 pinned head follows (working servers) and 8 cold-start tail follows
-// (a transport that never answers): 12 bound follows, so K scales to 4 and
-// the head set is exactly the pinned follows. The tail count meets the
-// head fan-out, so a single shared dial pool would be saturated by the
-// blocking tail dials and the head dials would wait for the tail timeout
-// before running. Every head follow's post must land well within the head
+// has numHeads pinned head follows (working servers) and numTail cold-start
+// tail follows (a transport that never answers). numTail is at least
+// tailFanout so the blocking tail dials saturate the tail pool; numTail is
+// twice numHeads so the head set (one-third of bound follows) is exactly the
+// pinned follows. Every head follow's post must land well within the head
 // dial timeout (seconds), proving the head lane has its own concurrency
 // pool separate from the tail.
 func TestHeadLaneFastSkipUnderUnreachableTail(t *testing.T) {
@@ -105,8 +104,8 @@ func TestHeadLaneFastSkipUnderUnreachableTail(t *testing.T) {
 	aliceStore := openTestStore(t)
 	aliceKP := initTestIdentityAt(t, aliceStore, "alicepass")
 
-	const numHeads = 4
-	const numTail = headFanout // saturate a shared pool the size of headFanout
+	numHeads := (tailFanout + 1) / 2
+	numTail := 2 * numHeads
 	type peer struct {
 		kp   *core.KeyPair
 		text string
