@@ -103,6 +103,11 @@ type Daemon struct {
 	// zens and recording discovered tokens for future intent.
 	knownTokens map[string]bool
 
+	// dialer is the outbound tailcat dialer the daemon owns when it
+	// created its own transport (no injected one). Its cached tunnels are
+	// torn down on Stop. Guarded by mu.
+	dialer *p2p.Dialer
+
 	// ephemeralKey, when set, disables key persistence: a fresh tailcat
 	// key is generated each run and never saved, so the address token
 	// changes on every restart. The default (false) is a store-persisted
@@ -552,7 +557,8 @@ func (d *Daemon) Start(socketPath string) error {
 	injected := d.transport
 	d.mu.Unlock()
 	if injected == nil {
-		d.transport = tailcatTransport{p2p.NewDialer(d.logger)}
+		d.dialer = p2p.NewDialer(d.logger)
+		d.transport = tailcatTransport{d.dialer}
 	}
 	if err := d.startTransport(); err != nil {
 		d.logger.Warn("tailcat listener unavailable; inbound zen sync disabled", "err", err)
@@ -786,6 +792,9 @@ func (d *Daemon) Stop() {
 	}
 	if syncCancel != nil {
 		syncCancel()
+	}
+	if d.dialer != nil {
+		d.dialer.Close()
 	}
 	if socket != "" {
 		os.Remove(socket)

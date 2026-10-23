@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"sync"
+	"time"
 
 	"github.com/tailscale/tailcat"
 	"tailscale.com/wgengine/filter"
@@ -103,26 +105,140 @@ func AddrFromKeyBytes(keyBytes []byte) (string, error) {
 // Close stops the listener.
 func (l *Listener) Close() error { return l.tcServer.Close() }
 
-// Dialer dials a remote zen's tailcat address and returns a connected stream.
+// defaultCachedClients is the dialer's default cache bound. Each client
+// holds a userspace WireGuard engine, netstack, and DERP connection, so
+// lingering ones dominate memory. The protocol caps follows at
+// core.MaxFollows; the bound is a backstop against pathological token
+// sets, not the working bound: dials to the same address reuse one
+// client, so only distinct dialed addresses occupy entries.
+const defaultCachedClients = 64
+
+// Dialer dials remote zen tailcat addresses. It caches one tailcat client
+// per address: a client owns a userspace tunnel (engine, netstack, DERP
+// connection) that is expensive to build and holds real resources, so dials
+// to the same zen reuse it instead of building a fresh tunnel per sync
+// round. Entries leave the cache on dial failure (a suspect tunnel is torn
+// down, not reused), on LRU eviction over the cap, and on Close.
 type Dialer struct {
 	logger *slog.Logger
+
+	// maxClients bounds the cache size; default defaultCachedClients.
+	maxClients int
+
+	mu       sync.Mutex
+	clients  map[tailcat.Addr]*tailcat.Client
+	lastUsed map[tailcat.Addr]int64
 }
 
 // NewDialer creates a dialer for outbound zen connections.
 func NewDialer(logger *slog.Logger) *Dialer {
-	return &Dialer{logger: logger}
+	return &Dialer{
+		logger:     logger,
+		maxClients: defaultCachedClients,
+		clients:    make(map[tailcat.Addr]*tailcat.Client),
+		lastUsed:   make(map[tailcat.Addr]int64),
+	}
 }
 
-// Dial connects to a zen's tailcat address and returns a duplex stream over
-// which the sync protocol runs.
-func (d *Dialer) Dial(ctx context.Context, addr tailcat.Addr) (net.Conn, error) {
+// clientFor returns the tailcat client for addr, building a fresh one when
+// none is cached. Builds run outside d.mu; when two cold dials race, the
+// loser's fresh build is closed so the race never leaks a client.
+func (d *Dialer) clientFor(addr tailcat.Addr) *tailcat.Client {
+	d.mu.Lock()
+	if c, ok := d.clients[addr]; ok {
+		d.lastUsed[addr] = time.Now().UnixNano()
+		d.mu.Unlock()
+		return c
+	}
+	d.mu.Unlock()
+
+	c := d.buildClient(addr)
+
+	d.mu.Lock()
+	if existing, ok := d.clients[addr]; ok {
+		// Lost the race: reuse the winner, close our fresh build after
+		// releasing the lock.
+		d.lastUsed[addr] = time.Now().UnixNano()
+		d.mu.Unlock()
+		go c.Close()
+		return existing
+	}
+	d.evictLocked()
+	d.clients[addr] = c
+	d.lastUsed[addr] = time.Now().UnixNano()
+	d.mu.Unlock()
+	return c
+}
+
+// buildClient constructs a tailcat client for addr with the dialer's logger.
+func (d *Dialer) buildClient(addr tailcat.Addr) *tailcat.Client {
 	c := tailcat.NewClient(addr)
 	c.Logf = func(format string, args ...any) {
 		d.logger.Debug(fmt.Sprintf(format, args...))
 	}
+	return c
+}
+
+// evictLocked enforces the cache cap, closing evicted clients inline. Runs
+// on insert only, so the cache never exceeds the cap. LRU order comes from
+// lastUsed timestamps. Caller must hold d.mu.
+func (d *Dialer) evictLocked() {
+	for len(d.clients) >= d.maxClients {
+		var coldest tailcat.Addr
+		coldestTS := int64(1<<62 - 1)
+		for a, ts := range d.lastUsed {
+			if ts < coldestTS {
+				coldest = a
+				coldestTS = ts
+			}
+		}
+		c, ok := d.clients[coldest]
+		if ok {
+			delete(d.clients, coldest)
+			delete(d.lastUsed, coldest)
+			go c.Close()
+		}
+	}
+}
+
+// Dial connects to a zen's tailcat address and returns a duplex stream over
+// which the sync protocol runs. The stream rides the cached client for
+// that address. A failed dial closes and evicts that address's client so a
+// wedged tunnel is never reused.
+func (d *Dialer) Dial(ctx context.Context, addr tailcat.Addr) (net.Conn, error) {
+	c := d.clientFor(addr)
 	conn, err := c.DialTCPPort(ctx, SyncPort)
 	if err != nil {
+		d.evictAddr(addr)
 		return nil, fmt.Errorf("tailcat dial: %w", err)
 	}
 	return conn, nil
+}
+
+// evictAddr closes and removes the cached client for one address.
+func (d *Dialer) evictAddr(addr tailcat.Addr) {
+	d.mu.Lock()
+	c, ok := d.clients[addr]
+	if ok {
+		delete(d.clients, addr)
+		delete(d.lastUsed, addr)
+	}
+	d.mu.Unlock()
+	if ok {
+		c.Close()
+	}
+}
+
+// Close tears down every cached client, freeing the tunnel resources the
+// dialer holds. Safe to call more than once.
+func (d *Dialer) Close() error {
+	d.mu.Lock()
+	clients := d.clients
+	d.clients = make(map[tailcat.Addr]*tailcat.Client)
+	d.lastUsed = make(map[tailcat.Addr]int64)
+	d.mu.Unlock()
+	for _, c := range clients {
+		c.Close()
+	}
+	return nil
 }
