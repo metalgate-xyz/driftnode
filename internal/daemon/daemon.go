@@ -122,10 +122,16 @@ type Daemon struct {
 	// crawler runs the background BFS of the follow graph (section 9.3).
 	crawler *crawler.Crawler
 
-	// bootstrapDone is true once the bootstrap seeds have been followed.
+	// bootstrapDone is true once the bootstrap seed follow pass has run.
 	// Cleared while the key is locked, so the next unlock retries the
 	// bootstrap auto-follow if it ran before the key was available.
 	bootstrapDone bool
+	// bootstrapMu is held for the duration of a seed follow pass; TryLock
+	// rejects a second concurrent pass (Start's and unlock's can overlap).
+	bootstrapMu sync.Mutex
+	// bootstrapRetryDelay is the pause between retry passes of failed
+	// seeds. A field so tests can shorten it; zero means the default.
+	bootstrapRetryDelay time.Duration
 
 	// subscribers are open subscribe connections. Each holds a buffered
 	// queue of push events. The daemon broadcasts state changes (zens
@@ -1606,27 +1612,64 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 		d.logger.Warn("bootstrap: key locked; deferring seed auto-follow")
 		return
 	}
+	if !d.bootstrapMu.TryLock() {
+		d.logger.Warn("bootstrap: follow pass already running")
+		return
+	}
+	defer d.bootstrapMu.Unlock()
+
+	// Follow each seed. Skip check is "not followed yet", not "token
+	// known": following one seed exchanges zen lists, which adds the
+	// other seeds to knownTokens, and skipping known tokens would drop
+	// them from the follow pass.
+	var pending []bootstrap.SeedZen
 	for _, sp := range bf.SeedZens {
-		if sp.Token == "" {
-			continue
-		}
-		d.mu.Lock()
-		already := d.knownTokens[sp.Token]
-		d.mu.Unlock()
-		if already {
-			continue
-		}
-		d.upsertZen(sp.Token, sp.Kind, "connecting")
-		// handleFollow -> followByToken dials, handshakes, writes the
-		// Follow event, binds routing, and marks the token known on
-		// success. On failure the token stays unmarked so a retry can
-		// attempt it again.
-		resp := d.handleFollow(sp.Token, kp)
-		if resp.Error != "" {
-			d.logger.Warn("bootstrap: auto-follow seed failed", "token", sp.Token, "err", resp.Error)
-			continue
+		if sp.Token != "" {
+			pending = append(pending, sp)
 		}
 	}
+	delay := d.bootstrapRetryDelay
+	if delay == 0 {
+		delay = bootstrapSeedRetryDelay
+	}
+	followed := 0
+	for pass := 1; len(pending) > 0; pass++ {
+		var failed []bootstrap.SeedZen
+		for _, sp := range pending {
+			d.upsertZen(sp.Token, sp.Kind, "connecting")
+			if resp := d.handleFollow(sp.Token, kp); resp.Error != "" {
+				d.logger.Warn("bootstrap: follow seed failed",
+					"token", sp.Token, "err", resp.Error, "pass", pass)
+				failed = append(failed, sp)
+				continue
+			}
+			followed++
+		}
+		pending = failed
+		if len(pending) == 0 || pass >= bootstrapSeedAttempts {
+			break
+		}
+		// A seed can be temporarily down; retry after a pause (two
+		// retries, three passes total). The pass stops for good if the
+		// daemon is stopping.
+		select {
+		case <-d.Done():
+			return
+		case <-time.After(delay):
+		}
+		d.mu.Lock()
+		kp = d.unlocked
+		d.mu.Unlock()
+		if kp == nil {
+			// Locked again (idle lock): let the next unlock retry.
+			d.logger.Warn("bootstrap: key locked; deferring seed auto-follow")
+			return
+		}
+	}
+	for _, sp := range pending {
+		d.logger.Warn("bootstrap: seed unreachable", "token", sp.Token)
+	}
+	d.logger.Info("bootstrap: seeds followed", "followed", followed, "unreachable", len(pending))
 
 	// Mark bootstrap complete so handleUnlock doesn't retry it.
 	d.mu.Lock()
@@ -1757,6 +1800,11 @@ const (
 	// path (follow-by-token, bootstrap, pending-resolution), derived from
 	// the caller's context.
 	onDemandDialTimeout = 30 * time.Second
+	// bootstrapSeedAttempts is the number of follow attempts per seed.
+	bootstrapSeedAttempts = 3
+	// bootstrapSeedRetryDelay is the default pause between follow
+	// attempts; the daemon field of the shorter name overrides it.
+	bootstrapSeedRetryDelay = 5 * time.Second
 )
 
 // triggerCrawlNow signals the crawl loop to run an immediate crawl pass out
