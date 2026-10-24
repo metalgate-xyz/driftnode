@@ -96,13 +96,6 @@ type Daemon struct {
 	lastSignAt time.Time
 	idleLock   time.Duration
 
-	// knownTokens is the set of zen tokens learned through bootstrap or
-	// zen exchange, used for zen-exchange offers and dedup. The auto-dial
-	// set is the follow graph (FollowGraph) plus the routing table
-	// (identity -> token); knownTokens is only for offering tokens to
-	// zens and recording discovered tokens for future intent.
-	knownTokens map[string]bool
-
 	// dialer is the outbound tailcat dialer the daemon owns when it
 	// created its own transport (no injected one). Its cached tunnels are
 	// torn down on Stop. Guarded by mu.
@@ -455,13 +448,12 @@ func New(s *store.Store, logger *slog.Logger) *Daemon {
 		logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 	}
 	return &Daemon{
-		store:       s,
-		logger:      logger,
-		zens:        make(map[string]*zenInfo),
-		knownTokens: make(map[string]bool),
-		crawlNow:    make(chan struct{}, 1),
-		done:        make(chan struct{}),
-		nameCache:   make(map[core.Identity]string),
+		store:     s,
+		logger:    logger,
+		zens:      make(map[string]*zenInfo),
+		crawlNow:  make(chan struct{}, 1),
+		done:      make(chan struct{}),
+		nameCache: make(map[core.Identity]string),
 	}
 }
 
@@ -622,19 +614,24 @@ func (d *Daemon) Start(socketPath string) error {
 	return nil
 }
 
-// rehydrateZens loads the persisted routing bindings (identity -> token)
-// into the in-memory zens map. Called from Start so the known network is
-// visible to the zens RPC right after a restart, instead of appearing empty
-// until the head/tail lanes redial each token. Tokens learned only through
-// zen exchange are not persisted, so they are not restored here; they are
-// relearned on the next exchange.
+// rehydrateZens loads the persisted network into the in-memory zens map:
+// the routing bindings (identity -> token) as connecting entries, and the
+// persisted token LRU as discovered entries. Called from Start so the known
+// network is visible to the zens RPC right after a restart, instead of
+// appearing empty until the head/tail lanes redial or an exchange relearns
+// each token.
 func (d *Daemon) rehydrateZens() {
 	routing, err := d.store.AllRouting()
 	if err != nil {
 		d.logger.Warn("rehydrate zens: read routing", "err", err)
 		return
 	}
-	if len(routing) == 0 {
+	tokens, err := d.store.KnownTokens()
+	if err != nil {
+		tokens = nil
+		d.logger.Warn("rehydrate zens: read known tokens", "err", err)
+	}
+	if len(routing) == 0 && len(tokens) == 0 {
 		return
 	}
 	d.mu.Lock()
@@ -654,6 +651,21 @@ func (d *Daemon) rehydrateZens() {
 		if v, _ := d.store.IsVerified(id); v {
 			d.zens[tok].Verified = true
 		}
+	}
+	// Tokens persisted by the LRU but not bound in routing were learned
+	// through zen exchange; restore them as discovered entries.
+	routed := make(map[string]bool, len(routing))
+	for _, tok := range routing {
+		routed[tok] = true
+	}
+	for _, tok := range tokens {
+		if routed[tok] {
+			continue
+		}
+		if _, exists := d.zens[tok]; exists {
+			continue
+		}
+		d.zens[tok] = &zenInfo{ID: tok, Kind: "native_zen", Status: "discovered"}
 	}
 	d.mu.Unlock()
 }
@@ -1460,9 +1472,9 @@ func (d *Daemon) followByToken(token string, kp *core.KeyPair) Response {
 	if err := d.store.PutRouting(zenID, token); err != nil {
 		return Response{Error: fmt.Sprintf("routing: %s", err)}
 	}
-	d.mu.Lock()
-	d.knownTokens[token] = true
-	d.mu.Unlock()
+	if err := d.learnToken(token); err != nil {
+		d.logger.Warn("learn token failed", "token", token, "err", err)
+	}
 	resp := d.writeFollow([32]byte(pub), kp)
 	if resp.Error != "" {
 		return resp
@@ -1565,6 +1577,13 @@ func (d *Daemon) connectAndSync(ctx context.Context, token string) {
 			d.logger.Warn("routing bind failed", "zen", zenID, "err", err)
 		}
 	}
+	// A successful session is a token mention: refresh it so tokens we
+	// actually talk to stay hot in the persisted token LRU.
+	if err == nil {
+		if lerr := d.learnToken(token); lerr != nil {
+			d.logger.Warn("learn dialed token failed", "token", token, "err", lerr)
+		}
+	}
 	d.logger.Info("sync round done", "token", token, "zen", zenID, "merged", merged)
 }
 
@@ -1584,6 +1603,17 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 		d.logger.Info("bootstrap verified", "seed_zens", len(bf.SeedZens))
 	} else {
 		d.logger.Info("bootstrap loaded (no verification key)", "seed_zens", len(bf.SeedZens))
+	}
+	// Persist the seed token set: bootstrap tokens are held by the
+	// token LRU's keep predicate and survive any eviction pressure.
+	seedTokens := make([]string, 0, len(bf.SeedZens))
+	for _, sp := range bf.SeedZens {
+		if sp.Token != "" {
+			seedTokens = append(seedTokens, sp.Token)
+		}
+	}
+	if err := d.store.PutBootstrapTokens(seedTokens); err != nil {
+		d.logger.Warn("persist bootstrap tokens failed", "err", err)
 	}
 	// Seed the crawler from crawl_seeds (section 9.3). The crawler walks
 	// the follow graph, fetching Profile logs only. Crawl seeds can be
@@ -1620,8 +1650,8 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 
 	// Follow each seed. Skip check is "not followed yet", not "token
 	// known": following one seed exchanges zen lists, which adds the
-	// other seeds to knownTokens, and skipping known tokens would drop
-	// them from the follow pass.
+	// other seeds to the token cache, and skipping known tokens would
+	// drop them from the follow pass.
 	var pending []bootstrap.SeedZen
 	for _, sp := range bf.SeedZens {
 		if sp.Token != "" {
@@ -1683,12 +1713,19 @@ func (d *Daemon) dialBootstrapSeeds(path string, verifyKey ed25519.PublicKey) {
 // carries the identity and name when they are known, so the receiver can
 // display a discovered zen by name without dialing it.
 func (d *Daemon) knownRefsList() []syncproto.ZenRef {
-	d.mu.Lock()
 	ownID, _, _ := d.store.Identity()
-	d.mu.Unlock()
-	out := make([]syncproto.ZenRef, 0, len(d.knownTokens)+1)
+	tokens, err := d.store.KnownTokens()
+	if err != nil {
+		d.logger.Warn("known tokens read failed", "err", err)
+		tokens = nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	out := make([]syncproto.ZenRef, 0, len(tokens)+1)
+	ownAddr := ""
 	if d.tcListener != nil {
-		ref := syncproto.ZenRef{Token: string(d.tcListener.Addr())}
+		ownAddr = string(d.tcListener.Addr())
+		ref := syncproto.ZenRef{Token: ownAddr}
 		if ownID != "" {
 			ref.Identity = ownID
 			if name, _ := d.store.DisplayName(ownID); name != "" {
@@ -1697,8 +1734,8 @@ func (d *Daemon) knownRefsList() []syncproto.ZenRef {
 		}
 		out = append(out, ref)
 	}
-	for tok := range d.knownTokens {
-		if d.tcListener != nil && tok == string(d.tcListener.Addr()) {
+	for _, tok := range tokens {
+		if tok == ownAddr {
 			continue
 		}
 		ref := syncproto.ZenRef{Token: tok}
@@ -1722,22 +1759,32 @@ func (d *Daemon) knownRefsList() []syncproto.ZenRef {
 	return out
 }
 
+// learnToken records a token mention in the persisted token LRU, refreshing
+// its last-mention time. Called after every successful session, so tokens
+// held hot by peers stay hot here too.
+func (d *Daemon) learnToken(token string) error {
+	if token == "" {
+		return nil
+	}
+	return d.store.LearnToken(token, time.Now().UnixNano())
+}
+
 // learnZenRef records a zen ref learned through zen exchange. The token is
-// added to knownTokens (for zen-exchange offers and dedup) and the zens map
-// (for display), but NOT to seedZens, so it is not auto-dialed. When the ref
-// carries an identity, it seeds the crawler so the ProfileLog is fetched
-// authoritatively on the next crawl, and the name hint is stored for display
-// until the crawl confirms it. Dialing a discovered zen requires explicit
-// intent: a follow by token or a follow-resolved dial.
+// added to the persisted token LRU (for zen-exchange offers and dedup) and
+// the zens map (for display), but NOT to the auto-dial set, so it is not
+// auto-dialed. When the ref carries an identity, it seeds the crawler so
+// the ProfileLog is fetched authoritatively on the next crawl, and the
+// name hint is stored for display until the crawl confirms it. Dialing a
+// discovered zen requires explicit intent: a follow by token or a
+// follow-resolved dial.
 func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
 	if ref.Token == "" {
 		return
 	}
-	d.mu.Lock()
-	already := d.knownTokens[ref.Token]
-	if !already {
-		d.knownTokens[ref.Token] = true
+	if err := d.learnToken(ref.Token); err != nil {
+		d.logger.Warn("learn zen token failed", "token", ref.Token, "err", err)
 	}
+	d.mu.Lock()
 	_, exists := d.zens[ref.Token]
 	d.mu.Unlock()
 	if !exists {

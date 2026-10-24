@@ -568,18 +568,20 @@ func (s *Session) RunListener(r io.Reader, w io.Writer) (int, error) {
 	return merged, nil
 }
 
-// pullLog sends a request for one log and merges the received events. When
-// the session has a cursor source for the authenticated zen, the request
-// carries the stored high-water timestamp so the server sends only newer
-// events; after the pull, the cursor advances to the max timestamp of the
-// events actually received, so a dropped connection re-sends and dedups
-// any events already stored. A zen closing the connection (EOF) before
-// MsgDone is treated as a clean end of stream: events already received are
-// kept and the cursor advances over them.
+// pullLog sends a request for one log and merges the received events. For
+// PostLog, the session uses the stored per-zen cursor so only events newer
+// than the last successful pull are requested, and advances the cursor to
+// the max received timestamp. ProfileLog pulls always request from zero:
+// the tidy ProfileLog is small, and pulling it from zero re-derives the
+// follower map, so a zen that returns after being wiped heals in one
+// session. A zen closing the connection (EOF) before MsgDone is treated as
+// a clean end of stream: events already received are kept and the PostLog
+// cursor advances over them.
 func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int64, author core.Identity) (int, error) {
 	// For the daemon's own pulls (author == ""), use the per-zen cursor so
-	// we request only events newer than the last successful pull.
-	if author == "" && s.cursorZen != "" && s.cursorSource != nil {
+	// we request only events newer than the last successful pull. Applies
+	// to PostLog only; ProfileLog always pulls from zero.
+	if log == core.PostLog && author == "" && s.cursorZen != "" && s.cursorSource != nil {
 		if c, err := s.cursorSource(s.cursorZen, log); err == nil && c > after {
 			after = c
 		}
@@ -647,10 +649,14 @@ func (s *Session) pullLog(r io.Reader, w io.Writer, log core.LogName, after int6
 const cursorSkewWindow = 5 * time.Minute
 
 // advanceCursor records the new high-water timestamp for (zen, log) when
-// the session has a cursor sink. The cursor is set to the max timestamp of
-// received events minus a skew window, or left unchanged when no events
-// arrived.
+// the session has a cursor sink. PostLog only: ProfileLog pulls always
+// request from zero, so no cursor is recorded for them. The cursor is set
+// to the max timestamp of received events minus a skew window, or left
+// unchanged when no events arrived.
 func (s *Session) advanceCursor(log core.LogName, prevAfter, maxTS int64) {
+	if log != core.PostLog {
+		return
+	}
 	if s.cursorZen == "" || s.cursorSink == nil {
 		return
 	}

@@ -167,12 +167,16 @@ func TestSyncFollowers(t *testing.T) {
 	followerA := makeKey(t)
 	followerB := makeKey(t)
 	for _, fkp := range []*core.KeyPair{followerA, followerB} {
+		nonce, err := core.GrindFollowNonce([32]byte(fkp.Public), [32]byte(serverKP.Public))
+		if err != nil {
+			t.Fatalf("grind nonce: %v", err)
+		}
 		se, err := fkp.Sign(core.Event{
 			Kind:      core.KindFollow,
 			Log:       core.ProfileLog,
 			Timestamp: 100,
 			Sequence:  1,
-			Follow:    &core.Follow{TargetPubkey: [32]byte(serverKP.Public)},
+			Follow:    &core.Follow{TargetPubkey: [32]byte(serverKP.Public), Nonce: nonce},
 		})
 		if err != nil {
 			t.Fatalf("Sign: %v", err)

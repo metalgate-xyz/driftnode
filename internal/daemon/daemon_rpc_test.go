@@ -814,12 +814,16 @@ func TestFollowsAndFollowersRPC(t *testing.T) {
 
 	// A follower follows us: store their Follow event via the sync path.
 	followerKP, _ := core.NewKeyPair()
+	followerNonce, err := core.GrindFollowNonce([32]byte(followerKP.Public), [32]byte(ownKP.Public))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	followEvent, err := followerKP.Sign(core.Event{
 		Kind:      core.KindFollow,
 		Log:       core.ProfileLog,
 		Timestamp: 100,
 		Sequence:  1,
-		Follow:    &core.Follow{TargetPubkey: [32]byte(ownKP.Public)},
+		Follow:    &core.Follow{TargetPubkey: [32]byte(ownKP.Public), Nonce: followerNonce},
 	})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)

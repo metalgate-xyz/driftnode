@@ -179,9 +179,13 @@ func TestReplyEvent(t *testing.T) {
 func TestFollowEvent(t *testing.T) {
 	alice, _ := NewKeyPair()
 	bob, _ := NewKeyPair()
+	nonce, err := GrindFollowNonce([32]byte(alice.Public), [32]byte(bob.Public))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	se, err := alice.Sign(Event{
 		Kind: KindFollow, Log: ProfileLog, Timestamp: Now64(), Sequence: 1,
-		Follow: &Follow{TargetPubkey: [32]byte(bob.Public)},
+		Follow: &Follow{TargetPubkey: [32]byte(bob.Public), Nonce: nonce},
 	})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
@@ -302,6 +306,12 @@ func TestSignAcceptsFixedEventsAtCap(t *testing.T) {
 	kp, _ := NewKeyPair()
 	ts := int64(9e18)
 	seq := uint64(0xFFFFFFFFFFFFFFFF)
+	SetFollowWorkBitsForTesting(1)
+	defer SetFollowWorkBitsForTesting(defaultFollowWorkBits)
+	nonce, err := GrindFollowNonce([32]byte(kp.Public), [32]byte{1})
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 
 	cases := []struct {
 		name string
@@ -310,7 +320,7 @@ func TestSignAcceptsFixedEventsAtCap(t *testing.T) {
 	}{
 		{"Like", Event{Kind: KindLike, Log: PostLog, Timestamp: ts, Sequence: seq, Like: &Like{TargetID: EventID{1}}}, CapLike},
 		{"Delete", Event{Kind: KindDelete, Log: PostLog, Timestamp: ts, Sequence: seq, Delete: &Delete{TargetID: EventID{1}}}, CapDelete},
-		{"Follow", Event{Kind: KindFollow, Log: ProfileLog, Timestamp: ts, Sequence: seq, Follow: &Follow{TargetPubkey: [32]byte{1}}}, CapFollow},
+		{"Follow", Event{Kind: KindFollow, Log: ProfileLog, Timestamp: ts, Sequence: seq, Follow: &Follow{TargetPubkey: [32]byte{1}, Nonce: nonce}}, CapFollow},
 		{"Unfollow", Event{Kind: KindUnfollow, Log: ProfileLog, Timestamp: ts, Sequence: seq, Follow: &Follow{TargetPubkey: [32]byte{1}}}, CapUnfollow},
 	}
 	for _, c := range cases {

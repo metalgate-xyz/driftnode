@@ -477,12 +477,16 @@ func TestFollowsAndFollowersOffline(t *testing.T) {
 	}
 	followerKP, _ := core.NewKeyPair()
 	ownPub, _ := ownID.PubkeyBytes()
+	followerNonce, err := core.GrindFollowNonce([32]byte(followerKP.Public), [32]byte(ownPub))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	followEvent, err := followerKP.Sign(core.Event{
 		Kind:      core.KindFollow,
 		Log:       core.ProfileLog,
 		Timestamp: 100,
 		Sequence:  1,
-		Follow:    &core.Follow{TargetPubkey: [32]byte(ownPub)},
+		Follow:    &core.Follow{TargetPubkey: [32]byte(ownPub), Nonce: followerNonce},
 	})
 	if err != nil {
 		t.Fatalf("sign follow: %v", err)

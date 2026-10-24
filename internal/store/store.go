@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"driftnode/internal/core"
@@ -48,6 +49,9 @@ var (
 	bucketEventRef    = []byte("eventref")    // composite TargetEventID+SourceEventID -> source author + kind byte
 	bucketCrawlLRU    = []byte("crawllru")    // composite int64BE(touchedNs)+Identity -> presence; crawl cache LRU
 	bucketCrawlTS     = []byte("crawlts")     // Identity -> int64BE last-touched ns; reverse index for crawl LRU touch
+	bucketTokenLRU    = []byte("tokenlru")    // composite int64BE(touchedNs)+token -> presence; discovered-token LRU
+	bucketTokenTS     = []byte("tokents")     // token -> int64BE last-touched ns; reverse index for token LRU touch
+	bucketBootstrapTk = []byte("bootstraptk") // discovered tokens learned from the bootstrap file; never evicted
 	bucketSeq         = []byte("seq")         // per-log monotonic sequence counter (uint64 BE), never decreases
 )
 
@@ -103,6 +107,13 @@ type Store struct {
 	path  string
 	posts *postQueue
 
+	// followersNeedsRebuild flags that the follower map and its count may
+	// be stale: set at open (the map is derived, not trusted from disk)
+	// and whenever an author bucket is deleted wholesale by crawl eviction.
+	// Only cleared inside the write transaction that recomputed the map,
+	// so the flag decision serializes with every ingest.
+	followersNeedsRebuild atomic.Bool
+
 	// retention is the PostLog retention window. A non-zero value drops
 	// remote PostLog events older than now-retention at ingest and prunes
 	// aged events from the remote bucket. Zero retains everything (the
@@ -124,6 +135,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open bbolt: %w", err)
 	}
 	s := &Store{db: db, path: path, retention: retentionFromEnv()}
+	s.followersNeedsRebuild.Store(true)
 	if err := s.initBuckets(); err != nil {
 		db.Close()
 		return nil, err
@@ -184,7 +196,7 @@ func (s *Store) Path() string { return s.path }
 
 func (s *Store) initBuckets() error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef, bucketCrawlLRU, bucketCrawlTS, bucketSeq} {
+		for _, b := range [][]byte{bucketMeta, bucketKey, bucketOwn, bucketRemote, bucketMedia, bucketRouting, bucketVerified, bucketFollowState, bucketTransport, bucketCursor, bucketWeight, bucketRateSecond, bucketEventIndex, bucketEventRef, bucketCrawlLRU, bucketCrawlTS, bucketTokenLRU, bucketTokenTS, bucketBootstrapTk, bucketSeq} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return fmt.Errorf("create bucket %q: %w", b, err)
 			}
@@ -385,6 +397,9 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 	if len(canon) > core.CapForKind(se.Event.Kind) {
 		return false, s.flagAuthor(se.Author)
 	}
+	if !hasRequiredFollowWork(se) {
+		return false, s.flagAuthor(se.Author)
+	}
 	if se.Event.Timestamp > s.now64()+core.MaxFutureSkew.Nanoseconds() {
 		return false, nil
 	}
@@ -436,6 +451,18 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 				}
 				return nil
 			}
+			// Follower-map cap: a Follow targeting this zen past the
+			// follower cap is dropped without flagging, since the author
+			// side cannot enforce in-degree.
+			if se.Event.Kind == core.KindFollow && se.Event.Follow != nil {
+				ownPub, err := ownPubkeyInTx(tx)
+				if err != nil {
+					return err
+				}
+				if se.Event.Follow.TargetPubkey == ownPub && followerCountTx(tx) >= followerCap {
+					return nil
+				}
+			}
 		}
 		// Existence gate: a PostLog referencing event (Like, Reply, Delete)
 		// is stored only if its target exists in the local index.
@@ -471,6 +498,19 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 		inserted = true
 		if err := authorBucket.Put(id[:], eventBytes); err != nil {
 			return err
+		}
+		if se.Event.Log == core.ProfileLog {
+			// Follower-map maintenance for a newly stored Follow or
+			// Unfollow targeting the local identity. When a rebuild is
+			// pending, the rebuild itself replays this event from zero,
+			// so the incremental apply is skipped.
+			if s.followersNeedsRebuild.Load() {
+				if err := s.rebuildFollowersTx(tx); err != nil {
+					return fmt.Errorf("rebuild follower map: %w", err)
+				}
+			} else if err := applyFollowMapTx(tx, se); err != nil {
+				return fmt.Errorf("follower map: %w", err)
+			}
 		}
 		if se.Event.Log != core.PostLog {
 			return nil
@@ -508,6 +548,9 @@ func (s *Store) CrawledEvents(author core.Identity) ([]core.SignedEvent, error) 
 			return nil
 		}
 		return authorBucket.ForEach(func(k, v []byte) error {
+			if !isEventKey(k) {
+				return nil
+			}
 			var se core.SignedEvent
 			if err := core.CanonicalDecode(v, &se); err != nil {
 				return fmt.Errorf("decode event at %x: %w", k, err)
@@ -680,6 +723,9 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 	if len(canon) > core.CapForKind(se.Event.Kind) {
 		return s.flagAuthor(author)
 	}
+	if !hasRequiredFollowWork(se) {
+		return s.flagAuthor(author)
+	}
 	id, err := se.ID()
 	if err != nil {
 		return fmt.Errorf("event id: %w", err)
@@ -711,7 +757,33 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 		if count > core.MaxFollows {
 			return flagAuthorTx(tx, author)
 		}
-		return authorBucket.Put(id[:], eventBytes)
+		// Follower-map cap: a Follow targeting this zen past the follower
+		// cap is dropped without flagging, since the author side cannot
+		// enforce in-degree.
+		if se.Event.Kind == core.KindFollow && se.Event.Follow != nil {
+			ownPub, err := ownPubkeyInTx(tx)
+			if err != nil {
+				return err
+			}
+			if se.Event.Follow.TargetPubkey == ownPub && followerCountTx(tx) >= followerCap {
+				return nil
+			}
+		}
+		if err := authorBucket.Put(id[:], eventBytes); err != nil {
+			return err
+		}
+		// Follower-map maintenance: a crawled Follow targeting this zen
+		// counts as an observation, same as the sync path.
+		if se.Event.Log == core.ProfileLog {
+			if s.followersNeedsRebuild.Load() {
+				if err := s.rebuildFollowersTx(tx); err != nil {
+					return fmt.Errorf("rebuild follower map: %w", err)
+				}
+			} else if err := applyFollowMapTx(tx, se); err != nil {
+				return fmt.Errorf("follower map: %w", err)
+			}
+		}
+		return nil
 	})
 }
 
@@ -725,6 +797,9 @@ func (s *Store) CrawledProfiles(author core.Identity) ([]core.SignedEvent, error
 			return nil
 		}
 		return authorBucket.ForEach(func(k, v []byte) error {
+			if !isEventKey(k) {
+				return nil
+			}
 			var se core.SignedEvent
 			if err := core.CanonicalDecode(v, &se); err != nil {
 				return nil
@@ -931,6 +1006,9 @@ func (s *Store) gatherWeightInputs() (*weight.Inputs, error) {
 				return nil
 			}
 			return ab.ForEach(func(k, v []byte) error {
+				if !isEventKey(k) {
+					return nil
+				}
 				var se core.SignedEvent
 				if err := core.CanonicalDecode(v, &se); err != nil {
 					return nil
@@ -1029,7 +1107,13 @@ func (s *Store) ReceivedFollowers() ([]core.Identity, error) {
 	}
 	var ownArr [32]byte
 	copy(ownArr[:], ownPub)
-	seen := make(map[core.Identity]bool)
+	if err := s.ensureFollowersReady(); err != nil {
+		return nil, err
+	}
+	// Follower-map read: one point lookup per tracked author bucket, so
+	// the cost grows with the number of authors, not with stored events.
+	key := followMapKey(ownArr)
+	var out []core.Identity
 	err = s.db.View(func(tx *bolt.Tx) error {
 		fb := tx.Bucket(bucketRemote)
 		return fb.ForEach(func(authorKey, _ []byte) error {
@@ -1037,29 +1121,13 @@ func (s *Store) ReceivedFollowers() ([]core.Identity, error) {
 			if authorBucket == nil {
 				return nil
 			}
-			return authorBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return nil
-				}
-				if se.Event.Kind != core.KindFollow || se.Event.Follow == nil {
-					return nil
-				}
-				if se.Event.Follow.TargetPubkey == ownArr {
-					seen[se.Author] = true
-				}
-				return nil
-			})
+			if authorBucket.Get(key) != nil {
+				out = append(out, core.Identity(authorKey))
+			}
+			return nil
 		})
 	})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]core.Identity, 0, len(seen))
-	for id := range seen {
-		out = append(out, id)
-	}
-	return out, nil
+	return out, err
 }
 
 // ReceivedFollowEvents returns the Follow events targeting the local
@@ -1081,6 +1149,12 @@ func (s *Store) ReceivedFollowEvents() ([]core.SignedEvent, error) {
 	}
 	var ownArr [32]byte
 	copy(ownArr[:], ownPub)
+	if err := s.ensureFollowersReady(); err != nil {
+		return nil, err
+	}
+	// Follower-map read: the map record holds the winning Follow event's
+	// ID, so the evidence bytes are fetched by point lookup per follower.
+	key := followMapKey(ownArr)
 	var out []core.SignedEvent
 	err = s.db.View(func(tx *bolt.Tx) error {
 		fb := tx.Bucket(bucketRemote)
@@ -1089,17 +1163,22 @@ func (s *Store) ReceivedFollowEvents() ([]core.SignedEvent, error) {
 			if authorBucket == nil {
 				return nil
 			}
-			return authorBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return nil
-				}
-				if se.Event.Kind == core.KindFollow && se.Event.Follow != nil &&
-					se.Event.Follow.TargetPubkey == ownArr {
-					out = append(out, se)
-				}
+			raw := authorBucket.Get(key)
+			if raw == nil {
 				return nil
-			})
+			}
+			var evID [32]byte
+			copy(evID[:], raw)
+			evBytes := authorBucket.Get(evID[:])
+			if evBytes == nil {
+				return nil
+			}
+			var se core.SignedEvent
+			if err := core.CanonicalDecode(evBytes, &se); err != nil {
+				return nil
+			}
+			out = append(out, se)
+			return nil
 		})
 	})
 	return out, err
@@ -1302,6 +1381,9 @@ func (s *Store) AllPostsOneTx() ([]core.SignedEvent, error) {
 				continue
 			}
 			if err := authorBucket.ForEach(func(k, v []byte) error {
+				if !isEventKey(k) {
+					return nil
+				}
 				var se core.SignedEvent
 				if err := core.CanonicalDecode(v, &se); err != nil {
 					return fmt.Errorf("decode remote event at %x: %w", k, err)
@@ -1443,6 +1525,9 @@ func (s *Store) LikesForPosts(targetIDs []core.EventID) ([]core.SignedEvent, err
 				return nil
 			}
 			return authorBucket.ForEach(func(k, v []byte) error {
+				if !isEventKey(k) {
+					return nil
+				}
 				var se core.SignedEvent
 				if err := core.CanonicalDecode(v, &se); err != nil {
 					return nil
@@ -1551,6 +1636,9 @@ func remoteFollowCount(tx *bolt.Tx, author core.Identity, candidate *core.Signed
 	var events []core.SignedEvent
 	if ab := tx.Bucket(bucketRemote).Bucket([]byte(author)); ab != nil {
 		if err := ab.ForEach(func(k, v []byte) error {
+			if !isEventKey(k) {
+				return nil
+			}
 			var se core.SignedEvent
 			if err := core.CanonicalDecode(v, &se); err != nil {
 				return nil
@@ -1700,6 +1788,9 @@ func (s *Store) PruneRemotePosts() (int, error) {
 			}
 			var stale [][]byte
 			if err := authorBucket.ForEach(func(k, v []byte) error {
+				if !isEventKey(k) {
+					return nil
+				}
 				var se core.SignedEvent
 				if err := core.CanonicalDecode(v, &se); err != nil {
 					return nil

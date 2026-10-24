@@ -258,9 +258,17 @@ func TestFollowGraph(t *testing.T) {
 	target2, _, _ := ed25519.GenerateKey(nil)
 
 	sign := func(kind core.Kind, seq uint64, pub []byte) *core.SignedEvent {
+		var nonce uint64
+		if kind == core.KindFollow {
+			n, err := core.GrindFollowNonce([32]byte(kp.Public), [32]byte(pub))
+			if err != nil {
+				t.Fatalf("grind nonce: %v", err)
+			}
+			nonce = n
+		}
 		se, err := kp.Sign(core.Event{
 			Kind: kind, Log: core.ProfileLog, Timestamp: core.Now64(), Sequence: seq,
-			Follow: &core.Follow{TargetPubkey: [32]byte(pub)},
+			Follow: &core.Follow{TargetPubkey: [32]byte(pub), Nonce: nonce},
 		})
 		if err != nil {
 			t.Fatalf("Sign: %v", err)
@@ -322,9 +330,13 @@ func TestAllPostsScopedToFollowGraph(t *testing.T) {
 
 	// Follow alice only.
 	alicePub, _ := alice.Identity().PubkeyBytes()
+	followNonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(alicePub))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	followAlice, err := me.Sign(core.Event{
 		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 1, Sequence: 1,
-		Follow: &core.Follow{TargetPubkey: [32]byte(alicePub)},
+		Follow: &core.Follow{TargetPubkey: [32]byte(alicePub), Nonce: followNonce},
 	})
 	if err != nil {
 		t.Fatalf("sign follow: %v", err)
@@ -408,9 +420,13 @@ func TestAllPostsOneTxMatchesAllPosts(t *testing.T) {
 	}
 	alice, _ := core.NewKeyPair()
 	alicePub, _ := alice.Identity().PubkeyBytes()
+	followNonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(alicePub))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	followAlice, err := me.Sign(core.Event{
 		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 1, Sequence: 1,
-		Follow: &core.Follow{TargetPubkey: [32]byte(alicePub)},
+		Follow: &core.Follow{TargetPubkey: [32]byte(alicePub), Nonce: followNonce},
 	})
 	if err != nil {
 		t.Fatalf("sign follow: %v", err)
@@ -479,12 +495,16 @@ func makeFollowEventFor(t *testing.T, follower *core.KeyPair, seq uint64, target
 	if err != nil {
 		t.Fatalf("target pubkey: %v", err)
 	}
+	nonce, err := core.GrindFollowNonce([32]byte(follower.Public), [32]byte(pub))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	se, err := follower.Sign(core.Event{
 		Kind:      core.KindFollow,
 		Log:       core.ProfileLog,
 		Timestamp: core.Now64(),
 		Sequence:  seq,
-		Follow:    &core.Follow{TargetPubkey: [32]byte(pub)},
+		Follow:    &core.Follow{TargetPubkey: [32]byte(pub), Nonce: nonce},
 	})
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
@@ -770,16 +790,24 @@ func TestOutboundReplies(t *testing.T) {
 
 	// Follow Alice and Bob so they are in the follow graph. The metric
 	// counts replies only toward currently-followed authors.
+	aliceNonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(alice.Public))
+	if err != nil {
+		t.Fatalf("grind alice nonce: %v", err)
+	}
 	followAlice, _ := me.Sign(core.Event{
 		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 50, Sequence: 1,
-		Follow: &core.Follow{TargetPubkey: [32]byte(alice.Public)},
+		Follow: &core.Follow{TargetPubkey: [32]byte(alice.Public), Nonce: aliceNonce},
 	})
 	if err := s.AppendOwnEvent(core.ProfileLog, followAlice); err != nil {
 		t.Fatalf("append follow alice: %v", err)
 	}
+	bobNonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(bob.Public))
+	if err != nil {
+		t.Fatalf("grind bob nonce: %v", err)
+	}
 	followBob, _ := me.Sign(core.Event{
 		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 51, Sequence: 2,
-		Follow: &core.Follow{TargetPubkey: [32]byte(bob.Public)},
+		Follow: &core.Follow{TargetPubkey: [32]byte(bob.Public), Nonce: bobNonce},
 	})
 	if err := s.AppendOwnEvent(core.ProfileLog, followBob); err != nil {
 		t.Fatalf("append follow bob: %v", err)
@@ -874,9 +902,13 @@ func TestOutboundLikes(t *testing.T) {
 
 	// Follow Alice and Bob so they are in the follow graph.
 	for _, target := range [][]byte{alice.Public, bob.Public} {
+		nonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(target))
+		if err != nil {
+			t.Fatalf("grind nonce: %v", err)
+		}
 		follow, _ := me.Sign(core.Event{
 			Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 50, Sequence: 1,
-			Follow: &core.Follow{TargetPubkey: [32]byte(target)},
+			Follow: &core.Follow{TargetPubkey: [32]byte(target), Nonce: nonce},
 		})
 		if err := s.AppendOwnEvent(core.ProfileLog, follow); err != nil {
 			t.Fatalf("append follow: %v", err)
@@ -1181,9 +1213,13 @@ func TestRecomputeWeights(t *testing.T) {
 	}
 
 	// Carol follows me back, so she is reciprocal.
+	carolNonce, err := core.GrindFollowNonce([32]byte(carol.Public), [32]byte(me.Public))
+	if err != nil {
+		t.Fatalf("grind carol nonce: %v", err)
+	}
 	carolFollow, _ := carol.Sign(core.Event{
 		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 60, Sequence: 1,
-		Follow: &core.Follow{TargetPubkey: [32]byte(me.Public)},
+		Follow: &core.Follow{TargetPubkey: [32]byte(me.Public), Nonce: carolNonce},
 	})
 	if _, err := s.PutRemoteEvent(carolFollow, 1); err != nil {
 		t.Fatalf("put carol follow: %v", err)
@@ -1670,9 +1706,13 @@ func TestReceiverProfileLogExemptFromRate(t *testing.T) {
 	target, _ := core.NewKeyPair()
 
 	for i := 0; i < 5; i++ {
+		nonce, err := core.GrindFollowNonce([32]byte(follower.Public), [32]byte(target.Public))
+		if err != nil {
+			t.Fatalf("grind nonce %d: %v", i, err)
+		}
 		se, _ := follower.Sign(core.Event{
 			Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 5e9 + int64(i), Sequence: uint64(i + 1),
-			Follow: &core.Follow{TargetPubkey: [32]byte(target.Public)},
+			Follow: &core.Follow{TargetPubkey: [32]byte(target.Public), Nonce: nonce},
 		})
 		if _, err := s.PutRemoteEvent(se, 1); err != nil {
 			t.Fatalf("put follow %d: %v", i, err)
@@ -2456,12 +2496,16 @@ func TestPruneDropsLikeTargetingPrunedPost(t *testing.T) {
 // signRemoteFollowFor signs a KindFollow event by author targeting target.
 func signRemoteFollowFor(t *testing.T, author *core.KeyPair, seq uint64, ts int64, target [32]byte) *core.SignedEvent {
 	t.Helper()
+	nonce, err := core.GrindFollowNonce([32]byte(author.Public), target)
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
 	se, err := author.Sign(core.Event{
 		Kind:      core.KindFollow,
 		Log:       core.ProfileLog,
 		Timestamp: ts,
 		Sequence:  seq,
-		Follow:    &core.Follow{TargetPubkey: target},
+		Follow:    &core.Follow{TargetPubkey: target, Nonce: nonce},
 	})
 	if err != nil {
 		t.Fatalf("sign follow: %v", err)
@@ -2473,8 +2517,12 @@ func signRemoteFollowFor(t *testing.T, author *core.KeyPair, seq uint64, ts int6
 // own ProfileLog bucket in a single transaction. Used to seed the author-side
 // follow cap boundary without the O(n^2) cost of SignAndAppend projecting the
 // log on every append. The boundary call itself goes through SignAndAppend.
+// Difficulty is lowered for the fixture so grinding n nonces stays fast; the
+// work recipe itself is covered by the core follow-work tests.
 func bulkOwnFollows(t *testing.T, s *Store, kp *core.KeyPair, n int) {
 	t.Helper()
+	core.SetFollowWorkBitsForTesting(1)
+	defer core.SetFollowWorkBitsForTesting(core.DefaultFollowWorkBits())
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		logBucket, err := tx.Bucket(bucketOwn).CreateBucketIfNotExists([]byte(core.ProfileLog))
 		if err != nil {
@@ -2482,12 +2530,16 @@ func bulkOwnFollows(t *testing.T, s *Store, kp *core.KeyPair, n int) {
 		}
 		for i := 0; i < n; i++ {
 			target, _ := core.NewKeyPair()
+			nonce, err := core.GrindFollowNonce([32]byte(kp.Public), [32]byte(target.Public))
+			if err != nil {
+				return err
+			}
 			se, err := kp.Sign(core.Event{
 				Kind:      core.KindFollow,
 				Log:       core.ProfileLog,
 				Timestamp: int64(5e9 + i),
 				Sequence:  uint64(i + 1),
-				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public)},
+				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public), Nonce: nonce},
 			})
 			if err != nil {
 				return err
@@ -2515,9 +2567,12 @@ func bulkOwnFollows(t *testing.T, s *Store, kp *core.KeyPair, n int) {
 // remote author's sub-bucket in a single transaction. Used to seed the
 // receiver-side follow cap boundary without the O(n^2) cost of PutRemoteEvent
 // projecting the log on every event. The boundary call itself goes through
-// PutRemoteEvent (or PutCrawledProfile).
+// PutRemoteEvent (or PutCrawledProfile). Difficulty is lowered for the
+// fixture so grinding n nonces stays fast.
 func bulkRemoteFollows(t *testing.T, s *Store, author *core.KeyPair, n int) {
 	t.Helper()
+	core.SetFollowWorkBitsForTesting(1)
+	defer core.SetFollowWorkBitsForTesting(core.DefaultFollowWorkBits())
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		ab, err := tx.Bucket(bucketRemote).CreateBucketIfNotExists([]byte(author.Identity()))
 		if err != nil {
@@ -2525,12 +2580,16 @@ func bulkRemoteFollows(t *testing.T, s *Store, author *core.KeyPair, n int) {
 		}
 		for i := 0; i < n; i++ {
 			target, _ := core.NewKeyPair()
+			nonce, err := core.GrindFollowNonce([32]byte(author.Public), [32]byte(target.Public))
+			if err != nil {
+				return err
+			}
 			se, err := author.Sign(core.Event{
 				Kind:      core.KindFollow,
 				Log:       core.ProfileLog,
 				Timestamp: int64(5e9 + i),
 				Sequence:  uint64(i + 1),
-				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public)},
+				Follow:    &core.Follow{TargetPubkey: [32]byte(target.Public), Nonce: nonce},
 			})
 			if err != nil {
 				return err
@@ -2662,6 +2721,8 @@ func TestReceiverFollowCapFlagsExceeding(t *testing.T) {
 func TestReceiverFollowCapNormalAuthorStored(t *testing.T) {
 	s := newTestStore(t)
 	author, _ := core.NewKeyPair()
+	core.SetFollowWorkBitsForTesting(1)
+	defer core.SetFollowWorkBitsForTesting(core.DefaultFollowWorkBits())
 
 	for i := 0; i < 150; i++ {
 		target, _ := core.NewKeyPair()

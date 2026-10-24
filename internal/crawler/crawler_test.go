@@ -40,15 +40,26 @@ func newTestStore(t *testing.T) *store.Store {
 	return s
 }
 
-func makeFollowEvent(kp *core.KeyPair, seq uint64, target core.Identity) core.SignedEvent {
-	pub, _ := target.PubkeyBytes()
-	se, _ := kp.Sign(core.Event{
+func makeFollowEvent(t *testing.T, kp *core.KeyPair, seq uint64, target core.Identity) core.SignedEvent {
+	t.Helper()
+	pub, err := target.PubkeyBytes()
+	if err != nil {
+		t.Fatalf("target pubkey: %v", err)
+	}
+	nonce, err := core.GrindFollowNonce([32]byte(kp.Public), [32]byte(pub))
+	if err != nil {
+		t.Fatalf("grind nonce: %v", err)
+	}
+	se, err := kp.Sign(core.Event{
 		Kind:      core.KindFollow,
 		Log:       core.ProfileLog,
 		Timestamp: int64(seq),
 		Sequence:  seq,
-		Follow:    &core.Follow{TargetPubkey: [32]byte(pub)},
+		Follow:    &core.Follow{TargetPubkey: [32]byte(pub), Nonce: nonce},
 	})
+	if err != nil {
+		t.Fatalf("sign follow: %v", err)
+	}
 	return *se
 }
 
@@ -60,8 +71,8 @@ func TestCrawlBasic(t *testing.T) {
 
 	// Alice follows Bob, Bob follows Carol.
 	fetcher := &fakeFetcher{profiles: map[core.Identity][]core.SignedEvent{
-		alice.Identity(): {makeFollowEvent(alice, 1, bob.Identity())},
-		bob.Identity():   {makeFollowEvent(bob, 1, carol.Identity())},
+		alice.Identity(): {makeFollowEvent(t, alice, 1, bob.Identity())},
+		bob.Identity():   {makeFollowEvent(t, bob, 1, carol.Identity())},
 		carol.Identity(): {},
 	}}
 
@@ -88,8 +99,8 @@ func TestCrawlDepthLimited(t *testing.T) {
 	carol, _ := core.NewKeyPair()
 
 	fetcher := &fakeFetcher{profiles: map[core.Identity][]core.SignedEvent{
-		alice.Identity(): {makeFollowEvent(alice, 1, bob.Identity())},
-		bob.Identity():   {makeFollowEvent(bob, 1, carol.Identity())},
+		alice.Identity(): {makeFollowEvent(t, alice, 1, bob.Identity())},
+		bob.Identity():   {makeFollowEvent(t, bob, 1, carol.Identity())},
 		carol.Identity(): {},
 	}}
 
@@ -110,8 +121,8 @@ func TestCrawlDedup(t *testing.T) {
 
 	fetcher := &fakeFetcher{profiles: map[core.Identity][]core.SignedEvent{
 		alice.Identity(): {
-			makeFollowEvent(alice, 1, bob.Identity()),
-			makeFollowEvent(alice, 2, bob.Identity()), // duplicate follow
+			makeFollowEvent(t, alice, 1, bob.Identity()),
+			makeFollowEvent(t, alice, 2, bob.Identity()), // duplicate follow
 		},
 		bob.Identity(): {},
 	}}
@@ -132,7 +143,7 @@ func TestCrawlStoresProfiles(t *testing.T) {
 	bob, _ := core.NewKeyPair()
 
 	fetcher := &fakeFetcher{profiles: map[core.Identity][]core.SignedEvent{
-		alice.Identity(): {makeFollowEvent(alice, 1, bob.Identity())},
+		alice.Identity(): {makeFollowEvent(t, alice, 1, bob.Identity())},
 		bob.Identity():   {},
 	}}
 
@@ -160,7 +171,7 @@ func TestCrawlFollowersDirection(t *testing.T) {
 	bob, _ := core.NewKeyPair()
 
 	// Alice follows Bob. Bob follows nobody.
-	aliceFollow := makeFollowEvent(alice, 1, bob.Identity())
+	aliceFollow := makeFollowEvent(t, alice, 1, bob.Identity())
 
 	fetcher := &fakeFetcher{
 		profiles: map[core.Identity][]core.SignedEvent{
@@ -208,8 +219,8 @@ func TestCrawlBothDirectionsDedup(t *testing.T) {
 
 	// Alice follows Bob and Bob follows Alice (mutual). Seeding either one
 	// must visit both exactly once despite two paths between them.
-	aliceFollowsBob := makeFollowEvent(alice, 1, bob.Identity())
-	bobFollowsAlice := makeFollowEvent(bob, 1, alice.Identity())
+	aliceFollowsBob := makeFollowEvent(t, alice, 1, bob.Identity())
+	bobFollowsAlice := makeFollowEvent(t, bob, 1, alice.Identity())
 	fetcher := &fakeFetcher{
 		profiles: map[core.Identity][]core.SignedEvent{
 			alice.Identity(): {aliceFollowsBob},
@@ -248,7 +259,7 @@ func TestCrawlLRUEvictsColdest(t *testing.T) {
 	}
 	for i := 0; i < total-1; i++ {
 		profiles[kps[i].Identity()] = []core.SignedEvent{
-			makeFollowEvent(kps[i], 1, kps[i+1].Identity()),
+			makeFollowEvent(t, kps[i], 1, kps[i+1].Identity()),
 		}
 	}
 	// The last identity follows nobody.

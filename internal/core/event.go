@@ -54,7 +54,7 @@ const (
 	CapLike     = 72
 	CapDelete   = 72
 	CapProfile  = 1024
-	CapFollow   = 75
+	CapFollow   = 86
 	CapUnfollow = 75
 	CapDetail   = 2048
 )
@@ -84,6 +84,12 @@ const MaxFollows = 5000
 // enforces it so a ProfileLog with more than MaxFollows net follows is a
 // protocol violation by a signed key.
 var ErrFollowCapExceeded = errors.New("follow cap exceeded")
+
+// MaxFollowers is the follower-map cap: the smallest power of two above
+// world population. No legitimate node reaches it, so the map is unbounded
+// in practice; an over-cap Follow is dropped at ingest without flagging,
+// since the author side cannot enforce in-degree.
+const MaxFollowers = 1 << 33
 
 // Event is an unsigned event. Its canonical CBOR encoding is what the signature
 // covers and what the event ID hashes. Field order and cbor tag numbers are
@@ -125,9 +131,12 @@ type Detail struct {
 
 // Follow adds an edge to target; Unfollow removes it. Both live in the
 // Profile log because they are metadata about the author's own graph, not
-// content (§9.4).
+// content (§9.4). A Follow carries proof of work: a Nonce, covered by the
+// signature, whose recipe binds the work to the author and target (see
+// followwork.go). An Unfollow carries no work.
 type Follow struct {
 	TargetPubkey [32]byte `cbor:"t"` // raw public key of the followed identity
+	Nonce        uint64   `cbor:"n,omitempty"`
 }
 
 // Post is a content event in the PostLog. A reply is a Post with ParentID set:
@@ -177,6 +186,10 @@ func (k *KeyPair) Sign(ev Event) (*SignedEvent, error) {
 	}
 	if len(canon) > CapForKind(ev.Kind) {
 		return nil, ErrEventOversized
+	}
+	if ev.Kind == KindFollow && ev.Follow != nil &&
+		!VerifyFollowWork([32]byte(k.Public), ev.Follow.TargetPubkey, ev.Follow.Nonce) {
+		return nil, ErrFollowWork
 	}
 	sig := ed25519.Sign(k.Private, canon)
 	return &SignedEvent{

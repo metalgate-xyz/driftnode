@@ -12,6 +12,23 @@ import (
 
 var errStop = errors.New("stop iteration")
 
+// hasRequiredFollowWork reports whether a Follow event carries valid proof of
+// work for its (author, target) pair. A workless Follow is a protocol
+// violation by a signed key, so every remote ingest path drops it and flags
+// the author, same as an oversized event. Non-Follow events pass. Backup
+// import does not re-check work: an imported own log was validated at the
+// original ingest, and the author is the local user.
+func hasRequiredFollowWork(se *core.SignedEvent) bool {
+	if se.Event.Kind != core.KindFollow || se.Event.Follow == nil {
+		return true
+	}
+	authorPub, err := se.Author.PubkeyBytes()
+	if err != nil {
+		return false
+	}
+	return core.VerifyFollowWork([32]byte(authorPub), se.Event.Follow.TargetPubkey, se.Event.Follow.Nonce)
+}
+
 // existingLikeID returns the event ID of a KindLike event by author targeting
 // postID already present in bucket, if any. One Like per author per post: a
 // re-like is silently dropped so the count cannot inflate and a peer cannot
@@ -78,6 +95,15 @@ func (s *Store) existingLikeEventID(kp *core.KeyPair, ev core.Event) (core.Event
 // the tidy log is updated atomically with the new event.
 func (s *Store) stampSignAppend(kp *core.KeyPair, log core.LogName, ev core.Event) (*core.SignedEvent, core.EventID, error) {
 	ev.Log = log
+	if ev.Kind == core.KindFollow && ev.Follow != nil {
+		var authorPub [32]byte
+		copy(authorPub[:], kp.Public)
+		nonce, err := core.GrindFollowNonce(authorPub, ev.Follow.TargetPubkey)
+		if err != nil {
+			return nil, core.EventID{}, fmt.Errorf("grind follow nonce: %w", err)
+		}
+		ev.Follow.Nonce = nonce
+	}
 	var se *core.SignedEvent
 	var id core.EventID
 	err := s.db.Update(func(tx *bolt.Tx) error {
