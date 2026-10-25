@@ -928,7 +928,10 @@ func backupImportCmd() *cobra.Command {
 			if err := core.CanonicalDecode(b, &bd); err != nil {
 				return fmt.Errorf("decode: %w", err)
 			}
-			if err := s.ImportBackup(&bd); err != nil {
+			if passphrase == "" {
+				return fmt.Errorf("--passphrase is required to restore the account keypair")
+			}
+			if err := s.ImportBackup(&bd, passphrase); err != nil {
 				return fmt.Errorf("import: %w", err)
 			}
 			// Restore the transport key so the address token survives the
@@ -950,7 +953,7 @@ func backupImportCmd() *cobra.Command {
 		},
 	}
 	addDBFlag(c)
-	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to decrypt the transport key")
+	c.Flags().StringVarP(&passphrase, "passphrase", "p", "", "passphrase to decrypt the account keypair and transport key from the backup")
 	return c
 }
 

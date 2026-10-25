@@ -25,6 +25,16 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// mustSign signs an event with kp for test fixtures.
+func mustSign(t *testing.T, kp *core.KeyPair, ev core.Event) *core.SignedEvent {
+	t.Helper()
+	se, err := kp.Sign(ev)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	return se
+}
+
 func TestInitIdentityAndReadback(t *testing.T) {
 	s := newTestStore(t)
 	kp, err := core.NewKeyPair()
@@ -182,8 +192,11 @@ func TestExportImportBackup(t *testing.T) {
 
 	// Import into a fresh store and verify the event is there.
 	s2 := newTestStore(t)
-	if err := s2.ImportBackup(bd); err != nil {
+	if err := s2.ImportBackup(bd, "pw"); err != nil {
 		t.Fatalf("ImportBackup: %v", err)
+	}
+	if id, ok, _ := s2.Identity(); !ok || id != kp.Identity() {
+		t.Fatalf("identity not restored: ok=%v got %q", ok, id)
 	}
 	events, _ := s2.OwnEvents(core.PostLog)
 	if len(events) != 1 {
@@ -194,12 +207,146 @@ func TestExportImportBackup(t *testing.T) {
 	}
 
 	// Importing again must not duplicate.
-	if err := s2.ImportBackup(bd); err != nil {
+	if err := s2.ImportBackup(bd, "pw"); err != nil {
 		t.Fatalf("second ImportBackup: %v", err)
 	}
 	events, _ = s2.OwnEvents(core.PostLog)
 	if len(events) != 1 {
 		t.Fatalf("after re-import: want 1 event, got %d", len(events))
+	}
+}
+
+// TestImportBackupRestoresIdentity proves import is a full account restore:
+// on a fresh store the keypair is restored from the backup and the identity
+// becomes readable without any other command.
+func TestImportBackupRestoresIdentity(t *testing.T) {
+	s := newTestStore(t)
+	kp, err := core.NewKeyPair()
+	if err != nil {
+		t.Fatalf("NewKeyPair: %v", err)
+	}
+	enc := core.DefaultKeyEncryption()
+	ek, err := enc.Encrypt(kp.Private, []byte("pw"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	bd, err := s.ExportBackup()
+	if err != nil {
+		t.Fatalf("ExportBackup: %v", err)
+	}
+
+	s2 := newTestStore(t)
+	if err := s2.ImportBackup(bd, "pw"); err != nil {
+		t.Fatalf("ImportBackup: %v", err)
+	}
+	id, ok, err := s2.Identity()
+	if err != nil || !ok {
+		t.Fatalf("identity missing after import: ok=%v err=%v", ok, err)
+	}
+	if id != kp.Identity() {
+		t.Fatalf("restored identity: got %q want %q", id, kp.Identity())
+	}
+	ek2, err := s2.EncryptedKey()
+	if err != nil {
+		t.Fatalf("EncryptedKey after import: %v", err)
+	}
+	priv, err := core.DefaultKeyEncryption().Decrypt(ek2, []byte("pw"))
+	if err != nil {
+		t.Fatalf("restored key does not decrypt with the backup passphrase: %v", err)
+	}
+	if !priv.Equal(kp.Private) {
+		t.Fatal("restored private key does not match the backup key")
+	}
+}
+
+// TestImportBackupWrongPassphraseFails proves an import cannot silently
+// half-restore: the passphrase gates the whole restore.
+func TestImportBackupWrongPassphraseFails(t *testing.T) {
+	s := newTestStore(t)
+	kp, _ := core.NewKeyPair()
+	ek, err := core.DefaultKeyEncryption().Encrypt(kp.Private, []byte("pw"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
+	if err := s.InitIdentity(kp, ek); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	bd, err := s.ExportBackup()
+	if err != nil {
+		t.Fatalf("ExportBackup: %v", err)
+	}
+
+	s2 := newTestStore(t)
+	err = s2.ImportBackup(bd, "wrong")
+	if err == nil {
+		t.Fatal("import with wrong passphrase should fail")
+	}
+	if _, ok, _ := s2.Identity(); ok {
+		t.Fatal("identity must not be set after a failed import")
+	}
+	events, _ := s2.OwnEvents(core.PostLog)
+	if len(events) != 0 {
+		t.Fatalf("no events may be stored after a failed import, got %d", len(events))
+	}
+}
+
+// TestImportBackupRefusesForeignIdentity proves a backup whose events belong
+// to another identity can never be merged into an initialized store: import
+// is a restore of THIS account, not a mechanism to adopt someone else's
+// events.
+func TestImportBackupRefusesForeignIdentity(t *testing.T) {
+	mine := newTestStore(t)
+	mineKP, _ := core.NewKeyPair()
+	mineEK, _ := core.DefaultKeyEncryption().Encrypt(mineKP.Private, []byte("pw"))
+	if err := mine.InitIdentity(mineKP, mineEK); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	if err := mine.AppendOwnEvent(core.PostLog, mustSign(t, mineKP, core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1, Sequence: 1,
+		Post: &core.Post{Text: "mine"},
+	})); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	theirs, _ := core.NewKeyPair()
+	theirsEK, _ := core.DefaultKeyEncryption().Encrypt(theirs.Private, []byte("pw"))
+	theirsStore := newTestStore(t)
+	if err := theirsStore.InitIdentity(theirs, theirsEK); err != nil {
+		t.Fatalf("InitIdentity: %v", err)
+	}
+	if err := theirsStore.AppendOwnEvent(core.PostLog, mustSign(t, theirs, core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1, Sequence: 1,
+		Post: &core.Post{Text: "theirs"},
+	})); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	bd, err := theirsStore.ExportBackup()
+	if err != nil {
+		t.Fatalf("ExportBackup: %v", err)
+	}
+
+	err = mine.ImportBackup(bd, "pw")
+	if err == nil {
+		t.Fatal("importing a foreign-identity backup into an initialized store must be refused")
+	}
+	// The initialized store must be untouched: same identity, same events.
+	id, ok, _ := mine.Identity()
+	if !ok || id != mineKP.Identity() {
+		t.Fatalf("identity altered by refused import: ok=%v got %q", ok, id)
+	}
+	events, _ := mine.OwnEvents(core.PostLog)
+	if len(events) != 1 || events[0].Event.Post.Text != "mine" {
+		t.Fatalf("events altered by refused import: %d events", len(events))
+	}
+	priv, err := core.DefaultKeyEncryption().Decrypt(mineEK, []byte("pw"))
+	if err != nil {
+		t.Fatalf("Decrypt: %v", err)
+	}
+	if !priv.Equal(mineKP.Private) {
+		t.Fatal("key altered by refused import")
 	}
 }
 
@@ -236,7 +383,7 @@ func TestBackupIncludesDetailLog(t *testing.T) {
 
 	// Import into a fresh store and verify the detail event is there.
 	s2 := newTestStore(t)
-	if err := s2.ImportBackup(bd); err != nil {
+	if err := s2.ImportBackup(bd, "pw"); err != nil {
 		t.Fatalf("ImportBackup: %v", err)
 	}
 	events, _ := s2.OwnEvents(core.DetailLog)
@@ -716,7 +863,7 @@ func TestBackupIncludesVerifiedIdentities(t *testing.T) {
 	}
 	// Restore into a fresh store.
 	s2 := newTestStore(t)
-	if err := s2.ImportBackup(bd); err != nil {
+	if err := s2.ImportBackup(bd, "pw"); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	if v, _ := s2.IsVerified(peer.Identity()); !v {
@@ -1380,7 +1527,7 @@ func TestBackupIncludesPinnedIdentities(t *testing.T) {
 	}
 	// Restore into a fresh store.
 	s2 := newTestStore(t)
-	if err := s2.ImportBackup(bd); err != nil {
+	if err := s2.ImportBackup(bd, "pw"); err != nil {
 		t.Fatalf("import: %v", err)
 	}
 	if p, _ := s2.IsPinned(peer.Identity()); !p {

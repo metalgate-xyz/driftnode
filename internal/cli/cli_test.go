@@ -548,7 +548,7 @@ func TestBackupExportImport(t *testing.T) {
 
 	// Import into a fresh store and verify the post survives.
 	dbPath2 := filepath.Join(t.TempDir(), "node.db")
-	_, err = runCLI(t, dbPath2, []string{"backup", "import", backupPath})
+	_, err = runCLI(t, dbPath2, []string{"backup", "import", backupPath, "--passphrase", "testpass"})
 	if err != nil {
 		t.Fatalf("backup import: %v", err)
 	}
@@ -557,6 +557,13 @@ func TestBackupExportImport(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer s.Close()
+	if id, ok, _ := s.Identity(); !ok {
+		t.Fatal("identity missing after backup import")
+	} else if who, err := runCLI(t, dbPath, []string{"whoami"}); err != nil {
+		t.Fatalf("whoami: %v", err)
+	} else if !strings.Contains(string(who), string(id)) {
+		t.Fatalf("imported identity %q does not match the source account %q", id, string(who))
+	}
 	events, err := s.OwnEvents(core.PostLog)
 	if err != nil {
 		t.Fatalf("read events: %v", err)

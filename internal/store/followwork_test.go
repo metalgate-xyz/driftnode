@@ -121,17 +121,22 @@ func TestReceiverStoresWorkedFollow(t *testing.T) {
 }
 
 // TestBackupImportDoesNotRecheckWork verifies a backup containing a workless
-// Follow imports without error: import does not re-check work.
+// Follow imports without error: import restores the account, it does not
+// re-sign or re-check author-side work on events the account already signed.
 func TestBackupImportDoesNotRecheckWork(t *testing.T) {
 	s := newTestStore(t)
 	kp, _ := core.NewKeyPair()
 	workless := signFollowWithoutWork(t, kp, 1, 5e9, [32]byte{9})
+	ek, err := core.DefaultKeyEncryption().Encrypt(kp.Private, []byte("pw"))
+	if err != nil {
+		t.Fatalf("Encrypt: %v", err)
+	}
 
 	bd := &core.BackupData{
+		Key:     ek,
 		OwnLogs: []core.SignedEvent{*workless},
 	}
-	bd.Key = &core.EncryptedKey{}
-	if err := s.ImportBackup(bd); err != nil {
+	if err := s.ImportBackup(bd, "pw"); err != nil {
 		t.Fatalf("ImportBackup with workless follow: %v", err)
 	}
 	events, err := s.OwnEvents(core.ProfileLog)
