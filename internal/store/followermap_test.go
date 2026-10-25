@@ -62,8 +62,8 @@ func TestReceivedFollowersViaMapIncremental(t *testing.T) {
 	if s.followersNeedsRebuild.Load() {
 		t.Fatal("rebuild flag not cleared by the empty read")
 	}
-	// Mark pending again so the next ingest rebuilds inside its own
-	// transaction, exercising the dirty-ingest path.
+	// Mark pending again so the next ingests defer maintenance; the
+	// rebuild on the read below must observe the stored events.
 	s.followersNeedsRebuild.Store(true)
 
 	putOwnTargetedFollow(t, s, alice, 1, 5e9, mePub)

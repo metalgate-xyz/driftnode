@@ -371,7 +371,7 @@ type Session struct {
 	store *store.Store
 	log   *slog.Logger
 	zens  func() []ZenRef // known zen refs to offer; may be nil
-	onZen func(ZenRef)    // called for each learned zen ref; may be nil
+	onZen func([]ZenRef)  // called with the refs of one zen-exchange message; may be nil
 
 	// key is this node's Ed25519 keypair, used to authenticate the session.
 	// Set with SetKey before RunInitiator/RunListener; a nil key means no
@@ -423,9 +423,10 @@ func (s *Session) SetOnMerge(fn func(se *core.SignedEvent, inserted bool)) { s.o
 // offer during zen exchange.
 func (s *Session) SetZenSource(fn func() []ZenRef) { s.zens = fn }
 
-// SetZenSink sets the callback invoked for each zen ref learned from the
-// remote side.
-func (s *Session) SetZenSink(fn func(ZenRef)) { s.onZen = fn }
+// SetZenSink sets the callback invoked with the zen refs learned from one
+// zen-exchange message. The batch is one maintenance unit for the caller,
+// so learning a full offer costs one pass, not one per ref.
+func (s *Session) SetZenSink(fn func([]ZenRef)) { s.onZen = fn }
 
 // SetCursorSource sets the function that returns the stored high-water
 // timestamp for (author, log). Without it, pulls request full logs.
@@ -741,9 +742,7 @@ func (s *Session) serveWithZens(r io.Reader, w io.Writer) (int, error) {
 			served++
 		case MsgZens:
 			if s.onZen != nil {
-				for _, ref := range zensFromMsg(msg) {
-					s.onZen(ref)
-				}
+				s.onZen(zensFromMsg(msg))
 			}
 			// Reply with our zens once.
 			if !sentZens {
@@ -782,9 +781,7 @@ func (s *Session) exchangeZens(r io.Reader, w io.Writer) error {
 		}
 		if msg.Kind == MsgZens {
 			if s.onZen != nil {
-				for _, ref := range zensFromMsg(msg) {
-					s.onZen(ref)
-				}
+				s.onZen(zensFromMsg(msg))
 			}
 			return nil
 		}

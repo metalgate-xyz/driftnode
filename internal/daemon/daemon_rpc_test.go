@@ -209,7 +209,7 @@ func TestZensShowsIdentityWithoutName(t *testing.T) {
 	}
 	peerID := peerKP.Identity()
 
-	d.learnZenRef(syncproto.ZenRef{Token: "tok-no-name", Identity: peerID})
+	d.learnZenRefs([]syncproto.ZenRef{{Token: "tok-no-name", Identity: peerID}})
 
 	cl, _ := testClient(t, sock)
 	resp, err := cl.Zens(context.Background(), &driftnodepb.Empty{})
@@ -1240,7 +1240,7 @@ func TestFetchLikesRPCOverTransport(t *testing.T) {
 			bobTok: {serverStore: bobStore, serverKey: bobKP, logger: logger},
 		},
 	})
-	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
+	d.learnZenRefs([]syncproto.ZenRef{{Token: bobTok, Identity: bobKP.Identity()}})
 
 	// Before fetch: feed shows the post with zero likes.
 	feed, err := cl.FeedPage(context.Background(), &driftnodepb.FeedPageReq{Mine: true})

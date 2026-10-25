@@ -81,7 +81,7 @@ func postAuthorIndex(tx *bolt.Tx, follows []core.Identity) map[core.EventID]core
 			continue
 		}
 		_ = authorBucket.ForEach(func(k, v []byte) error {
-			if len(k) != 32 {
+			if !isEventKey(k) {
 				return nil
 			}
 			var se core.SignedEvent

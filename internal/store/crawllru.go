@@ -53,8 +53,11 @@ func (s *Store) CrawlVisitedCount() (int, error) {
 // never evicted: its remote bucket also holds synced PostLog events that
 // are not cache, so the eviction skips it and re-inserts it at the hot end.
 // Evicting a non-followed identity deletes its remote bucket, removing
-// any follower-map record and Follow evidence together, and marks the
-// follower map for rebuild.
+// any follower-map record and Follow evidence together. When the map is
+// current, the destroyed record is accounted for on the spot, so eviction
+// stays O(1) and never forces a from-zero rebuild; while a rebuild is
+// pending, the stale map is rebuilt from the surviving events on the next
+// follower read.
 func (s *Store) EvictCrawl(maxCache int) error {
 	if maxCache <= 0 {
 		return nil
@@ -66,11 +69,22 @@ func (s *Store) EvictCrawl(maxCache int) error {
 				return decodeFollowState(fsb.Get(id)).followed
 			},
 			func(id []byte) {
-				_ = tx.Bucket(bucketRemote).DeleteBucket(id)
-				// The author bucket held the follower-map record and
-				// its Follow evidence together; both are gone, so the
-				// follower count is stale until the next rebuild.
-				s.followersNeedsRebuild.Store(true)
+				remote := tx.Bucket(bucketRemote)
+				ab := remote.Bucket(id)
+				if !s.followersNeedsRebuild.Load() && ab != nil {
+					ownPub, err := ownPubkeyInTx(tx)
+					if err != nil {
+						return
+					}
+					// The bucket held the follower-map record and
+					// its Follow evidence together; both are gone.
+					if ab.Get(followMapKey(ownPub)) != nil {
+						if n := followerCountTx(tx); n > 0 {
+							_ = putFollowerCountTx(tx, n-1)
+						}
+					}
+				}
+				_ = remote.DeleteBucket(id)
 			})
 	})
 }

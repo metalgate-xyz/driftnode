@@ -59,16 +59,29 @@ func (s *Store) LearnToken(token string, when int64) error {
 	if token == "" {
 		return nil
 	}
+	return s.LearnTokens([]string{token}, when)
+}
+
+// LearnTokens records a batch of discovered zen tokens in one transaction:
+// each token is touched, then one eviction pass runs to cap. One commit per
+// batch keeps a full zen-exchange offer cheap regardless of how many tokens
+// it carries.
+func (s *Store) LearnTokens(tokens []string, when int64) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
-		if err := tokenLRU.touch(tx, []byte(token), when); err != nil {
-			return err
+		for _, tok := range tokens {
+			if tok == "" {
+				continue
+			}
+			if err := tokenLRU.touch(tx, []byte(tok), when); err != nil {
+				return err
+			}
 		}
 		return tokenLRU.evictToCap(tx, maxTokenCache, when, tokenKeep(tx), nil)
 	})
 }
 
-// KnownTokens returns every tracked token, hottest last. Enumerated for zen
-// exchange offers and for rehydrating the in-memory zen map on restart.
+// KnownTokens returns every tracked token. Enumerated for zen exchange
+// offers and for rehydrating the in-memory zen map on restart.
 func (s *Store) KnownTokens() ([]string, error) {
 	var out []string
 	err := s.db.View(func(tx *bolt.Tx) error {

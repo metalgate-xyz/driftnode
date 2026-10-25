@@ -1749,7 +1749,7 @@ func (d *Daemon) knownRefsList() []syncproto.ZenRef {
 		} else if p, ok := d.zens[tok]; ok {
 			// Discovered zen: no routing binding, but the exchange that
 			// learned this token may have carried identity/name hints
-			// that learnZenRef stored on the zen entry. Forward them so
+			// that learnZenRefs stored on the zen entry. Forward them so
 			// names propagate transitively beyond followed zens.
 			ref.Identity = core.Identity(p.Identity)
 			ref.Name = p.Name
@@ -1769,51 +1769,65 @@ func (d *Daemon) learnToken(token string) error {
 	return d.store.LearnToken(token, time.Now().UnixNano())
 }
 
-// learnZenRef records a zen ref learned through zen exchange. The token is
-// added to the persisted token LRU (for zen-exchange offers and dedup) and
-// the zens map (for display), but NOT to the auto-dial set, so it is not
-// auto-dialed. When the ref carries an identity, it seeds the crawler so
-// the ProfileLog is fetched authoritatively on the next crawl, and the
-// name hint is stored for display until the crawl confirms it. Dialing a
+// learnZenRefs records the zen refs learned from one zen-exchange message.
+// The tokens go into the persisted token LRU in a single batch (for
+// zen-exchange offers and dedup); the zens map (for display) is updated
+// per ref, but entries are NOT added to the auto-dial set, so they are not
+// auto-dialed. When a ref carries an identity, it seeds the crawler so the
+// ProfileLog is fetched authoritatively on the next crawl, and the name
+// hint is stored for display until the crawl confirms it. Dialing a
 // discovered zen requires explicit intent: a follow by token or a
 // follow-resolved dial.
-func (d *Daemon) learnZenRef(ref syncproto.ZenRef) {
-	if ref.Token == "" {
-		return
-	}
-	if err := d.learnToken(ref.Token); err != nil {
-		d.logger.Warn("learn zen token failed", "token", ref.Token, "err", err)
-	}
-	d.mu.Lock()
-	_, exists := d.zens[ref.Token]
-	d.mu.Unlock()
-	if !exists {
-		d.upsertZen(ref.Token, "native_zen", "discovered")
-	}
-	if ref.Identity != "" {
-		// Seed the crawler so the signed ProfileLog is fetched on the
-		// next crawl, confirming the name hint authoritatively.
-		d.mu.Lock()
-		if d.crawler != nil {
-			if id, err := core.ParseIdentity(string(ref.Identity)); err == nil {
-				d.crawler.Seed(id)
-			}
+func (d *Daemon) learnZenRefs(refs []syncproto.ZenRef) {
+	tokens := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		if ref.Token == "" {
+			continue
 		}
-		d.mu.Unlock()
-		// Record the identity on the zen entry so it displays even
-		// before the crawl fetches the name. A token can arrive first
-		// as a bare token and later pick up an identity hint from
-		// another exchange, so update even when the token was already
-		// known. Only set the name when the ref carries one, so an
-		// identity-only ref does not clobber a name learned earlier.
-		d.mu.Lock()
-		if p, ok := d.zens[ref.Token]; ok {
-			p.Identity = string(ref.Identity)
-			if ref.Name != "" {
-				p.Name = ref.Name
-			}
+		tokens = append(tokens, ref.Token)
+	}
+	if len(tokens) > 0 {
+		if err := d.store.LearnTokens(tokens, time.Now().UnixNano()); err != nil {
+			d.logger.Warn("learn zen tokens failed", "count", len(tokens), "err", err)
 		}
+	}
+	for _, ref := range refs {
+		if ref.Token == "" {
+			continue
+		}
+		d.mu.Lock()
+		_, exists := d.zens[ref.Token]
 		d.mu.Unlock()
+		if !exists {
+			d.upsertZen(ref.Token, "native_zen", "discovered")
+		}
+		if ref.Identity != "" {
+			// Seed the crawler so the signed ProfileLog is fetched on
+			// the next crawl, confirming the name hint
+			// authoritatively.
+			d.mu.Lock()
+			if d.crawler != nil {
+				if id, err := core.ParseIdentity(string(ref.Identity)); err == nil {
+					d.crawler.Seed(id)
+				}
+			}
+			d.mu.Unlock()
+			// Record the identity on the zen entry so it displays even
+			// before the crawl fetches the name. A token can arrive
+			// first as a bare token and later pick up an identity hint
+			// from another exchange, so update even when the token was
+			// already known. Only set the name when the ref carries one,
+			// so an identity-only ref does not clobber a name learned
+			// earlier.
+			d.mu.Lock()
+			if p, ok := d.zens[ref.Token]; ok {
+				p.Identity = string(ref.Identity)
+				if ref.Name != "" {
+					p.Name = ref.Name
+				}
+			}
+			d.mu.Unlock()
+		}
 	}
 }
 
@@ -2405,7 +2419,7 @@ func (d *Daemon) fetchFollowersOverConn(ctx context.Context, conn net.Conn, kp *
 func (d *Daemon) runSession(conn net.Conn, initiator bool, zenID *core.Identity) (int, error) {
 	sess := syncproto.NewSession(d.store, d.logger)
 	sess.SetZenSource(d.knownRefsList)
-	sess.SetZenSink(d.learnZenRef)
+	sess.SetZenSink(d.learnZenRefs)
 	sess.SetCursorSource(d.store.SyncCursor)
 	sess.SetCursorSink(d.store.PutSyncCursor)
 	// Collect Post/Reply events and inbound Follows merged during this

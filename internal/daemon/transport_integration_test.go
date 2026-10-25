@@ -297,8 +297,8 @@ func TestResolvePendingFollowsDoesNotSyncNonFollowedZen(t *testing.T) {
 	// Learn Bob's and Carol's tokens via zen exchange (as would happen
 	// during a real sync). Both become known tokens, but neither is
 	// auto-dialed until intent (a follow) exists.
-	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
-	d.learnZenRef(syncproto.ZenRef{Token: carolTok, Identity: carolKP.Identity()})
+	d.learnZenRefs([]syncproto.ZenRef{{Token: bobTok, Identity: bobKP.Identity()}})
+	d.learnZenRefs([]syncproto.ZenRef{{Token: carolTok, Identity: carolKP.Identity()}})
 
 	// Drive one assess pass directly. In the redesigned scheduler the
 	// assess thread owns pending-follow resolution: it probes known tokens,

@@ -42,7 +42,7 @@ func TestFollowByPubkeyFlipsConnected(t *testing.T) {
 	}
 
 	// Bob is discovered via zen exchange: token is known, status "discovered".
-	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity()})
+	d.learnZenRefs([]syncproto.ZenRef{{Token: bobTok, Identity: bobKP.Identity()}})
 
 	// Follow bob by pubkey (as the TUI does with z.identity). The follow
 	// call itself dials and flips status; no separate sync round needed.
@@ -109,7 +109,7 @@ func TestFollowByPubkeyPreservesName(t *testing.T) {
 	}
 
 	// Bob is discovered with a name hint.
-	d.learnZenRef(syncproto.ZenRef{Token: bobTok, Identity: bobKP.Identity(), Name: "bob"})
+	d.learnZenRefs([]syncproto.ZenRef{{Token: bobTok, Identity: bobKP.Identity(), Name: "bob"}})
 
 	if _, err := SendRequest(sock, "follow", map[string]any{
 		"target":     bobKP.Identity().String(),

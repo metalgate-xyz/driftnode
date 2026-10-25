@@ -501,15 +501,14 @@ func (s *Store) PutRemoteEvent(se *core.SignedEvent, seq uint64) (bool, error) {
 		}
 		if se.Event.Log == core.ProfileLog {
 			// Follower-map maintenance for a newly stored Follow or
-			// Unfollow targeting the local identity. When a rebuild is
-			// pending, the rebuild itself replays this event from zero,
-			// so the incremental apply is skipped.
-			if s.followersNeedsRebuild.Load() {
-				if err := s.rebuildFollowersTx(tx); err != nil {
-					return fmt.Errorf("rebuild follower map: %w", err)
+			// Unfollow targeting the local identity. While a rebuild is
+			// pending, maintenance is deferred: the event is stored
+			// either way, and the first follower read rebuilds from
+			// zero over the stored events, so nothing is lost.
+			if !s.followersNeedsRebuild.Load() {
+				if err := applyFollowMapTx(tx, se); err != nil {
+					return fmt.Errorf("follower map: %w", err)
 				}
-			} else if err := applyFollowMapTx(tx, se); err != nil {
-				return fmt.Errorf("follower map: %w", err)
 			}
 		}
 		if se.Event.Log != core.PostLog {
@@ -773,13 +772,10 @@ func (s *Store) PutCrawledProfile(author core.Identity, se *core.SignedEvent) er
 			return err
 		}
 		// Follower-map maintenance: a crawled Follow targeting this zen
-		// counts as an observation, same as the sync path.
-		if se.Event.Log == core.ProfileLog {
-			if s.followersNeedsRebuild.Load() {
-				if err := s.rebuildFollowersTx(tx); err != nil {
-					return fmt.Errorf("rebuild follower map: %w", err)
-				}
-			} else if err := applyFollowMapTx(tx, se); err != nil {
+		// counts as an observation, deferred the same way as the sync
+		// path while a rebuild is pending.
+		if se.Event.Log == core.ProfileLog && !s.followersNeedsRebuild.Load() {
+			if err := applyFollowMapTx(tx, se); err != nil {
 				return fmt.Errorf("follower map: %w", err)
 			}
 		}

@@ -113,6 +113,10 @@ func rebuildFollowerMapTx(tx *bolt.Tx, ownPub [32]byte) (uint64, error) {
 		id core.EventID
 	}
 	winning := make(map[core.Identity]edge)
+	// Replay in (timestamp, sequence) order, admitting new unique
+	// followers until the cap. An over-cap author is dropped without
+	// flagging, matching the incremental ingest path: the author side
+	// cannot enforce in-degree.
 	for i := range sorted {
 		se := &sorted[i]
 		if se.Event.Follow.TargetPubkey != ownPub {
@@ -120,6 +124,10 @@ func rebuildFollowerMapTx(tx *bolt.Tx, ownPub [32]byte) (uint64, error) {
 		}
 		switch se.Event.Kind {
 		case core.KindFollow:
+			if _, known := winning[se.Author]; !known &&
+				uint64(len(winning)) >= followerCap {
+				continue
+			}
 			id, err := se.ID()
 			if err != nil {
 				continue
@@ -148,8 +156,8 @@ func rebuildFollowerMapTx(tx *bolt.Tx, ownPub [32]byte) (uint64, error) {
 
 // rebuildFollowersTx recomputes the follower map inside the caller's
 // transaction and clears the pending-rebuild flag, so the flag decision and
-// the rebuild serialize with every other write. Called from ingest paths
-// (before applying a ProfileLog event) and from the follower reads.
+// the rebuild serialize with every other write. Called from the follower
+// reads; ingest paths never rebuild.
 func (s *Store) rebuildFollowersTx(tx *bolt.Tx) error {
 	ownPub, err := ownPubkeyInTx(tx)
 	if err != nil {
@@ -163,9 +171,9 @@ func (s *Store) rebuildFollowersTx(tx *bolt.Tx) error {
 }
 
 // ensureFollowersReady rebuilds the follower map when a rebuild is pending.
-// The lazy rebuild runs on the first follower read after open (or after a
-// crawl eviction), so a session that never reads followers never pays the
-// scan.
+// The lazy rebuild runs on the first follower read after open, so a session
+// that never reads followers never pays the scan. Crawl evictions keep the
+// map correct incrementally, so they never re-arm the flag.
 func (s *Store) ensureFollowersReady() error {
 	if !s.followersNeedsRebuild.Load() {
 		return nil
