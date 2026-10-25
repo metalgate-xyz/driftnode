@@ -53,11 +53,12 @@ func (s *Store) CrawlVisitedCount() (int, error) {
 // never evicted: its remote bucket also holds synced PostLog events that
 // are not cache, so the eviction skips it and re-inserts it at the hot end.
 // Evicting a non-followed identity deletes its remote bucket, removing
-// any follower-map record and Follow evidence together. When the map is
-// current, the destroyed record is accounted for on the spot, so eviction
-// stays O(1) and never forces a from-zero rebuild; while a rebuild is
-// pending, the stale map is rebuilt from the surviving events on the next
-// follower read.
+// any follower-map record and Follow evidence together, and cleans the
+// existence and reference index entries of every event the bucket held,
+// like PruneRemotePosts. When the map is current, the destroyed record is
+// accounted for on the spot, so eviction stays O(1) and never forces a
+// from-zero rebuild; while a rebuild is pending, the stale map is rebuilt
+// from the surviving events on the next follower read.
 func (s *Store) EvictCrawl(maxCache int) error {
 	if maxCache <= 0 {
 		return nil
@@ -71,7 +72,10 @@ func (s *Store) EvictCrawl(maxCache int) error {
 			func(id []byte) {
 				remote := tx.Bucket(bucketRemote)
 				ab := remote.Bucket(id)
-				if !s.followersNeedsRebuild.Load() && ab != nil {
+				if ab == nil {
+					return
+				}
+				if !s.followersNeedsRebuild.Load() {
 					ownPub, err := ownPubkeyInTx(tx)
 					if err != nil {
 						return
@@ -84,6 +88,7 @@ func (s *Store) EvictCrawl(maxCache int) error {
 						}
 					}
 				}
+				cleanEventIndexesForBucket(tx, ab)
 				_ = remote.DeleteBucket(id)
 			})
 	})

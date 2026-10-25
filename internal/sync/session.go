@@ -105,10 +105,11 @@ func (s *Server) handleFollowers(w io.Writer) error {
 	return WriteMsg(w, NewDone())
 }
 
-// handleLikeRequest responds to a MsgLikeRequest by scanning held PostLogs
-// for Like events matching any of the requested target IDs, sending them in
-// batches followed by Done. Each event is self-certifying: the requester
-// verifies the liker's signature, so the relaying zen cannot fabricate likes.
+// handleLikeRequest responds to a MsgLikeRequest with the Like events held
+// locally whose target matches any of the requested target IDs, sending
+// them in batches followed by Done. Each event is self-certifying: the
+// requester verifies the liker's signature, so the relaying zen cannot
+// fabricate likes.
 func (s *Server) handleLikeRequest(req *LikeRequest, w io.Writer) error {
 	if req == nil {
 		return fmt.Errorf("like request missing payload")

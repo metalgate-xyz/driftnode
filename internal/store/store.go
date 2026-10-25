@@ -1480,64 +1480,56 @@ func (s *Store) OutboundLikes() (map[core.Identity]int, error) {
 }
 
 // LikesForPosts returns Like events held locally whose target_id matches any
-// of the given event IDs. Scans own PostLog and all crawled PostLogs. Used by
-// the on-demand like fetch: a zen asks "do you have likes for these posts?"
-// and this returns whatever it holds. Results are best-effort, not
-// authoritative.
+// of the given event IDs. The reference index (bucketEventRef), maintained at
+// ingest and through cascade delete and prune, maps each target to the
+// events referencing it, so the lookup touches only the requested targets
+// and their referencing events. Used by the on-demand like fetch: a zen asks
+// "do you have likes for these posts?" and this returns whatever it holds.
+// Results are best-effort, not authoritative; their order is unspecified.
 func (s *Store) LikesForPosts(targetIDs []core.EventID) ([]core.SignedEvent, error) {
-	wanted := make(map[[32]byte]bool, len(targetIDs))
+	wanted := make(map[core.EventID]bool, len(targetIDs))
 	for _, id := range targetIDs {
 		wanted[id] = true
 	}
 	var out []core.SignedEvent
 	err := s.db.View(func(tx *bolt.Tx) error {
-		// Own PostLog.
-		if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
-			if err := ownBucket.ForEach(func(k, v []byte) error {
-				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return fmt.Errorf("decode own event at %x: %w", k, err)
-				}
-				if se.Event.Kind == core.KindLike && se.Event.Like != nil && wanted[se.Event.Like.TargetID] {
-					var evID core.EventID
-					copy(evID[:], k)
-					if _, _, exists := eventExists(tx, evID); exists {
-						out = append(out, se)
-					}
-				}
-				return nil
-			}); err != nil {
+		ownPub, err := ownPubkeyInTx(tx)
+		if err != nil {
+			return err
+		}
+		ownID := core.IdentityFromPubkey(ed25519.PublicKey(ownPub[:]))
+		remote := tx.Bucket(bucketRemote)
+		for target := range wanted {
+			refs, err := refsByTarget(tx, target)
+			if err != nil {
 				return err
 			}
-		}
-		// All remote PostLogs.
-		remote := tx.Bucket(bucketRemote)
-		if remote == nil {
-			return nil
-		}
-		return remote.ForEach(func(author, _ []byte) error {
-			authorBucket := remote.Bucket(author)
-			if authorBucket == nil {
-				return nil
-			}
-			return authorBucket.ForEach(func(k, v []byte) error {
-				if !isEventKey(k) {
-					return nil
+			for _, ref := range refs {
+				if ref.kind != core.KindLike {
+					continue
+				}
+				var evBytes []byte
+				if ref.author == ownID {
+					if lb := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); lb != nil {
+						evBytes = lb.Get(ref.sourceID[:])
+					}
+				} else if ab := remote.Bucket([]byte(ref.author)); ab != nil {
+					evBytes = ab.Get(ref.sourceID[:])
+				}
+				if evBytes == nil {
+					continue
 				}
 				var se core.SignedEvent
-				if err := core.CanonicalDecode(v, &se); err != nil {
-					return nil
+				if err := core.CanonicalDecode(evBytes, &se); err != nil {
+					continue
 				}
-				if se.Event.Kind == core.KindLike && se.Event.Like != nil && wanted[se.Event.Like.TargetID] {
-					var evID core.EventID
-					copy(evID[:], k)
-					if _, _, exists := eventExists(tx, evID); exists {
-						out = append(out, se)
-					}
+				if se.Event.Kind != core.KindLike || se.Event.Like == nil || se.Event.Like.TargetID != target {
+					continue
 				}
-				return nil
-			})
-		})
+				out = append(out, se)
+			}
+		}
+		return nil
 	})
 	return out, err
 }

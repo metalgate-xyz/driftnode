@@ -129,6 +129,24 @@ func indexRefRemoveSource(tx *bolt.Tx, sourceID core.EventID) error {
 	return nil
 }
 
+// cleanEventIndexesForBucket removes the existence and reference index
+// entries of every event held in a remote author bucket, before the bucket
+// itself is deleted. Used by crawl eviction, which drops a whole author at
+// once, unlike prune's per-event removal. The bucket's non-event keys
+// (follower-map records) are skipped: they have no index entries.
+func cleanEventIndexesForBucket(tx *bolt.Tx, ab *bolt.Bucket) {
+	_ = ab.ForEach(func(k, _ []byte) error {
+		if !isEventKey(k) {
+			return nil
+		}
+		var evID core.EventID
+		copy(evID[:], k)
+		_ = indexEventRemove(tx, evID)
+		_ = indexRefRemoveSource(tx, evID)
+		return nil
+	})
+}
+
 // cascadeDelete removes the target from the existence index and drops every
 // event referencing it from the store, cleaning up their index entries. The
 // target's bytes stay in the bucket so a re-receive is skipped by the

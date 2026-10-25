@@ -34,11 +34,12 @@ func envInt(key string, def int) int {
 // not per benchmark. Built once per process: different scales require
 // separate go test invocations with their own DRIFTNODE_BENCH_* values.
 var (
-	benchOnce    sync.Once
-	benchStore   *Store
-	benchAliceKP *core.KeyPair
-	benchPeers   []*core.KeyPair
-	benchPosts   int
+	benchOnce        sync.Once
+	benchStore       *Store
+	benchAliceKP     *core.KeyPair
+	benchPeers       []*core.KeyPair
+	benchPosts       int
+	benchLikeTargets []core.EventID
 )
 
 func benchSetup(b *testing.B) {
@@ -109,12 +110,16 @@ func benchSetup(b *testing.B) {
 		}
 		// Outbound likes: every sixth peer, alice signs a Like targeting
 		// that peer's post into her own PostLog. The weight gatherer
-		// resolves the like target author against the crawled post.
+		// resolves the like target author against the crawled post. The
+		// liked post IDs are kept as the LikesForPosts benchmark's query
+		// targets, so the query matches real stored likes.
+		likeTargets := make([]core.EventID, 0, (n+5)/6)
 		for i := 0; i < n; i += 6 {
 			peerPostID, err := firstPostID(peers[i])
 			if err != nil {
 				b.Fatalf("peer post id %d: %v", i, err)
 			}
+			likeTargets = append(likeTargets, peerPostID)
 			like, err := aliceKP.Sign(core.Event{
 				Kind:      core.KindLike,
 				Log:       core.PostLog,
@@ -136,6 +141,7 @@ func benchSetup(b *testing.B) {
 		benchAliceKP = aliceKP
 		benchPeers = peers
 		benchPosts = n
+		benchLikeTargets = likeTargets
 	})
 }
 
@@ -229,6 +235,19 @@ func BenchmarkStoreAllPostsOneTx(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		if _, err := benchStore.AllPostsOneTx(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// BenchmarkStoreLikesForPosts measures the on-demand like fetch over the
+// reference index: the cost is O(likes on the requested targets), not
+// O(stored events), so it stays flat as the store grows.
+func BenchmarkStoreLikesForPosts(b *testing.B) {
+	benchSetup(b)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := benchStore.LikesForPosts(benchLikeTargets); err != nil {
 			b.Fatal(err)
 		}
 	}

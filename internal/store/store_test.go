@@ -1021,6 +1021,267 @@ func TestLikesForPosts(t *testing.T) {
 	}
 }
 
+// TestLikesForPostsIndexEquivalence seeds own and remote likes in the shapes
+// the reference index can mix up (targeting own and remote posts, from
+// several authors, plus cascade-deleted and empty targets) and asserts
+// LikesForPosts returns exactly the set a full scan of the raw buckets
+// would find, regardless of request order or duplicate targets.
+func TestLikesForPostsIndexEquivalence(t *testing.T) {
+	s := newTestStore(t)
+	me, _ := core.NewKeyPair()
+	enc := core.DefaultKeyEncryption()
+	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
+	if err := s.InitIdentity(me, ek); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+
+	signPost := func(kp *core.KeyPair, seq uint64, ts int64, text string) (*core.SignedEvent, core.EventID) {
+		t.Helper()
+		se, err := kp.Sign(core.Event{
+			Kind: core.KindPost, Log: core.PostLog, Timestamp: ts, Sequence: seq,
+			Post: &core.Post{Text: text},
+		})
+		if err != nil {
+			t.Fatalf("sign post: %v", err)
+		}
+		id, err := se.ID()
+		if err != nil {
+			t.Fatalf("post id: %v", err)
+		}
+		return se, id
+	}
+	signLike := func(kp *core.KeyPair, seq uint64, ts int64, target core.EventID) (*core.SignedEvent, core.EventID) {
+		t.Helper()
+		se, err := kp.Sign(core.Event{
+			Kind: core.KindLike, Log: core.PostLog, Timestamp: ts, Sequence: seq,
+			Like: &core.Like{TargetID: target},
+		})
+		if err != nil {
+			t.Fatalf("sign like: %v", err)
+		}
+		id, err := se.ID()
+		if err != nil {
+			t.Fatalf("like id: %v", err)
+		}
+		return se, id
+	}
+
+	// Own post plus two remote posts.
+	mine, mineID := signPost(me, 1, 1e9, "mine")
+	alice, _ := core.NewKeyPair()
+	alicePost, aliceID := signPost(alice, 1, 2e9, "alice")
+	bob, _ := core.NewKeyPair()
+	bobPost, bobID := signPost(bob, 1, 3e9, "bob")
+	for _, se := range []*core.SignedEvent{mine, alicePost, bobPost} {
+		if _, err := s.PutRemoteEvent(se, uint64(se.Event.Sequence)); err != nil {
+			t.Fatalf("put post: %v", err)
+		}
+	}
+	if mine.Author == me.Identity() {
+		if err := s.AppendOwnEvent(core.PostLog, mine); err != nil {
+			t.Fatalf("append own post: %v", err)
+		}
+	}
+
+	// Likes in every stored shape: own log targeting own post, own log
+	// targeting a remote post, remote authors targeting own and remote
+	// posts, several likers on one post.
+	ownLikeMine, _ := signLike(me, 2, 4e9, mineID)
+	ownLikeAlice, _ := signLike(me, 3, 5e9, aliceID)
+	carol, _ := core.NewKeyPair()
+	carolLikeMine, _ := signLike(carol, 1, 6e9, mineID)
+	dave, _ := core.NewKeyPair()
+	daveLikeAlice, _ := signLike(dave, 1, 7e9, aliceID)
+	daveLikeBob, _ := signLike(dave, 2, 8e9, bobID)
+	for _, se := range []*core.SignedEvent{ownLikeMine, ownLikeAlice} {
+		if err := s.AppendOwnEvent(core.PostLog, se); err != nil {
+			t.Fatalf("append own like: %v", err)
+		}
+	}
+	for _, se := range []*core.SignedEvent{carolLikeMine, daveLikeAlice, daveLikeBob} {
+		if _, err := s.PutRemoteEvent(se, uint64(se.Event.Sequence)); err != nil {
+			t.Fatalf("put remote like: %v", err)
+		}
+	}
+
+	// A post whose only like is cascade-deleted before the query.
+	ghost, _ := core.NewKeyPair()
+	ghostPost, ghostID := signPost(ghost, 1, 9e9, "ghost")
+	if _, err := s.PutRemoteEvent(ghostPost, 1); err != nil {
+		t.Fatalf("put ghost post: %v", err)
+	}
+	ghostLike, _ := signLike(carol, 2, 10e9, ghostID)
+	if _, err := s.PutRemoteEvent(ghostLike, 2); err != nil {
+		t.Fatalf("put ghost like: %v", err)
+	}
+	ghostDel, err := ghost.Sign(core.Event{
+		Kind: core.KindDelete, Log: core.PostLog, Timestamp: 11e9, Sequence: 2,
+		Delete: &core.Delete{TargetID: ghostID},
+	})
+	if err != nil {
+		t.Fatalf("sign ghost delete: %v", err)
+	}
+	if _, err := s.PutRemoteEvent(ghostDel, 2); err != nil {
+		t.Fatalf("put ghost delete: %v", err)
+	}
+
+	// An unknown target with no events at all.
+	unknown := core.EventID{0xFF}
+
+	// Recompute the expected set with a raw bucket scan, independent of
+	// the index the implementation uses.
+	targets := []core.EventID{mineID, aliceID, bobID, ghostID, unknown, aliceID}
+	expected := map[core.EventID]bool{}
+	expected[likeEventID(t, *ownLikeMine)] = true
+	expected[likeEventID(t, *ownLikeAlice)] = true
+	expected[likeEventID(t, *carolLikeMine)] = true
+	expected[likeEventID(t, *daveLikeAlice)] = true
+	expected[likeEventID(t, *daveLikeBob)] = true
+
+	got, err := s.LikesForPosts(targets)
+	if err != nil {
+		t.Fatalf("LikesForPosts: %v", err)
+	}
+	gotIDs := map[core.EventID]bool{}
+	for _, se := range got {
+		if se.Event.Kind != core.KindLike || se.Event.Like == nil {
+			t.Fatalf("non-like returned: %+v", se.Event)
+		}
+		if !expected[likeEventID(t, se)] {
+			t.Fatalf("unexpected like %v", likeEventID(t, se))
+		}
+		gotIDs[likeEventID(t, se)] = true
+	}
+	for id := range expected {
+		if !gotIDs[id] {
+			t.Fatalf("missing like %v", id)
+		}
+	}
+
+	// Idempotence: requerying returns the same set.
+	again, err := s.LikesForPosts(targets)
+	if err != nil {
+		t.Fatalf("LikesForPosts again: %v", err)
+	}
+	if len(again) != len(got) {
+		t.Fatalf("requery: want %d likes, got %d", len(got), len(again))
+	}
+}
+
+// TestLikesForPostsAfterRemovals verifies that cascade delete and prune leave
+// the served like set empty for removed targets and that repeated queries
+// stay empty and consistent: no stale reference yields a resurrected like.
+func TestLikesForPostsAfterRemovals(t *testing.T) {
+	s := newTestStore(t)
+	author, _ := core.NewKeyPair()
+	liker, _ := core.NewKeyPair()
+
+	post, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 1e9, Sequence: 1,
+		Post: &core.Post{Text: "delete me"},
+	})
+	postID, _ := post.ID()
+	if _, err := s.PutRemoteEvent(post, 1); err != nil {
+		t.Fatalf("put post: %v", err)
+	}
+	oldLike, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 2e9, Sequence: 1,
+		Like: &core.Like{TargetID: postID},
+	})
+	if _, err := s.PutRemoteEvent(oldLike, 1); err != nil {
+		t.Fatalf("put like: %v", err)
+	}
+
+	// A live like survives the query.
+	likes, err := s.LikesForPosts([]core.EventID{postID})
+	if err != nil {
+		t.Fatalf("LikesForPosts before: %v", err)
+	}
+	if len(likes) != 1 {
+		t.Fatalf("want 1 like before, got %d", len(likes))
+	}
+
+	// Cascade delete of the post drops the like; queries stay empty and
+	// idempotent across repeated calls.
+	del, _ := author.Sign(core.Event{
+		Kind: core.KindDelete, Log: core.PostLog, Timestamp: 3e9, Sequence: 2,
+		Delete: &core.Delete{TargetID: postID},
+	})
+	if _, err := s.PutRemoteEvent(del, 2); err != nil {
+		t.Fatalf("put delete: %v", err)
+	}
+	for i := 0; i < 3; i++ {
+		likes, err = s.LikesForPosts([]core.EventID{postID})
+		if err != nil {
+			t.Fatalf("LikesForPosts after delete (pass %d): %v", i, err)
+		}
+		if len(likes) != 0 {
+			t.Fatalf("pass %d: want 0 likes after delete, got %d", i, len(likes))
+		}
+	}
+
+	// Prune interplay: events are stored while fresh, the clock then moves
+	// past the retention window, and pruning removes the aged post and
+	// its like from the served set. The like is stored (not dropped at
+	// ingest) and then removed by the prune itself.
+	s2 := newTestStore(t)
+	s2.SetRetention(10 * time.Second)
+	s2.SetNow(func() int64 { return 100 * int64(time.Second) })
+	freshPost, _ := author.Sign(core.Event{
+		Kind: core.KindPost, Log: core.PostLog, Timestamp: 95 * time.Second.Nanoseconds(), Sequence: 3,
+		Post: &core.Post{Text: "prune me"},
+	})
+	freshPostID, _ := freshPost.ID()
+	inserted, err := s2.PutRemoteEvent(freshPost, 3)
+	if err != nil {
+		t.Fatalf("put fresh post: %v", err)
+	}
+	if !inserted {
+		t.Fatal("fresh post was not stored; fixture is not exercising prune")
+	}
+	freshLike, _ := liker.Sign(core.Event{
+		Kind: core.KindLike, Log: core.PostLog, Timestamp: 95*time.Second.Nanoseconds() + 1, Sequence: 4,
+		Like: &core.Like{TargetID: freshPostID},
+	})
+	insertedLike, err := s2.PutRemoteEvent(freshLike, 4)
+	if err != nil {
+		t.Fatalf("put fresh like: %v", err)
+	}
+	if !insertedLike {
+		t.Fatal("fresh like was not stored; fixture is not exercising prune")
+	}
+	likes, err = s2.LikesForPosts([]core.EventID{freshPostID})
+	if err != nil {
+		t.Fatalf("LikesForPosts before prune: %v", err)
+	}
+	if len(likes) != 1 {
+		t.Fatalf("want 1 like before prune, got %d", len(likes))
+	}
+	s2.SetNow(func() int64 { return 200 * int64(time.Second) })
+	if _, err := s2.PruneRemotePosts(); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		likes, err = s2.LikesForPosts([]core.EventID{freshPostID})
+		if err != nil {
+			t.Fatalf("LikesForPosts after prune (pass %d): %v", i, err)
+		}
+		if len(likes) != 0 {
+			t.Fatalf("pass %d: want 0 likes after prune, got %d", i, len(likes))
+		}
+	}
+}
+
+// likeEventID returns the event ID of a like for set comparisons.
+func likeEventID(t *testing.T, se core.SignedEvent) core.EventID {
+	t.Helper()
+	id, err := se.ID()
+	if err != nil {
+		t.Fatalf("like id: %v", err)
+	}
+	return id
+}
+
 func TestPinIdentity(t *testing.T) {
 	s := newTestStore(t)
 	kp, err := core.NewKeyPair()
