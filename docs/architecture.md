@@ -121,11 +121,32 @@ Ownership split that everything else builds on: authored (own) events are
 never pruned and are the backup-critical set; everything remote is cache that
 re-arrives by sync or crawling after any loss.
 
-## 3. Store layout (internal/store/store.go)
+## 3. Store layout (internal/store)
 
-One bbolt file. Buckets are created by `initBuckets` at `Open`. `DRIFTNODE_RETENTION`
-(a Go duration, e.g. "720h") sets the PostLog retention window; empty or zero
-disables retention.
+One bbolt file, opened by `Open` (store.go), which also creates the buckets via
+`initBuckets`. The package is split by concern:
+
+| File | Contents |
+|---|---|
+| store.go | open, bucket definitions, media, retention, clock |
+| keys.go | the sealed keypair, identity, transport key, verified identities |
+| routing.go | `routing` and `cursor` buckets |
+| ownlogs.go | own-log appends (set union) |
+| events.go | signing and appending own events, follow/unfollow, post enqueueing |
+| ratelimit.go | the author-side post queue and its one-per-second-per-kind limit |
+| ingest.go | remote ingest, the follow-state cache, crawled reads |
+| reads.go | feed, follow graph, followers, likes |
+| eventindex.go | `eventindex` and `eventref`, delete cascade |
+| followermap.go | the derived follower map |
+| tidyprofile.go | tidy-at-write for the own ProfileLog |
+| crawllru.go, tokenlru.go, lru.go | the two bucket-pair LRUs and their shared machinery |
+| weights.go | weight computation over the follow graph |
+| prune.go | retention pruning |
+| backup.go | backup export and import |
+| helpers.go | shared key encodings and the sequence counter |
+
+`DRIFTNODE_RETENTION` (a Go duration, e.g. "720h") sets the PostLog retention
+window; empty or zero disables retention.
 
 | Bucket | Key | Value | Meaning |
 |---|---|---|---|
@@ -522,12 +543,27 @@ one well-connected zen finds the rest of the network transitively.
    bucket also holds synced PostLog events. A concurrent `Run` is rejected;
    on-demand triggers coalesce through the single-slot `crawlNow` channel.
 
-## 9. Daemon (internal/daemon/daemon.go)
+## 9. Daemon (internal/daemon)
 
 The daemon is the long-running node. It owns the store while running, serves
 gRPC on the Unix socket, and runs four background routines sharing one context
-cancelled by `Stop`: crawl loop, assess loop, head lane, tail lane. On
-`Start` it seeds the head/tail split from persisted weights without dialing
+cancelled by `Stop`: crawl loop, assess loop, head lane, tail lane. The
+package is split by concern:
+
+| File | Contents |
+|---|---|
+| daemon.go | lifecycle (`Start`, `Stop`), shared state, tailcat transport |
+| server_grpc.go | the gRPC surface over the handlers |
+| handlers.go | signing handlers, key custody, follow/unfollow logic |
+| feed.go | the feed cache and its invalidation |
+| pubsub.go | subscriber push and the per-subscriber queue |
+| scheduler.go | assess loop, head and tail lanes, sync dialing, the split |
+| crawl.go | crawl loop, crawl fetching, like fetching |
+| zens.go | the zen table, token learning, zen exchange glue |
+| bootstrapping.go | dialing bootstrap seeds, deferred seed follows |
+| protoconv.go | proto conversion helpers |
+
+On `Start` it seeds the head/tail split from persisted weights without dialing
 (`seedSplit`), rehydrates the zens map from `routing` and the token LRU
 (`rehydrateZens`), and triggers an immediate crawl. On `Stop` it prunes remote
 PostLog events past the retention window.
@@ -623,7 +659,9 @@ not collide. The daemon gRPC surface is defined in `internal/proto/driftnode.pro
 Verify/Unverify, Pin/Unpin, Follow/Unfollow, Unlock/Lock, Sync, Stop, Status,
 RotateKey, Subscribe, FeedPage, Prune).
 
-Command classes, verified from root.go:
+Command classes, verified from the cobra definitions in internal/cli, where
+root.go carries the root command, init, unlock, lock, sync, and the shared
+helpers, and each remaining command family lives in its own cmd_*.go file:
 
 - Online-first with offline fallback: post, like, feed, follow, unfollow,
   follows, followers, whoami, profile, detail, prune, and the zens mark
