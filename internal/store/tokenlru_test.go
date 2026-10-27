@@ -15,7 +15,7 @@ func TestTokenLRUEvictsColdest(t *testing.T) {
 	s := newTestStore(t)
 
 	const n = 10
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tok := fmt.Sprintf("tok-%d", i)
 		if err := s.LearnToken(tok, int64(i)); err != nil {
 			t.Fatalf("LearnToken %d: %v", i, err)
@@ -66,7 +66,7 @@ func TestTokenLRUKeepUnderPressure(t *testing.T) {
 	}
 
 	// Fill past the cap with pressure tokens; the keep classes survive.
-	for i := 0; i < 12000; i++ {
+	for i := range 12000 {
 		if err := s.LearnToken(fmt.Sprintf("flood-%05d", i), int64(1000+i)); err != nil {
 			t.Fatalf("LearnToken flood %d: %v", i, err)
 		}

@@ -254,10 +254,10 @@ func TestCrawlLRUEvictsColdest(t *testing.T) {
 	const total = 10
 	kps := make([]*core.KeyPair, total)
 	profiles := make(map[core.Identity][]core.SignedEvent, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		kps[i], _ = core.NewKeyPair()
 	}
-	for i := 0; i < total-1; i++ {
+	for i := range total - 1 {
 		profiles[kps[i].Identity()] = []core.SignedEvent{
 			makeFollowEvent(t, kps[i], 1, kps[i+1].Identity()),
 		}

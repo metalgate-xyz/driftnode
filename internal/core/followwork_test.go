@@ -196,7 +196,7 @@ func BenchmarkFollowWork(b *testing.B) {
 	const spread = 8
 	authors := make([][32]byte, spread)
 	targets := make([][32]byte, spread)
-	for i := 0; i < spread; i++ {
+	for i := range spread {
 		authors[i] = [32]byte{byte(i + 1)}
 		authors[i][31] = 0xAA
 		targets[i] = [32]byte{byte(i + 1)}
@@ -206,8 +206,7 @@ func BenchmarkFollowWork(b *testing.B) {
 		b.Run(fmt.Sprintf("bits=%d", bits), func(b *testing.B) {
 			SetFollowWorkBitsForTesting(int32(bits))
 			defer SetFollowWorkBitsForTesting(defaultFollowWorkBits)
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
+			for i := 0; b.Loop(); i++ {
 				if _, err := GrindFollowNonce(authors[i%spread], targets[i%spread]); err != nil {
 					b.Fatalf("grind: %v", err)
 				}

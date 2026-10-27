@@ -221,10 +221,7 @@ func panelWidth(w int) int { return w }
 
 func panelHeight(h int) int {
 	// title (1) + tab bar (1) + compose (1) + status (1).
-	body := h - 4
-	if body < 4 {
-		body = 4
-	}
+	body := max(h-4, 4)
 	return body
 }
 

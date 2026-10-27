@@ -1163,7 +1163,7 @@ func TestLikesForPostsAfterRemovals(t *testing.T) {
 	if _, err := s.PutRemoteEvent(del, 2); err != nil {
 		t.Fatalf("put delete: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		likes, err = s.LikesForPosts([]core.EventID{postID})
 		if err != nil {
 			t.Fatalf("LikesForPosts after delete (pass %d): %v", i, err)
@@ -1214,7 +1214,7 @@ func TestLikesForPostsAfterRemovals(t *testing.T) {
 	if _, err := s2.PruneRemotePosts(); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		likes, err = s2.LikesForPosts([]core.EventID{freshPostID})
 		if err != nil {
 			t.Fatalf("LikesForPosts after prune (pass %d): %v", i, err)
@@ -1408,7 +1408,7 @@ func TestRecomputeWeights(t *testing.T) {
 	// Bob posts 3 times, and I like each post once. One Like per author
 	// per post is enforced, so accumulating per-author like counts
 	// requires distinct target posts.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		post, _ := bob.Sign(core.Event{
 			Kind: core.KindPost, Log: core.PostLog, Timestamp: int64(1+i) * 1e9, Sequence: uint64(1 + i),
 			Post: &core.Post{Text: "bob's post"},
@@ -1781,7 +1781,7 @@ func TestAuthorRateLimitQueueFull(t *testing.T) {
 		t.Fatalf("first post: %v", err)
 	}
 	channels = append(channels, ch)
-	for i := 0; i < rateQueueCap; i++ {
+	for i := range rateQueueCap {
 		ch, err := s.EnqueuePostEvent(kp, core.PostLog, core.Event{
 			Kind: core.KindPost,
 			Post: &core.Post{Text: "queued"},
@@ -1919,7 +1919,7 @@ func TestReceiverProfileLogExemptFromRate(t *testing.T) {
 	follower, _ := core.NewKeyPair()
 	target, _ := core.NewKeyPair()
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		nonce, err := core.GrindFollowNonce([32]byte(follower.Public), [32]byte(target.Public))
 		if err != nil {
 			t.Fatalf("grind nonce %d: %v", i, err)
@@ -2742,7 +2742,7 @@ func bulkOwnFollows(t *testing.T, s *Store, kp *core.KeyPair, n int) {
 		if err != nil {
 			return err
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			target, _ := core.NewKeyPair()
 			nonce, err := core.GrindFollowNonce([32]byte(kp.Public), [32]byte(target.Public))
 			if err != nil {
@@ -2792,7 +2792,7 @@ func bulkRemoteFollows(t *testing.T, s *Store, author *core.KeyPair, n int) {
 		if err != nil {
 			return err
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			target, _ := core.NewKeyPair()
 			nonce, err := core.GrindFollowNonce([32]byte(author.Public), [32]byte(target.Public))
 			if err != nil {
@@ -2938,7 +2938,7 @@ func TestReceiverFollowCapNormalAuthorStored(t *testing.T) {
 	core.SetFollowWorkBitsForTesting(1)
 	defer core.SetFollowWorkBitsForTesting(core.DefaultFollowWorkBits())
 
-	for i := 0; i < 150; i++ {
+	for i := range 150 {
 		target, _ := core.NewKeyPair()
 		se := signRemoteFollowFor(t, author, uint64(i+1), int64(5e9+i), [32]byte(target.Public))
 		inserted, err := s.PutRemoteEvent(se, uint64(i+1))
@@ -3024,7 +3024,7 @@ func TestTidyRepeatedFollowLeavesOneEvent(t *testing.T) {
 	target, _ := core.NewKeyPair()
 	tgt := [32]byte(target.Public)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
 			Kind:   core.KindFollow,
 			Follow: &core.Follow{TargetPubkey: tgt},
@@ -3059,7 +3059,7 @@ func TestTidyRepeatedUnfollowLeavesOneEvent(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("follow: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, _, err := s.SignAndAppend(kp, core.ProfileLog, core.Event{
 			Kind:   core.KindUnfollow,
 			Follow: &core.Follow{TargetPubkey: tgt},

@@ -82,7 +82,7 @@ func TestTabClickSwitch(t *testing.T) {
 	m.layout()
 
 	// Walk every tab and click the middle of its label.
-	for want := 0; want < len(tabs); want++ {
+	for want := range tabs {
 		// Find an X inside this tab by scanning columns on the tab row.
 		var x int
 		found := false

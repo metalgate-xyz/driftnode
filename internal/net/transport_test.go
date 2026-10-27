@@ -114,7 +114,7 @@ func TestDialerCachesClients(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		conn, err := d.Dial(ctx, listener.Addr())
 		if err != nil {
 			t.Fatalf("dial %d: %v", i, err)
@@ -172,7 +172,7 @@ func TestDialerCacheEvictsColdest(t *testing.T) {
 			l.Close()
 		}
 	}()
-	for i := 0; i < want; i++ {
+	for i := range want {
 		l, err := NewListenerWithKey(func(net.Conn) {}, logger, nil)
 		if err != nil {
 			t.Fatalf("listener %d: %v", i, err)
@@ -247,17 +247,15 @@ func TestDialerConcurrentColdDialsKeepOneClient(t *testing.T) {
 	const dials = 2
 	var wg sync.WaitGroup
 	errCh := make(chan error, dials)
-	for i := 0; i < dials; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range dials {
+		wg.Go(func() {
 			conn, err := d.Dial(ctx, listener.Addr())
 			if err != nil {
 				errCh <- err
 				return
 			}
 			conn.Close()
-		}()
+		})
 	}
 	wg.Wait()
 	close(errCh)

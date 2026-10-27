@@ -72,10 +72,7 @@ func (s *Server) handleRequest(req *Request, w io.Writer) error {
 	}
 	const batchSize = 64
 	for i := 0; i < len(events); i += batchSize {
-		end := i + batchSize
-		if end > len(events) {
-			end = len(events)
-		}
+		end := min(i+batchSize, len(events))
 		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
 			return fmt.Errorf("write events: %w", err)
 		}
@@ -94,10 +91,7 @@ func (s *Server) handleFollowers(w io.Writer) error {
 	}
 	const batchSize = 64
 	for i := 0; i < len(events); i += batchSize {
-		end := i + batchSize
-		if end > len(events) {
-			end = len(events)
-		}
+		end := min(i+batchSize, len(events))
 		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
 			return fmt.Errorf("write followers: %w", err)
 		}
@@ -120,10 +114,7 @@ func (s *Server) handleLikeRequest(req *LikeRequest, w io.Writer) error {
 	}
 	const batchSize = 64
 	for i := 0; i < len(events); i += batchSize {
-		end := i + batchSize
-		if end > len(events) {
-			end = len(events)
-		}
+		end := min(i+batchSize, len(events))
 		if err := WriteMsg(w, NewEvents(events[i:end])); err != nil {
 			return fmt.Errorf("write likes: %w", err)
 		}
@@ -680,10 +671,7 @@ func (s *Session) advanceCursor(log core.LogName, prevAfter, maxTS int64) {
 	if maxTS == 0 {
 		return
 	}
-	c := maxTS - cursorSkewWindow.Nanoseconds()
-	if c < prevAfter {
-		c = prevAfter
-	}
+	c := max(maxTS-cursorSkewWindow.Nanoseconds(), prevAfter)
 	if err := s.cursorSink(s.cursorZen, log, c); err != nil {
 		s.log.Warn("sync: cursor advance failed", "err", err)
 	}

@@ -81,7 +81,7 @@ func startSubscribeDaemon(t *testing.T) (*daemon.Daemon, string) {
 func drainMsgs(t *testing.T, cmd tea.Cmd, done func(tea.Msg) bool) []tea.Msg {
 	t.Helper()
 	var out []tea.Msg
-	for i := 0; i < 1000; i++ {
+	for range 1000 {
 		msg := cmd()
 		out = append(out, msg)
 		if done(msg) {

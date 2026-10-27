@@ -36,7 +36,7 @@ func TestStatusLineAlwaysVisible(t *testing.T) {
 				for _, n := range []int{0, 1, 3, 7, 20, 100} {
 					m := simModel(t, w, h, id, n)
 					// Check every tab.
-					for tab := 0; tab < len(tabs); tab++ {
+					for tab := range tabs {
 						m.activeTab = tab
 						out := m.View().Content
 						lines := strings.Split(out, "\n")

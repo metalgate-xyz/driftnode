@@ -160,7 +160,7 @@ func TestFollowerMapRebuildMatchesReplay(t *testing.T) {
 	}
 	rng := rand.New(rand.NewSource(1))
 	var expectedLog []core.SignedEvent
-	for i := 0; i < 120; i++ {
+	for i := range 120 {
 		follower := kps[rng.Intn(followers)]
 		follow := rng.Intn(3) != 0
 		ts := int64(5e9 + i)
@@ -456,7 +456,7 @@ func TestFollowerMapLargeInputReadCost(t *testing.T) {
 	}
 	err := s.db.Update(func(tx *bolt.Tx) error {
 		fb := tx.Bucket(bucketRemote)
-		for i := 0; i < authors; i++ {
+		for i := range authors {
 			ab, err := fb.CreateBucketIfNotExists([]byte(kps[i].Identity()))
 			if err != nil {
 				return err
@@ -466,7 +466,7 @@ func TestFollowerMapLargeInputReadCost(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			for j := 0; j < eventsPer; j++ {
+			for j := range eventsPer {
 				se, err := kps[i].Sign(core.Event{
 					Kind:      core.KindFollow,
 					Log:       core.ProfileLog,

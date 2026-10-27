@@ -951,7 +951,7 @@ func TestSubscribeSnapshotFeedIsCapped(t *testing.T) {
 	name := d.displayName(ownID)
 	// Seed the feed directly instead of via the Post RPC: the rate limiter
 	// (1/sec per kind) would make 300 sequential posts take minutes.
-	for i := 0; i < feedPageLimit+50; i++ {
+	for i := range feedPageLimit + 50 {
 		se, err := kp.Sign(core.Event{
 			Kind:      core.KindPost,
 			Log:       core.PostLog,
@@ -1056,7 +1056,7 @@ func TestSubscribeNoLostEvents(t *testing.T) {
 	defer d.Stop()
 
 	const iterations = 10
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		postCl, _ := testClient(t, sock)
 		text := "race-post-" + itoa10(i)
 

@@ -178,7 +178,7 @@ func TestBootstrapUnlockDoesNotDoubleFollow(t *testing.T) {
 	}
 	defer d.Stop()
 
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		if _, err := SendRequest(sock, "unlock", map[string]any{"passphrase": "pass"}); err != nil {
 			t.Fatalf("unlock: %v", err)
 		}

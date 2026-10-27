@@ -6,7 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"sort"
+	"slices"
 	"testing"
 	"time"
 
@@ -115,14 +115,14 @@ func TestHeadLaneFastSkipUnderUnreachableTail(t *testing.T) {
 	tails := make([]peer, numTail)
 	working := make(map[string]pipeTransport, numHeads)
 	block := make(map[string]bool, numTail)
-	for i := 0; i < numHeads; i++ {
+	for i := range numHeads {
 		hs, hkp, htext, _ := peerServer(t, "head"+string(rune('A'+i)))
 		tok := "tok-head-" + string(rune('A'+i))
 		heads[i] = peer{kp: hkp, text: htext, tok: tok}
 		setupBoundFollow(t, aliceStore, aliceKP, hkp, tok, true)
 		working[tok] = pipeTransport{serverStore: hs, serverKey: hkp, logger: logger}
 	}
-	for i := 0; i < numTail; i++ {
+	for i := range numTail {
 		ts, tkp, ttext, _ := peerServer(t, "tail"+string(rune('A'+i)))
 		tok := "tok-tail-" + string(rune('A'+i))
 		tails[i] = peer{kp: tkp, text: ttext, tok: tok}
@@ -281,10 +281,10 @@ func TestPromoteDemote(t *testing.T) {
 	// actual ranking, so a split that ignores weights (and orders by
 	// identity) is caught when the after-state assertion contradicts it.
 	headBefore, tailBefore := d.snapshotSplit()
-	if !containsID(headBefore, bobKP.Identity()) {
+	if !slices.Contains(headBefore, bobKP.Identity()) {
 		t.Fatalf("bob should start in head: head=%v tail=%v", headBefore, tailBefore)
 	}
-	if !containsID(tailBefore, carolKP.Identity()) {
+	if !slices.Contains(tailBefore, carolKP.Identity()) {
 		t.Fatalf("carol should start in tail: head=%v tail=%v", headBefore, tailBefore)
 	}
 
@@ -313,23 +313,13 @@ func TestPromoteDemote(t *testing.T) {
 	// so carol enters the head and bob is demoted to the tail.
 	d.assess(context.Background())
 	head, tail := d.snapshotSplit()
-	if !containsID(head, carolKP.Identity()) {
+	if !slices.Contains(head, carolKP.Identity()) {
 		t.Fatalf("carol should be promoted to head: head=%v tail=%v", head, tail)
 	}
-	if !containsID(tail, bobKP.Identity()) {
+	if !slices.Contains(tail, bobKP.Identity()) {
 		t.Fatalf("bob should be demoted to tail: head=%v tail=%v", head, tail)
 	}
 	_ = carolText
-}
-
-// containsID reports whether the identity slice contains id.
-func containsID(ids []core.Identity, id core.Identity) bool {
-	for _, v := range ids {
-		if v == id {
-			return true
-		}
-	}
-	return false
 }
 
 // TestSplitHeadTailKPolicy asserts splitHeadTail over the K policy's edge
@@ -346,7 +336,7 @@ func TestSplitHeadTailKPolicy(t *testing.T) {
 		ids = make([]core.Identity, n)
 		weights = make(map[core.Identity]float64, n)
 		routing = make(map[core.Identity]string, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			id := core.Identity(fmt.Sprintf("driftnode:%04d", i))
 			ids[i] = id
 			weights[id] = float64(n - i)
@@ -404,7 +394,7 @@ func TestSplitHeadTailKPolicy(t *testing.T) {
 		ids := make([]core.Identity, n)
 		weights := make(map[core.Identity]float64, n)
 		routing := make(map[core.Identity]string, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			id := core.Identity(fmt.Sprintf("driftnode:%04d", i))
 			ids[i] = id
 			weights[id] = 1.0 // all tied
@@ -417,7 +407,7 @@ func TestSplitHeadTailKPolicy(t *testing.T) {
 		// Identity-string tiebreak: the lexicographically smallest 2 ids
 		// are the head.
 		sortedIDs := append([]core.Identity(nil), ids...)
-		sort.Slice(sortedIDs, func(i, j int) bool { return sortedIDs[i] < sortedIDs[j] })
+		slices.Sort(sortedIDs)
 		for _, id := range head {
 			if id != sortedIDs[0] && id != sortedIDs[1] {
 				t.Errorf("ties: head contains %v, want the two smallest by identity tiebreak", id)

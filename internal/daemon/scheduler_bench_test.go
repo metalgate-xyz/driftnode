@@ -180,17 +180,14 @@ func benchDaemon(b *testing.B) (*Daemon, *benchTransport, *core.KeyPair) {
 		// proportion and the bench exercises fast-skip in both lanes.
 		unreachable := make(map[int]bool, n)
 		if f := driftnodeBenchUnreachable; f > 0 {
-			uc := int(float64(n) * f)
-			if uc > n {
-				uc = n
-			}
+			uc := min(int(float64(n)*f), n)
 			rng := rand.New(rand.NewSource(1))
 			for len(unreachable) < uc {
 				unreachable[rng.Intn(n)] = true
 			}
 		}
 		peerKPs := make([]*core.KeyPair, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			peerKP, err := core.NewKeyPair()
 			if err != nil {
 				b.Fatalf("peer keypair %d: %v", i, err)
@@ -279,7 +276,7 @@ func benchPopulatePosts(b *testing.B, d *Daemon, n int) {
 	if len(peers) == 0 {
 		return
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		peer := peers[i%len(peers)]
 		se, err := peer.Sign(core.Event{
 			Kind:      core.KindPost,
@@ -304,8 +301,7 @@ func BenchmarkRecomputeWeights(b *testing.B) {
 	if err != nil {
 		b.Fatalf("follow graph: %v", err)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := d.store.RecomputeWeights(); err != nil {
 			b.Fatal(err)
 		}
@@ -327,16 +323,14 @@ func BenchmarkSplitHeadTail(b *testing.B) {
 	if err != nil {
 		b.Fatalf("routing: %v", err)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, _ = splitHeadTail(ids, weights, routing)
 	}
 }
 
 func BenchmarkSeedSplit(b *testing.B) {
 	d, _, _ := benchDaemon(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		d.seedSplit()
 	}
 }
@@ -347,8 +341,7 @@ func BenchmarkDeriveSplit(b *testing.B) {
 	if err != nil {
 		b.Fatalf("follow graph: %v", err)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		d.deriveSplit(ids)
 	}
 }
@@ -358,8 +351,7 @@ func BenchmarkHandleFeedPage(b *testing.B) {
 	benchPopulatePosts(b, d, driftnodeBenchPosts)
 	// Invalidate so the first call is a cache miss.
 	d.invalidateFeed()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := d.handleFeedPage(0, false, false); err != nil {
 			b.Fatal(err)
 		}
@@ -374,8 +366,7 @@ func BenchmarkHandleFeedPageCached(b *testing.B) {
 	if _, _, err := d.handleFeedPage(0, false, false); err != nil {
 		b.Fatal(err)
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, _, err := d.handleFeedPage(0, false, false); err != nil {
 			b.Fatal(err)
 		}
@@ -396,8 +387,7 @@ func BenchmarkHeadLanePass(b *testing.B) {
 		b.Skipf("head is empty at driftnodeBenchPeers=%d; raise DRIFTNODE_BENCH_PEERS", driftnodeBenchPeers)
 	}
 	ctx := context.Background()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		head, _ := d.snapshotSplit()
 		if n := d.dialSet(ctx, head, headDialTimeout, headFanout); n == 0 {
 			b.Fatal("head lane dialed nothing")
@@ -415,8 +405,7 @@ func BenchmarkTailLanePass(b *testing.B) {
 		b.Skipf("tail is empty at driftnodeBenchPeers=%d; raise DRIFTNODE_BENCH_PEERS", driftnodeBenchPeers)
 	}
 	ctx := context.Background()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		_, tail := d.snapshotSplit()
 		if n := d.dialSet(ctx, tail, tailDialTimeout, tailFanout); n == 0 {
 			b.Fatal("tail lane dialed nothing")
@@ -430,8 +419,7 @@ func BenchmarkAssessPass(b *testing.B) {
 	}
 	d, _, _ := benchDaemon(b)
 	ctx := context.Background()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		d.assess(ctx)
 	}
 }

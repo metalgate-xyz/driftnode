@@ -67,7 +67,7 @@ func benchSetup(b *testing.B) {
 		}
 		n := driftnodeBenchPeers
 		peers := make([]*core.KeyPair, n)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			peerKP, err := core.NewKeyPair()
 			if err != nil {
 				b.Fatalf("peer keypair %d: %v", i, err)
@@ -170,7 +170,7 @@ func addBenchPosts(b *testing.B, n int) {
 		return
 	}
 	need := n - benchPosts
-	for i := 0; i < need; i++ {
+	for i := range need {
 		peer := benchPeers[(benchPosts+i)%len(benchPeers)]
 		se, err := peer.Sign(core.Event{
 			Kind:      core.KindPost,
@@ -191,8 +191,7 @@ func addBenchPosts(b *testing.B, n int) {
 
 func BenchmarkStoreFollowGraph(b *testing.B) {
 	benchSetup(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := benchStore.FollowGraph(); err != nil {
 			b.Fatal(err)
 		}
@@ -201,8 +200,7 @@ func BenchmarkStoreFollowGraph(b *testing.B) {
 
 func BenchmarkStoreAllRouting(b *testing.B) {
 	benchSetup(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := benchStore.AllRouting(); err != nil {
 			b.Fatal(err)
 		}
@@ -211,8 +209,7 @@ func BenchmarkStoreAllRouting(b *testing.B) {
 
 func BenchmarkStoreWeightedGraph(b *testing.B) {
 	benchSetup(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := benchStore.WeightedGraph(); err != nil {
 			b.Fatal(err)
 		}
@@ -221,8 +218,7 @@ func BenchmarkStoreWeightedGraph(b *testing.B) {
 
 func BenchmarkStoreRecomputeWeights(b *testing.B) {
 	benchSetup(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := benchStore.RecomputeWeights(); err != nil {
 			b.Fatal(err)
 		}
@@ -232,8 +228,7 @@ func BenchmarkStoreRecomputeWeights(b *testing.B) {
 func BenchmarkStoreAllPostsOneTx(b *testing.B) {
 	benchSetup(b)
 	addBenchPosts(b, driftnodeBenchPosts)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := benchStore.AllPostsOneTx(); err != nil {
 			b.Fatal(err)
 		}
@@ -245,8 +240,7 @@ func BenchmarkStoreAllPostsOneTx(b *testing.B) {
 // O(stored events), so it stays flat as the store grows.
 func BenchmarkStoreLikesForPosts(b *testing.B) {
 	benchSetup(b)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		if _, err := benchStore.LikesForPosts(benchLikeTargets); err != nil {
 			b.Fatal(err)
 		}

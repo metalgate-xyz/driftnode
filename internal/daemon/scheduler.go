@@ -190,10 +190,7 @@ func splitHeadTail(ids []core.Identity, weights map[core.Identity]float64, routi
 	// ceiling). Each Dunbar layer is ~3x the one inside it, so a third
 	// keeps the head a true inner circle and leaves the tail real work
 	// rather than putting the whole graph in the fast lane.
-	k := len(entries) / 3
-	if k > maxHeadSize {
-		k = maxHeadSize
-	}
+	k := min(len(entries)/3, maxHeadSize)
 	if k < 1 && len(entries) > 0 {
 		k = 1
 	}
