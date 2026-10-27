@@ -57,49 +57,6 @@ func followGraphIdentities(tx *bolt.Tx) ([]core.Identity, error) {
 	return out, nil
 }
 
-// postAuthorIndex maps every held PostLog event ID (own plus followed
-// identities' remote posts) to its author, within tx. Used to resolve a
-// reply parent or like target to an author in one pass.
-func postAuthorIndex(tx *bolt.Tx, follows []core.Identity) map[core.EventID]core.Identity {
-	authors := make(map[core.EventID]core.Identity)
-	if ownBucket := tx.Bucket(bucketOwn).Bucket([]byte(core.PostLog)); ownBucket != nil {
-		_ = ownBucket.ForEach(func(k, v []byte) error {
-			var se core.SignedEvent
-			if err := core.CanonicalDecode(v, &se); err != nil {
-				return fmt.Errorf("decode own event at %x: %w", k, err)
-			}
-			var id core.EventID
-			copy(id[:], k)
-			authors[id] = se.Author
-			return nil
-		})
-	}
-	remote := tx.Bucket(bucketRemote)
-	for _, id := range follows {
-		authorBucket := remote.Bucket([]byte(id))
-		if authorBucket == nil {
-			continue
-		}
-		_ = authorBucket.ForEach(func(k, v []byte) error {
-			if !isEventKey(k) {
-				return nil
-			}
-			var se core.SignedEvent
-			if err := core.CanonicalDecode(v, &se); err != nil {
-				return nil
-			}
-			if se.Event.Log != core.PostLog {
-				return nil
-			}
-			var evID core.EventID
-			copy(evID[:], k)
-			authors[evID] = se.Author
-			return nil
-		})
-	}
-	return authors
-}
-
 // nextSequence returns the next value for the per-log monotonic sequence
 // counter, advancing it in place. The counter never decreases, even when
 // events are removed from the own log by tidy-at-write: deriving Sequence

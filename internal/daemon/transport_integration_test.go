@@ -91,7 +91,7 @@ func TestDaemonZenSyncOverTransport(t *testing.T) {
 	// Give the async sync round time to complete.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		posts, _ := aliceStore.AllPosts()
+		posts, _ := aliceStore.AllPostsOneTx()
 		if len(posts) >= 1 {
 			break
 		}
@@ -99,7 +99,7 @@ func TestDaemonZenSyncOverTransport(t *testing.T) {
 	}
 
 	// Alice's merged feed must now contain bob's post.
-	posts, err := aliceStore.AllPosts()
+	posts, err := aliceStore.AllPostsOneTx()
 	if err != nil {
 		t.Fatalf("AllPosts: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestDaemonSyncNowOverTransport(t *testing.T) {
 	// Wait for the first sync round.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		posts, _ := aliceStore.AllPosts()
+		posts, _ := aliceStore.AllPostsOneTx()
 		if len(posts) >= 1 {
 			break
 		}
@@ -172,7 +172,7 @@ func TestDaemonSyncNowOverTransport(t *testing.T) {
 
 	// Wait a moment for the background sync to land, then verify bob's post.
 	time.Sleep(200 * time.Millisecond)
-	posts, _ := aliceStore.AllPosts()
+	posts, _ := aliceStore.AllPostsOneTx()
 	found := false
 	for _, se := range posts {
 		if se.Author == bobKP.Identity() && se.Event.Post != nil && se.Event.Post.Text == "bob again" {

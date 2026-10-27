@@ -193,6 +193,31 @@ func (s *Server) fetchOwnEvents(req *Request) ([]core.SignedEvent, error) {
 	return out, nil
 }
 
+// routeSyncedEvent stores a synced event into the local store: an event
+// authored by the local identity is re-added to the own bucket as a plain
+// set union (the signature proves it was legitimately signed by our key);
+// any other author's event goes through the remote ingest gate. onMerge,
+// when non-nil, observes the event and whether it was newly stored. Own
+// events report inserted=true: the set union has no inserted signal.
+func routeSyncedEvent(s *store.Store, se *core.SignedEvent, onMerge func(*core.SignedEvent, bool)) (bool, error) {
+	ownID, _, err := s.Identity()
+	if err != nil {
+		return false, err
+	}
+	var inserted bool
+	if se.Author == ownID {
+		err = s.AppendOwnEvent(se.Event.Log, se)
+		inserted = true
+	} else {
+		seq := uint64(se.Event.Sequence)
+		inserted, err = s.PutRemoteEvent(se, seq)
+	}
+	if onMerge != nil {
+		onMerge(se, inserted)
+	}
+	return inserted, err
+}
+
 // Client drives a sync session: it sends requests and receives events,
 // merging them into the local store.
 type Client struct {
@@ -343,19 +368,9 @@ func (c *Client) FetchLikes(r io.Reader, w io.Writer, targetIDs []core.EventID) 
 	}
 }
 
-// routeSyncedEvent stores a synced event into the local store: own events go to
-// the own bucket, crawled events go to the crawl bucket keyed by author.
-// Returns true if the event was newly stored.
+// routeSyncedEvent stores a synced event into the local store.
 func (c *Client) routeSyncedEvent(se *core.SignedEvent) (bool, error) {
-	ownID, _, err := c.store.Identity()
-	if err != nil {
-		return false, err
-	}
-	if se.Author == ownID {
-		return true, c.store.AppendOwnEvent(se.Event.Log, se)
-	}
-	seq := uint64(se.Event.Sequence)
-	return c.store.PutRemoteEvent(se, seq)
+	return routeSyncedEvent(c.store, se, nil)
 }
 
 // Session runs a full bidirectional sync between two zens over a single
@@ -808,20 +823,5 @@ func zensFromMsg(msg *Message) []ZenRef {
 }
 
 func (s *Session) routeSyncedEvent(se *core.SignedEvent) (bool, error) {
-	ownID, _, err := s.store.Identity()
-	if err != nil {
-		return false, err
-	}
-	var inserted bool
-	if se.Author == ownID {
-		err = s.store.AppendOwnEvent(se.Event.Log, se)
-		inserted = true
-	} else {
-		seq := uint64(se.Event.Sequence)
-		inserted, err = s.store.PutRemoteEvent(se, seq)
-	}
-	if s.onMerge != nil {
-		s.onMerge(se, inserted)
-	}
-	return inserted, err
+	return routeSyncedEvent(s.store, se, s.onMerge)
 }

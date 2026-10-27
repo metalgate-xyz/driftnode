@@ -48,65 +48,38 @@ func (s *grpcServer) Whoami(ctx context.Context, _ *driftnodepb.Empty) (*driftno
 	if !ok {
 		return nil, statusErr("no identity")
 	}
-	r := s.d.handleWhoami(id)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	r, err := s.d.handleWhoami(id)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, _ := r.Result.(map[string]any)
-	resp := &driftnodepb.WhoamiResp{Identity: id.String()}
-	if m != nil {
-		if v, ok := m["token"].(string); ok {
-			resp.Token = v
-		}
-		if v, ok := m["stable"].(bool); ok {
-			resp.Stable = v
-		}
-		if v, ok := m["display_name"].(string); ok {
-			resp.DisplayName = v
-		}
-		if v, ok := m["has_avatar"].(bool); ok {
-			resp.HasAvatar = v
-		}
-		if v, ok := m["bio"].(string); ok {
-			resp.Bio = v
-		}
-		if v, ok := m["first_name"].(string); ok {
-			resp.FirstName = v
-		}
-		if v, ok := m["last_name"].(string); ok {
-			resp.LastName = v
-		}
-		if v, ok := m["location"].(string); ok {
-			resp.Location = v
-		}
+	resp := &driftnodepb.WhoamiResp{
+		Identity:    r.Identity.String(),
+		Token:       r.Token,
+		Stable:      r.Stable,
+		DisplayName: r.DisplayName,
+		HasAvatar:   r.HasAvatar,
+		Bio:         r.Bio,
+		FirstName:   r.FirstName,
+		LastName:    r.LastName,
+		Location:    r.Location,
 	}
 	return resp, nil
 }
 
 func (s *grpcServer) Follows(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.IdentitiesResp, error) {
-	r := s.d.handleFollows()
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	follows, err := s.d.handleFollows()
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, ok := r.Result.(map[string]any)
-	if !ok {
-		return &driftnodepb.IdentitiesResp{}, nil
-	}
-	raw, _ := m["follows"].([]*driftnodepb.Identity)
-	return &driftnodepb.IdentitiesResp{Identities: raw}, nil
+	return &driftnodepb.IdentitiesResp{Identities: follows}, nil
 }
 
 func (s *grpcServer) Followers(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.IdentitiesResp, error) {
-	r := s.d.handleFollowers()
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	followers, err := s.d.handleFollowers()
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, ok := r.Result.(map[string]any)
-	if !ok {
-		return &driftnodepb.IdentitiesResp{}, nil
-	}
-	raw, _ := m["followers"].([]*driftnodepb.Identity)
-	return &driftnodepb.IdentitiesResp{Identities: raw}, nil
+	return &driftnodepb.IdentitiesResp{Identities: followers}, nil
 }
 
 func (s *grpcServer) FeedPage(_ context.Context, req *driftnodepb.FeedPageReq) (*driftnodepb.FeedPageResp, error) {
@@ -125,16 +98,11 @@ func (s *grpcServer) Like(ctx context.Context, req *driftnodepb.LikeReq) (*drift
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handleLike(req.PostId, kp)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	id, err := s.d.handleLike(req.PostId, kp)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, _ := r.Result.(map[string]string)
-	resp := &driftnodepb.LikeResp{}
-	if m != nil {
-		resp.EventId = m["event_id"]
-	}
-	return resp, nil
+	return &driftnodepb.LikeResp{EventId: id.String()}, nil
 }
 
 func (s *grpcServer) FetchLikes(ctx context.Context, req *driftnodepb.FetchLikesReq) (*driftnodepb.FetchLikesResp, error) {
@@ -169,16 +137,11 @@ func (s *grpcServer) Post(ctx context.Context, req *driftnodepb.PostReq) (*drift
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handlePost(req.Text, req.ParentId, kp)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	id, err := s.d.handlePost(req.Text, req.ParentId, kp)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, _ := r.Result.(map[string]string)
-	resp := &driftnodepb.PostResp{}
-	if m != nil {
-		resp.EventId = m["event_id"]
-	}
-	return resp, nil
+	return &driftnodepb.PostResp{EventId: id.String()}, nil
 }
 
 func (s *grpcServer) Profile(ctx context.Context, req *driftnodepb.ProfileReq) (*driftnodepb.EmptyResp, error) {
@@ -189,9 +152,8 @@ func (s *grpcServer) Profile(ctx context.Context, req *driftnodepb.ProfileReq) (
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handleProfile(req.Name, kp)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	if _, err := s.d.handleProfile(req.Name, kp); err != nil {
+		return nil, statusErr(err.Error())
 	}
 	return &driftnodepb.EmptyResp{Status: "ok"}, nil
 }
@@ -204,9 +166,8 @@ func (s *grpcServer) Detail(ctx context.Context, req *driftnodepb.DetailReq) (*d
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handleDetail(req.Bio, req.FirstName, req.LastName, req.Location, kp)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	if _, err := s.d.handleDetail(req.Bio, req.FirstName, req.LastName, req.Location, kp); err != nil {
+		return nil, statusErr(err.Error())
 	}
 	return &driftnodepb.EmptyResp{Status: "ok"}, nil
 }
@@ -295,16 +256,11 @@ func (s *grpcServer) Follow(ctx context.Context, req *driftnodepb.FollowReq) (*d
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handleFollow(req.Target, kp)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	followed, err := s.d.handleFollow(req.Target, kp)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, _ := r.Result.(map[string]string)
-	resp := &driftnodepb.FollowResp{}
-	if m != nil {
-		resp.Followed = m["followed"]
-	}
-	return resp, nil
+	return &driftnodepb.FollowResp{Followed: followed.String()}, nil
 }
 
 func (s *grpcServer) Unfollow(ctx context.Context, req *driftnodepb.UnfollowReq) (*driftnodepb.UnfollowResp, error) {
@@ -315,32 +271,22 @@ func (s *grpcServer) Unfollow(ctx context.Context, req *driftnodepb.UnfollowReq)
 	if err != nil {
 		return nil, statusErr(err.Error())
 	}
-	r := s.d.handleUnfollow(req.Target, kp)
-	if r.Error != "" {
-		return nil, statusErr(r.Error)
+	unfollowed, err := s.d.handleUnfollow(req.Target, kp)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, _ := r.Result.(map[string]string)
-	resp := &driftnodepb.UnfollowResp{}
-	if m != nil {
-		resp.Unfollowed = m["unfollowed"]
-	}
-	return resp, nil
+	return &driftnodepb.UnfollowResp{Unfollowed: unfollowed.String()}, nil
 }
 
 func (s *grpcServer) Unlock(ctx context.Context, req *driftnodepb.UnlockReq) (*driftnodepb.UnlockResp, error) {
 	if req.Passphrase == "" {
 		return nil, statusErr("passphrase required")
 	}
-	ur := s.d.handleUnlock(req.Passphrase)
-	if ur.resp.Error != "" {
-		return nil, statusErr(ur.resp.Error)
+	kp, err := s.d.handleUnlock(req.Passphrase)
+	if err != nil {
+		return nil, statusErr(err.Error())
 	}
-	m, _ := ur.resp.Result.(map[string]string)
-	resp := &driftnodepb.UnlockResp{Status: "unlocked"}
-	if m != nil {
-		resp.Identity = m["identity"]
-	}
-	return resp, nil
+	return &driftnodepb.UnlockResp{Status: "unlocked", Identity: kp.Identity().String()}, nil
 }
 
 func (s *grpcServer) Lock(ctx context.Context, _ *driftnodepb.Empty) (*driftnodepb.EmptyResp, error) {
@@ -408,7 +354,7 @@ func (s *grpcServer) Subscribe(_ *driftnodepb.SubscribeReq, srv driftnodepb.Drif
 	// the gap between snapshot build and registration.
 	sub := s.d.addSubscriberProto()
 	defer s.d.removeSubscriber(sub)
-	snap := s.d.snapshotProto()
+	snap := s.d.snapshot()
 	if err := srv.Send(&driftnodepb.Event{Kind: &driftnodepb.Event_Snapshot{Snapshot: snap}}); err != nil {
 		return err
 	}
@@ -448,18 +394,6 @@ func DialClient(socketPath string) (driftnodepb.DriftnodeClient, *grpc.ClientCon
 	}
 	c.Close()
 	return driftnodepb.NewDriftnodeClient(conn), conn, nil
-}
-
-// errToStatus extracts the gRPC status message from an error, returning the
-// original error string if it is not a gRPC status error.
-func errToStatus(err error) string {
-	if err == nil {
-		return ""
-	}
-	if s, ok := status.FromError(err); ok {
-		return s.Message()
-	}
-	return err.Error()
 }
 
 // IsStreamClosed reports whether err indicates the subscribe stream ended

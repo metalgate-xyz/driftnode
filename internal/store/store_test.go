@@ -524,7 +524,7 @@ func TestAllPostsScopedToFollowGraph(t *testing.T) {
 		t.Fatalf("crawl bucket: want 2 authors, got %d", len(ids))
 	}
 
-	posts, err := s.AllPosts()
+	posts, err := s.AllPostsOneTx()
 	if err != nil {
 		t.Fatalf("AllPosts: %v", err)
 	}
@@ -550,11 +550,11 @@ func TestAllPostsScopedToFollowGraph(t *testing.T) {
 	}
 }
 
-// TestAllPostsOneTxMatchesAllPosts verifies the single-transaction feed
-// loader returns the same events as the per-identity loader. AllPosts opens
-// one bbolt transaction per followed identity; AllPostsOneTx collapses them
-// into one, so both must yield the same scoped set.
-func TestAllPostsOneTxMatchesAllPosts(t *testing.T) {
+// TestFeedLoaderScopedToFollowGraph verifies the feed loader returns own
+// posts plus followed identities' posts and nothing else: only identities in
+// the declared follow graph contribute, so events cached from non-followed
+// zens stay out of the feed.
+func TestFeedLoaderScopedToFollowGraph(t *testing.T) {
 	s := newTestStore(t)
 	me, err := core.NewKeyPair()
 	if err != nil {
@@ -602,38 +602,29 @@ func TestAllPostsOneTxMatchesAllPosts(t *testing.T) {
 		t.Fatalf("put alice: %v", err)
 	}
 
-	a, err := s.AllPosts()
+	a, err := s.AllPostsOneTx()
 	if err != nil {
-		t.Fatalf("AllPosts: %v", err)
+		t.Fatalf("read feed: %v", err)
 	}
-	b, err := s.AllPostsOneTx()
-	if err != nil {
-		t.Fatalf("AllPostsOneTx: %v", err)
+	if len(a) != 2 {
+		t.Fatalf("len: feed=%d want 2", len(a))
 	}
-	if len(a) != len(b) {
-		t.Fatalf("len: AllPosts=%d AllPostsOneTx=%d", len(a), len(b))
+	ids := make(map[string]bool, len(a))
+	for _, se := range a {
+		id, _ := se.ID()
+		ids[id.String()] = true
 	}
-	// Order is not guaranteed equal (AllPosts groups by identity; AllPostsOneTx
-	// interleaves), so compare as id sets.
-	ids := func(events []core.SignedEvent) map[string]bool {
-		m := make(map[string]bool, len(events))
-		for _, se := range events {
-			id, _ := se.ID()
-			m[id.String()] = true
-		}
-		return m
-	}
-	ai, bi := ids(a), ids(b)
-	for id := range ai {
-		if !bi[id] {
-			t.Fatalf("AllPostsOneTx missing %s (present in AllPosts)", id)
+	for _, want := range []string{ownPostID(t, ownPost), ownPostID(t, alicePost)} {
+		if !ids[want] {
+			t.Fatalf("feed missing %s (have %v)", want, ids)
 		}
 	}
-	for id := range bi {
-		if !ai[id] {
-			t.Fatalf("AllPostsOneTx has extra %s (absent in AllPosts)", id)
-		}
-	}
+}
+
+func ownPostID(t *testing.T, se *core.SignedEvent) string {
+	t.Helper()
+	id, _ := se.ID()
+	return id.String()
 }
 
 func makeFollowEventFor(t *testing.T, follower *core.KeyPair, seq uint64, target core.Identity) *core.SignedEvent {
@@ -920,191 +911,6 @@ func TestBackupIncludesTransportKey(t *testing.T) {
 	// no passphrase. The CLI layer is responsible for sealing it.
 	if bd.TransportKey != nil {
 		t.Fatal("ExportBackup should not populate TransportKey (CLI encrypts)")
-	}
-}
-
-func TestOutboundReplies(t *testing.T) {
-	s := newTestStore(t)
-	me, _ := core.NewKeyPair()
-	alice, _ := core.NewKeyPair()
-	bob, _ := core.NewKeyPair()
-
-	enc := core.DefaultKeyEncryption()
-	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
-	if err := s.InitIdentity(me, ek); err != nil {
-		t.Fatalf("init: %v", err)
-	}
-
-	// Follow Alice and Bob so they are in the follow graph. The metric
-	// counts replies only toward currently-followed authors.
-	aliceNonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(alice.Public))
-	if err != nil {
-		t.Fatalf("grind alice nonce: %v", err)
-	}
-	followAlice, _ := me.Sign(core.Event{
-		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 50, Sequence: 1,
-		Follow: &core.Follow{TargetPubkey: [32]byte(alice.Public), Nonce: aliceNonce},
-	})
-	if err := s.AppendOwnEvent(core.ProfileLog, followAlice); err != nil {
-		t.Fatalf("append follow alice: %v", err)
-	}
-	bobNonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(bob.Public))
-	if err != nil {
-		t.Fatalf("grind bob nonce: %v", err)
-	}
-	followBob, _ := me.Sign(core.Event{
-		Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 51, Sequence: 2,
-		Follow: &core.Follow{TargetPubkey: [32]byte(bob.Public), Nonce: bobNonce},
-	})
-	if err := s.AppendOwnEvent(core.ProfileLog, followBob); err != nil {
-		t.Fatalf("append follow bob: %v", err)
-	}
-
-	// Alice and Bob each post. Their posts go into the crawl bucket as
-	// synced PostLog events, keyed by author.
-	alicePost, _ := alice.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
-		Post: &core.Post{Text: "alice's post"},
-	})
-	aliceID, _ := alicePost.ID()
-	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
-		t.Fatalf("put alice post: %v", err)
-	}
-	bobPost, _ := bob.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 200, Sequence: 1,
-		Post: &core.Post{Text: "bob's post"},
-	})
-	bobID, _ := bobPost.ID()
-	if _, err := s.PutRemoteEvent(bobPost, 1); err != nil {
-		t.Fatalf("put bob post: %v", err)
-	}
-
-	// I reply to Alice's post twice and Bob's post once.
-	for i, ts := range []int64{300, 400} {
-		reply, _ := me.Sign(core.Event{
-			Kind: core.KindPost, Log: core.PostLog, Timestamp: ts, Sequence: uint64(i + 1),
-			Post: &core.Post{Text: "my reply", ParentID: aliceID},
-		})
-		if err := s.AppendOwnEvent(core.PostLog, reply); err != nil {
-			t.Fatalf("append reply %d: %v", i, err)
-		}
-	}
-	replyToBob, _ := me.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 500, Sequence: 3,
-		Post: &core.Post{Text: "reply to bob", ParentID: bobID},
-	})
-	if err := s.AppendOwnEvent(core.PostLog, replyToBob); err != nil {
-		t.Fatalf("append reply to bob: %v", err)
-	}
-
-	// A top-level post (no parent) should not count as a reply.
-	topPost, _ := me.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 600, Sequence: 4,
-		Post: &core.Post{Text: "top-level"},
-	})
-	if err := s.AppendOwnEvent(core.PostLog, topPost); err != nil {
-		t.Fatalf("append top post: %v", err)
-	}
-
-	counts, err := s.OutboundReplies()
-	if err != nil {
-		t.Fatalf("OutboundReplies: %v", err)
-	}
-	if counts[alice.Identity()] != 2 {
-		t.Fatalf("alice: want 2 replies, got %d", counts[alice.Identity()])
-	}
-	if counts[bob.Identity()] != 1 {
-		t.Fatalf("bob: want 1 reply, got %d", counts[bob.Identity()])
-	}
-}
-
-func TestOutboundRepliesEmpty(t *testing.T) {
-	s := newTestStore(t)
-	me, _ := core.NewKeyPair()
-	enc := core.DefaultKeyEncryption()
-	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
-	if err := s.InitIdentity(me, ek); err != nil {
-		t.Fatalf("init: %v", err)
-	}
-	counts, err := s.OutboundReplies()
-	if err != nil {
-		t.Fatalf("OutboundReplies: %v", err)
-	}
-	if len(counts) != 0 {
-		t.Fatalf("want empty, got %d", len(counts))
-	}
-}
-
-func TestOutboundLikes(t *testing.T) {
-	s := newTestStore(t)
-	me, _ := core.NewKeyPair()
-	alice, _ := core.NewKeyPair()
-	bob, _ := core.NewKeyPair()
-
-	enc := core.DefaultKeyEncryption()
-	ek, _ := enc.Encrypt(me.Private, []byte("pw"))
-	if err := s.InitIdentity(me, ek); err != nil {
-		t.Fatalf("init: %v", err)
-	}
-
-	// Follow Alice and Bob so they are in the follow graph.
-	for _, target := range [][]byte{alice.Public, bob.Public} {
-		nonce, err := core.GrindFollowNonce([32]byte(me.Public), [32]byte(target))
-		if err != nil {
-			t.Fatalf("grind nonce: %v", err)
-		}
-		follow, _ := me.Sign(core.Event{
-			Kind: core.KindFollow, Log: core.ProfileLog, Timestamp: 50, Sequence: 1,
-			Follow: &core.Follow{TargetPubkey: [32]byte(target), Nonce: nonce},
-		})
-		if err := s.AppendOwnEvent(core.ProfileLog, follow); err != nil {
-			t.Fatalf("append follow: %v", err)
-		}
-	}
-
-	// Alice and Bob each post. Their posts go into the crawl bucket.
-	alicePost, _ := alice.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 100, Sequence: 1,
-		Post: &core.Post{Text: "alice's post"},
-	})
-	aliceID, _ := alicePost.ID()
-	if _, err := s.PutRemoteEvent(alicePost, 1); err != nil {
-		t.Fatalf("put alice post: %v", err)
-	}
-	bobPost, _ := bob.Sign(core.Event{
-		Kind: core.KindPost, Log: core.PostLog, Timestamp: 200, Sequence: 1,
-		Post: &core.Post{Text: "bob's post"},
-	})
-	bobID, _ := bobPost.ID()
-	if _, err := s.PutRemoteEvent(bobPost, 1); err != nil {
-		t.Fatalf("put bob post: %v", err)
-	}
-
-	// I like Alice's post once and Bob's post once.
-	likeAlice, _ := me.Sign(core.Event{
-		Kind: core.KindLike, Log: core.PostLog, Timestamp: 300, Sequence: 1,
-		Like: &core.Like{TargetID: aliceID},
-	})
-	if err := s.AppendOwnEvent(core.PostLog, likeAlice); err != nil {
-		t.Fatalf("append like alice: %v", err)
-	}
-	likeBob, _ := me.Sign(core.Event{
-		Kind: core.KindLike, Log: core.PostLog, Timestamp: 400, Sequence: 2,
-		Like: &core.Like{TargetID: bobID},
-	})
-	if err := s.AppendOwnEvent(core.PostLog, likeBob); err != nil {
-		t.Fatalf("append like bob: %v", err)
-	}
-
-	counts, err := s.OutboundLikes()
-	if err != nil {
-		t.Fatalf("OutboundLikes: %v", err)
-	}
-	if counts[alice.Identity()] != 1 {
-		t.Fatalf("alice: want 1 like, got %d", counts[alice.Identity()])
-	}
-	if counts[bob.Identity()] != 1 {
-		t.Fatalf("bob: want 1 like, got %d", counts[bob.Identity()])
 	}
 }
 
